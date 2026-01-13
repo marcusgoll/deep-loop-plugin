@@ -1,0 +1,93 @@
+{
+  "name": "deep-loop",
+  "version": "5.0.0",
+  "description": "Autonomous deep development loop with 10 edge case handlers and CI/CD integration",
+  "author": "Marcus Gollahon",
+  "commands": [],
+  "skills": {
+    "deep": {
+      "description": "Enter deep craftsman mode with deterministic PLAN -> BUILD -> REVIEW -> FIX loop. Auto-triages complexity and uses Internal Ralph v4.0 for parallel task execution.",
+      "prompt_file": "skills/deep.md",
+      "invocable": true
+    },
+    "deep-cleanup": {
+      "description": "Manually clean up stale temp files from deep loop sessions",
+      "prompt_file": "skills/deep-cleanup.md",
+      "invocable": true
+    },
+    "start-ralph": {
+      "description": "Create PRD backlog and enter ralph mode for autonomous task processing",
+      "prompt_file": "skills/start-ralph.md",
+      "invocable": true
+    },
+    "cancel-ralph": {
+      "description": "Cancel ralph mode by completing/skipping all PRD tasks",
+      "prompt_file": "skills/cancel-ralph.md",
+      "invocable": true
+    }
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/stop-hook-v2.js\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/session-start-hook.js\"",
+            "timeout": 5000
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": {
+          "tool_name": "Edit"
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-use-hook.js\"",
+            "timeout": 10000
+          }
+        ]
+      },
+      {
+        "matcher": {
+          "tool_name": "Write"
+        },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-use-hook.js\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  },
+  "subagents": {
+    "code-simplifier": {
+      "description": "Simplifies code after BUILD phase - removes complexity. Invoke via Task tool.",
+      "prompt_file": "src/subagents/code-simplifier.md"
+    },
+    "verify-app": {
+      "description": "E2E verification before COMPLETE - browser or CLI testing.",
+      "prompt_file": "src/subagents/verify-app.md"
+    },
+    "run-verification": {
+      "description": "Background verification agent for quality checks.",
+      "prompt_file": "src/subagents/run-verification.md"
+    }
+  }
+}
