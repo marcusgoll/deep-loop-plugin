@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 /**
- * Deep Loop Stop Hook v2.0 - Complete Edge Case Coverage
+ * Deep Loop Stop Hook v2.1 - Complete Edge Case Coverage
  *
- * Handles all 10 edge cases:
+ * Handles edge cases:
  * 1. Infinite loop prevention - Hard iteration limit with blocking
  * 2. Staleness detection - 8hr threshold, auto-cleanup
  * 3. Incomplete work on exit - Test + Git verification
@@ -14,13 +14,18 @@
  * 8. Parallel task coordination - Lock file mechanism
  * 9. Verification blindness fix - E2E verification reminder
  * 10. Stuck approach detection - User escalation after N failures
+ * 11. RLM cost tracking - Sub-call limits
+ * 12. Active CI polling - Polls CI status for 10 min, blocks on failure
+ * 13. Completion summary - Session stats on exit
  */
 
 import fs from 'fs';
 import path from 'path';
+import { execSync } from 'child_process';
 
 // File paths
 const STATE_FILE = '.deep/state.json';
+const SUMMARY_FILE = '.deep/summary.json';
 const PLAN_FILE = '.deep/plan.md';
 const ISSUES_FILE = '.deep/issues.json';
 const TASK_FILE = '.deep/task.md';
@@ -33,12 +38,18 @@ const LOCK_FILE = '.deep/agent.lock';
 const FAILURE_FILE = '.deep/failures.json';
 const ESCALATION_FILE = '.deep/NEEDS_USER';
 const RALPH_HANDOFF_FILE = '.deep/RALPH_HANDOFF';
+const RLM_CONTEXT_FILE = '.deep/rlm-context.json';
+const RLM_COSTS_FILE = '.deep/rlm-costs.json';
 
 // Configuration
 const STALE_THRESHOLD_MS = 8 * 60 * 60 * 1000; // 8 hours
 const DEFAULT_TASK_STALE_HOURS = 24;
 const MAX_CONSECUTIVE_FAILURES = 3;
 const LOCK_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const RLM_SUB_CALL_WARNING = 30;
+const RLM_SUB_CALL_LIMIT = 50;
+const CI_POLL_INTERVAL_MS = 15 * 1000; // 15 seconds
+const CI_MAX_WAIT_MS = 10 * 60 * 1000; // 10 minutes
 
 // ============================================================================
 // Edge Case 1: Infinite Loop Prevention
@@ -405,6 +416,301 @@ The loop is BLOCKED until you respond.
 }
 
 // ============================================================================
+// Edge Case 11: RLM Cost Tracking
+// ============================================================================
+
+function checkRlmCosts() {
+  try {
+    if (!fs.existsSync(RLM_CONTEXT_FILE)) {
+      return { ok: true };
+    }
+
+    const context = JSON.parse(fs.readFileSync(RLM_CONTEXT_FILE, 'utf8'));
+    const subCalls = context.sub_calls || 0;
+
+    // Track cumulative costs
+    let costs = { total_sub_calls: 0, sessions: [] };
+    if (fs.existsSync(RLM_COSTS_FILE)) {
+      costs = JSON.parse(fs.readFileSync(RLM_COSTS_FILE, 'utf8'));
+    }
+
+    // Update costs
+    costs.total_sub_calls = (costs.total_sub_calls || 0) + subCalls;
+    costs.last_updated = new Date().toISOString();
+    if (!costs.sessions) costs.sessions = [];
+    costs.sessions.push({
+      timestamp: new Date().toISOString(),
+      sub_calls: subCalls,
+      cost_estimate: context.cost_estimate || 'unknown'
+    });
+
+    // Keep only last 10 sessions
+    if (costs.sessions.length > 10) {
+      costs.sessions = costs.sessions.slice(-10);
+    }
+
+    fs.writeFileSync(RLM_COSTS_FILE, JSON.stringify(costs, null, 2));
+
+    // Check limits
+    if (subCalls >= RLM_SUB_CALL_LIMIT) {
+      return {
+        ok: false,
+        blocked: true,
+        message: `
+## RLM COST LIMIT REACHED
+
+Sub-LM calls: ${subCalls}/${RLM_SUB_CALL_LIMIT}
+
+The RLM operation has hit the maximum sub-call limit.
+This prevents runaway costs.
+
+### Options:
+
+1. **Continue anyway** (acknowledge cost):
+   \`\`\`bash
+   echo "Acknowledged: RLM costs accepted" >> .deep/rlm-context.json
+   \`\`\`
+
+2. **Abort RLM operation**:
+   Delete \`.deep/rlm-context.json\` and use standard exploration
+
+3. **Review costs**:
+   See \`.deep/rlm-costs.json\` for cumulative tracking
+`
+      };
+    }
+
+    if (subCalls >= RLM_SUB_CALL_WARNING) {
+      return {
+        ok: true,
+        warning: `
+### RLM Cost Warning
+
+Sub-LM calls: ${subCalls}/${RLM_SUB_CALL_LIMIT}
+
+Approaching cost limit. Consider:
+- Reducing chunk granularity
+- Using more targeted filtering
+- Stopping exploration early if sufficient data gathered
+`
+      };
+    }
+
+    return { ok: true };
+  } catch {
+    return { ok: true }; // Fail open
+  }
+}
+
+function getRlmStatusSummary() {
+  try {
+    if (!fs.existsSync(RLM_CONTEXT_FILE)) {
+      return '';
+    }
+
+    const context = JSON.parse(fs.readFileSync(RLM_CONTEXT_FILE, 'utf8'));
+
+    const processedChunks = (context.chunks || []).filter(c => c.processed).length;
+    const totalChunks = (context.chunks || []).length;
+
+    return `
+### RLM Status
+- Chunks: ${processedChunks}/${totalChunks} processed
+- Sub-calls: ${context.sub_calls || 0}
+- Cost estimate: ${context.cost_estimate || 'unknown'}
+`;
+  } catch {
+    return '';
+  }
+}
+
+// ============================================================================
+// Edge Case 12: CI Verification (Active Polling)
+// ============================================================================
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function detectPRNumber() {
+  try {
+    // Try to get current PR number from gh CLI
+    const result = execSync('gh pr view --json number -q .number 2>/dev/null', {
+      encoding: 'utf8',
+      timeout: 10000
+    }).trim();
+    return result ? parseInt(result, 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function waitForCI(prNumber) {
+  const startTime = Date.now();
+  let lastStatus = '';
+
+  while (Date.now() - startTime < CI_MAX_WAIT_MS) {
+    try {
+      const result = execSync(`gh pr checks ${prNumber} --json name,state,conclusion 2>/dev/null`, {
+        encoding: 'utf8',
+        timeout: 15000
+      });
+      const checks = JSON.parse(result);
+
+      if (!checks || checks.length === 0) {
+        // No CI configured or checks haven't started
+        return { passed: true, noCi: true };
+      }
+
+      const pending = checks.filter(c => c.state === 'PENDING' || c.state === 'IN_PROGRESS' || c.state === 'QUEUED');
+      const failed = checks.filter(c => c.conclusion === 'FAILURE' || c.conclusion === 'CANCELLED' || c.conclusion === 'TIMED_OUT');
+      const passed = checks.filter(c => c.conclusion === 'SUCCESS');
+
+      // Progress update
+      const status = `CI: ${passed.length}✓ ${pending.length}⏳ ${failed.length}✗`;
+      if (status !== lastStatus) {
+        console.log(`### ${status}`);
+        lastStatus = status;
+      }
+
+      if (failed.length > 0) {
+        return {
+          passed: false,
+          failed: failed.map(c => ({ name: c.name, conclusion: c.conclusion })),
+          checks
+        };
+      }
+
+      if (pending.length === 0) {
+        return { passed: true, checks };
+      }
+
+      // Wait before next poll
+      await sleep(CI_POLL_INTERVAL_MS);
+    } catch (err) {
+      // gh CLI error - might not have pr checks or no gh available
+      return { passed: true, error: err.message };
+    }
+  }
+
+  // Timeout
+  return { passed: false, timeout: true };
+}
+
+// ============================================================================
+// Edge Case 13: Completion Summary
+// ============================================================================
+
+function countCompletedTasks() {
+  try {
+    if (!fs.existsSync(PERSISTENT_TASKS_FILE)) return { completed: 0, total: 0 };
+    const data = JSON.parse(fs.readFileSync(PERSISTENT_TASKS_FILE, 'utf8'));
+    const tasks = data.tasks || [];
+    const completed = tasks.filter(t => t.status === 'completed').length;
+    return { completed, total: tasks.length };
+  } catch {
+    return { completed: 0, total: 0 };
+  }
+}
+
+function getRecentCommits() {
+  try {
+    const result = execSync('git log --oneline -10 --since="24 hours ago" 2>/dev/null', {
+      encoding: 'utf8',
+      timeout: 5000
+    });
+    return result.trim().split('\n').filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function calculateDuration(state) {
+  try {
+    const started = new Date(state.startedAt || state.createdAt);
+    const now = new Date();
+    const diffMs = now - started;
+    const mins = Math.round(diffMs / 60000);
+    return mins < 60 ? `${mins} minutes` : `${Math.round(mins / 60 * 10) / 10} hours`;
+  } catch {
+    return 'unknown';
+  }
+}
+
+function generateCompletionSummary(state) {
+  const taskCounts = countCompletedTasks();
+  const commits = getRecentCommits();
+
+  // Get test results
+  let testSummary = { tests: '?', types: '?', lint: '?', build: '?' };
+  try {
+    if (fs.existsSync(TEST_RESULTS_FILE)) {
+      const results = JSON.parse(fs.readFileSync(TEST_RESULTS_FILE, 'utf8'));
+      const r = results.results || {};
+      testSummary = {
+        tests: r.tests?.passed ? '✓' : (r.tests?.ran ? '✗' : '—'),
+        types: r.types?.passed ? '✓' : (r.types?.ran ? '✗' : '—'),
+        lint: r.lint?.passed ? '✓' : (r.lint?.ran ? '✗' : '—'),
+        build: r.build?.passed ? '✓' : (r.build?.ran ? '✗' : '—')
+      };
+    }
+  } catch {}
+
+  // Get git info
+  let gitInfo = { pr: null, ci: null, branch: null };
+  try {
+    if (fs.existsSync(GIT_RESULTS_FILE)) {
+      const git = JSON.parse(fs.readFileSync(GIT_RESULTS_FILE, 'utf8'));
+      gitInfo = {
+        pr: git.pr?.url || git.pr?.number,
+        ci: git.ci?.passed ? '✓ Passed' : (git.ci?.checked ? '✗ Failed' : '—'),
+        branch: git.branch
+      };
+    }
+  } catch {}
+
+  const summary = {
+    sessionId: state.sessionId || process.pid.toString(),
+    task: state.task,
+    duration: calculateDuration(state),
+    iterations: state.iteration,
+    maxIterations: state.maxIterations,
+    phases: state.phasesCompleted || [state.phase],
+    tasks: taskCounts,
+    commits: commits.length,
+    testResults: testSummary,
+    git: gitInfo,
+    completedAt: new Date().toISOString()
+  };
+
+  // Write summary file
+  try {
+    fs.writeFileSync(SUMMARY_FILE, JSON.stringify(summary, null, 2));
+  } catch {}
+
+  // Format for console output
+  return `
+## Deep Loop Complete ✓
+
+**Session:** ${summary.sessionId.slice(0, 8)}
+**Task:** ${summary.task || 'See .deep/task.md'}
+**Duration:** ${summary.duration}
+**Iterations:** ${summary.iterations}/${summary.maxIterations}
+
+### Tasks
+${taskCounts.total > 0 ? `${taskCounts.completed}/${taskCounts.total} completed` : 'N/A'}
+
+### Verification
+Tests: ${testSummary.tests} | Types: ${testSummary.types} | Lint: ${testSummary.lint} | Build: ${testSummary.build}
+
+### Git
+${commits.length > 0 ? `Commits: ${commits.length}` : 'No commits'}
+${gitInfo.pr ? `PR: ${gitInfo.pr}` : ''}
+${gitInfo.ci ? `CI: ${gitInfo.ci}` : ''}
+`;
+}
+
+// ============================================================================
 // Main Hook Logic
 // ============================================================================
 
@@ -448,11 +754,13 @@ function shouldRalphHandoff() {
 function getPhasePrompt(state, tasksData = null) {
   const { phase, iteration, maxIterations, task } = state;
 
+  const rlmStatus = getRlmStatusSummary();
+
   const header = `
 ## Deep Loop - Iteration ${iteration}/${maxIterations}
 **Phase:** ${phase}
 **Task:** ${task || 'See .deep/task.md'}
-`;
+${rlmStatus}`;
 
   const prompts = {
     'PLAN': `${header}
@@ -491,7 +799,7 @@ ${getVerificationReminder(state)}
 ${getCompletionChecklist()}
 
 If issues: Update to \`"phase": "FIX"\`
-If clean: Update to \`"phase": "COMPLETE"\`, \`"complete": true\`
+If clean: Update to \`"phase": "SHIP"\`, \`"complete": true\`
 `,
     'FIX': `${header}
 ### FIX Phase
@@ -503,13 +811,27 @@ Address issues from issues.json:
 
 When done: Clear issues.json, update to \`"phase": "REVIEW"\`
 `,
+    'SHIP': `${header}
+### SHIP Phase
+
+**MANDATORY: Invoke verify-app subagent via Task tool before completing.**
+
+Git Integration (if in repo):
+1. Push branch
+2. Create PR
+3. Wait for CI
+4. Merge
+
+When ALL gates pass: Update state.json \`"phase": "SHIP", "complete": true\`
+Output: \`<promise>COMPLETE</promise>\`
+`,
     'COMPLETE': null
   };
 
   return prompts[phase] || null;
 }
 
-function main() {
+async function main() {
   // Force exit check
   if (shouldForceExit()) {
     console.log('## Deep Loop - Force exit');
@@ -547,8 +869,19 @@ To continue: Delete \`.deep/NEEDS_USER\` after addressing the issue.
   const state = readState();
   const tasksData = readPersistentTasks();
 
+  // RLM cost check (Edge Case 11)
+  const rlmCheck = checkRlmCosts();
+  if (rlmCheck.blocked) {
+    console.log(rlmCheck.message);
+    console.error('[BLOCKED] RLM cost limit reached');
+    process.exit(2);
+  }
+  if (rlmCheck.warning) {
+    console.log(rlmCheck.warning);
+  }
+
   // Check deep loop state
-  if (state && state.complete !== true && state.phase !== 'COMPLETE') {
+  if (state && state.complete !== true && state.phase !== 'COMPLETE' && state.phase !== 'SHIP') {
     // Staleness check
     if (isStateStale()) {
       console.log('## Deep Loop - Stale state (>8hrs), allowing exit');
@@ -577,7 +910,7 @@ To continue: Delete \`.deep/NEEDS_USER\` after addressing the issue.
   }
 
   // Verify completion (Edge Cases 3, 7)
-  if (state && (state.complete === true || state.phase === 'COMPLETE')) {
+  if (state && (state.complete === true || state.phase === 'COMPLETE' || state.phase === 'SHIP')) {
     const testV = verifyTestResults();
     if (!testV.valid) {
       console.log(`
@@ -597,7 +930,67 @@ Run all validations and update test-results.json.
 
     const gitV = verifyGitResults();
     if (!gitV.skip && !gitV.valid) {
-      console.log(`
+      // Check if CI needs active polling
+      const gitResults = fs.existsSync(GIT_RESULTS_FILE)
+        ? JSON.parse(fs.readFileSync(GIT_RESULTS_FILE, 'utf8'))
+        : {};
+
+      // Active CI polling if PR exists but CI not checked
+      if (gitV.missing.includes('CI not checked') && gitResults.pr?.number) {
+        console.log('### Polling CI status...');
+        const ciResult = await waitForCI(gitResults.pr.number);
+
+        // Update git-results.json with CI outcome
+        gitResults.ci = {
+          checked: true,
+          passed: ciResult.passed,
+          checkedAt: new Date().toISOString(),
+          ...(ciResult.failed && { failed: ciResult.failed }),
+          ...(ciResult.timeout && { timeout: true }),
+          ...(ciResult.noCi && { noCi: true })
+        };
+        fs.writeFileSync(GIT_RESULTS_FILE, JSON.stringify(gitResults, null, 2));
+
+        if (!ciResult.passed) {
+          const failMsg = ciResult.timeout
+            ? 'CI timed out after 10 minutes'
+            : ciResult.failed?.map(f => `${f.name}: ${f.conclusion}`).join(', ');
+          console.log(`
+## BLOCKED - CI Failed
+
+**Error:** ${failMsg}
+
+Fix the CI issues and push again.
+`);
+          state.phase = 'FIX';
+          state.complete = false;
+          fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+          console.error('[BLOCKED] CI failed');
+          process.exit(2);
+        }
+
+        // CI passed - re-verify git results
+        const gitV2 = verifyGitResults();
+        if (!gitV2.skip && !gitV2.valid) {
+          console.log(`
+## BLOCKED - Git Workflow Incomplete
+
+${gitV2.missing.length ? '**Missing:** ' + gitV2.missing.join(', ') : ''}
+${gitV2.failed.length ? '**Failed:** ' + gitV2.failed.join(', ') : ''}
+
+Complete the git workflow:
+1. Create PR: \`gh pr create\`
+2. Wait for CI: \`gh pr checks --watch\`
+3. Merge: \`gh pr merge --squash\`
+`);
+          state.phase = 'REVIEW';
+          state.complete = false;
+          fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+          console.error('[BLOCKED] Git verification failed');
+          process.exit(2);
+        }
+      } else {
+        console.log(`
 ## BLOCKED - Git Workflow Incomplete
 
 ${gitV.missing.length ? '**Missing:** ' + gitV.missing.join(', ') : ''}
@@ -608,11 +1001,12 @@ Complete the git workflow:
 2. Wait for CI: \`gh pr checks --watch\`
 3. Merge: \`gh pr merge --squash\`
 `);
-      state.phase = 'REVIEW';
-      state.complete = false;
-      fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-      console.error('[BLOCKED] Git verification failed');
-      process.exit(2);
+        state.phase = 'REVIEW';
+        state.complete = false;
+        fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+        console.error('[BLOCKED] Git verification failed');
+        process.exit(2);
+      }
     }
   }
 
@@ -645,8 +1039,17 @@ Continue working. Update persistent-tasks.json when complete.
   // Cleanup on success
   releaseLock();
 
+  // Generate completion summary if loop was active
+  if (state && (state.complete === true || state.phase === 'COMPLETE' || state.phase === 'SHIP')) {
+    const summary = generateCompletionSummary(state);
+    console.log(summary);
+  }
+
   console.log('[OK] Deep Loop: Exit allowed');
   process.exit(0);
 }
 
-main();
+main().catch(err => {
+  console.error('Deep loop hook error:', err.message);
+  process.exit(0); // Fail open - don't block on unexpected errors
+});

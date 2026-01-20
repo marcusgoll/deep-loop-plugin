@@ -1,13 +1,16 @@
 # Deep Loop - Deterministic Development Protocol
 
-A self-correcting development loop: **PLAN → BUILD → REVIEW → FIX → COMPLETE**
+A self-correcting development loop: **[RLM_EXPLORE] -> PLAN -> BUILD -> REVIEW -> FIX -> SHIP**
 
 ## Quick Start
 
 1. **Triage** the task (complexity + execution mode)
-2. **Initialize** `.deep/` state directory
-3. **Execute** loop OR spawn Ralph agents
-4. **Complete** only when all gates pass
+2. **[Optional] RLM Explore** if codebase is large (>5000 files OR >10MB)
+3. **Initialize** `.deep/` state directory
+4. **Execute** loop with automatic subagent invocation
+5. **Ship** - commit, PR, merge - only when all gates pass
+
+**CRITICAL: Git operations are NOT optional. Every successful build MUST commit. Every completed loop MUST create PR and merge.**
 
 ## Step 1: Triage
 
@@ -19,395 +22,607 @@ A self-correcting development loop: **PLAN → BUILD → REVIEW → FIX → COMP
 | **STANDARD** | 2-5 files, some design decisions | 10 |
 | **DEEP** | 6+ files, architectural, high-stakes | 20 |
 
-### Execution Mode (Ralph vs Sequential)
+**NOTE:** ALL complexity levels require full CI/CD workflow (commit, push, PR, CI, merge). QUICK does not mean "skip git" - it means fewer iterations.
 
-After determining complexity, decide execution mode:
+### Execution Mode (Ralph vs Sequential)
 
 | Mode | When to Use | How |
 |------|-------------|-----|
 | **Sequential** | Tasks depend on each other, <3 tasks | Standard loop in-session |
 | **Ralph** | 3+ independent tasks, parallelizable | Spawn Task agents |
 
-**Ralph Triage Questions:**
-1. Can tasks run independently? (no shared state between tasks)
-2. Are there 3+ discrete tasks after planning?
-3. Would fresh context per task help? (complex codebase)
-
 **Default behavior:**
-- QUICK → Always sequential
-- STANDARD → Sequential unless explicitly parallel tasks
-- DEEP → Prefer Ralph if 3+ independent tasks identified in PLAN
+- QUICK: Always sequential
+- STANDARD: Sequential unless explicitly parallel tasks
+- DEEP: Prefer Ralph if 3+ independent tasks identified in PLAN
 
 ## Step 2: Initialize State
 
-Create `.deep/` directory:
-
-```bash
-mkdir -p .deep
-```
-
-**Required files:**
+Create `.deep/` directory and files:
 - `.deep/state.json` - Loop state
 - `.deep/task.md` - Original task
-- `.deep/issues.json` - Start with `[]`
+- `.deep/plan.md` - Start with `phase: PLAN` (or `RLM_EXPLORE` if large codebase)
 
-**State template:**
+## Step 2.5: RLM Explore (Optional)
+
+**Trigger:** Codebase exceeds 5000 files OR 10MB total size
+
+### Detection
+
+```bash
+# Count files
+find . -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.py" \) | wc -l
+
+# Check size
+du -sh . 2>/dev/null
+```
+
+### When to Use
+
+| Codebase Size | Action |
+|---------------|--------|
+| <1000 files, <5MB | Skip RLM_EXPLORE, go to PLAN |
+| 1000-5000 files | Optional RLM_EXPLORE |
+| >5000 files OR >10MB | **Recommended** RLM_EXPLORE |
+
+### Execution
+
+If RLM_EXPLORE needed, invoke via Task tool:
+
+```
+Task tool with:
+  subagent_type: "general-purpose"
+  description: "RLM: explore codebase"
+  prompt: |
+    You are executing RLM_EXPLORE phase for a large codebase.
+    Goal: [task description]
+
+    Follow rlm-explore skill protocol:
+    1. Probe codebase structure
+    2. Chunk by module/directory
+    3. Spawn haiku sub-agents per chunk
+    4. Aggregate into exploration report
+
+    Write output to .deep/exploration.md
+    Track costs in .deep/rlm-context.json
+
+    When done: <promise>EXPLORED</promise>
+```
+
+### Output
+
+- `.deep/exploration.md` - Codebase map and architecture
+- `.deep/rlm-context.json` - Cost tracking
+
+### Transition
+
+After RLM_EXPLORE completes:
+1. Update state.json: `"phase": "PLAN"`
+2. PLAN phase consumes exploration.md for better task breakdown
+
+## Progress Monitoring
+
+During BUILD and FIX phases, track current step via output detection. Update `.deep/state.json` with:
+
 ```json
 {
-  "phase": "PLAN",
-  "level": "standard",
-  "mode": "sequential",
-  "iteration": 0,
-  "maxIterations": 10,
-  "complete": false,
-  "task": "[summary]",
-  "startedAt": "[ISO timestamp]"
+  "phase": "BUILD",
+  "current_step": "Implementing",
+  "task_index": 2,
+  "started_at": "2025-01-18T10:00:00Z"
 }
 ```
 
-## Step 3: Execute by Mode
+### Step Detection Patterns
 
-### Sequential Mode
+| Pattern Detected | Current Step |
+|-----------------|--------------|
+| `git commit`, `git add` | Committing |
+| `progress.txt` | Logging |
+| `PRD.md`, `prd.json` | Updating PRD |
+| `lint`, `eslint`, `biome` | Linting |
+| `test`, `vitest`, `jest`, `pytest` | Testing |
+| `.test.`, `.spec.`, `__tests__` | Writing tests |
+| Write/Edit tool calls | Implementing |
+| Read/Glob/Grep tool calls | Reading code |
 
-**QUICK**: Skip PLAN, implement directly, run basic validation
-**STANDARD**: Full PLAN → BUILD → REVIEW → FIX loop
-**DEEP**: Full loop + self-verification + user checkpoints
+### Step Display (for user visibility)
 
-### Ralph Mode (Internal v4.0)
-
-Uses Task tool with `subagent_type=general-purpose` to spawn agents.
-**No API credits** - uses Max subscription.
-
-#### Ralph Execution Flow
-
-**1. Complete PLAN phase first** - identify all tasks
-
-**2. Create PRD** - write `.deep/prd.json`:
-
-```json
-[
-  {
-    "id": "task-001",
-    "story": "What to build",
-    "acceptance_criteria": ["Criterion 1", "Criterion 2"],
-    "priority": "high",
-    "passes": false,
-    "attempts": 0
-  }
-]
-```
-
-**3. Update state** - set `"mode": "ralph"` in state.json
-
-**4. Spawn agent for each task** where `passes: false`:
+When executing tasks, prefix output with current step:
 
 ```
-Task tool:
-  subagent_type: "general-purpose"
-  description: "Ralph: [task-id]"
-  prompt: |
-    You are executing a single task from a PRD backlog.
-
-    ## Task
-    ID: [task-id]
-    Story: [story]
-
-    ## Acceptance Criteria
-    [criteria list]
-
-    ## Instructions
-    1. Implement ONLY this task
-    2. Run validation (test, lint, typecheck)
-    3. Commit: "ralph: [task-id] - [summary]"
-    4. Output EXACTLY one of:
-       - TASK_PASSED - all criteria met, validation passes
-       - TASK_FAILED: [reason] - blocked or failing
-
-    ## Context
-    Working directory: [cwd]
-    [relevant file paths]
+[BUILD] Implementing → Adding user validation...
+[BUILD] Testing → Running vitest...
+[BUILD] Committing → Staged 3 files...
 ```
 
-**5. Process results:**
-- `TASK_PASSED` → Update prd.json: `passes: true`
-- `TASK_FAILED` → Increment attempts, log issue, retry (max 3)
+This helps users understand progress without needing to read full output.
 
-**6. Parallel execution** (for truly independent tasks):
+---
 
-Spawn multiple agents in single message:
-```
-[Task call 1: task-001]
-[Task call 2: task-002]
-[Task call 3: task-003]
-```
+## Step 3: Execute the Loop
 
-**7. Completion:**
+### PHASE: PLAN
 
-When all prd.json tasks have `passes: true`:
-- Run final validation
-- Output: `<promise>COMPLETE</promise>`
-
-## The Loop Phases
-
-### PLAN Phase
 Create `.deep/plan.md` with:
 - Problem statement
 - Testable acceptance criteria
 - Atomic task breakdown
-- **Ralph decision**: Mark tasks `[PARALLEL]` or `[SEQUENTIAL]`
+- **Ralph decision**: Mark tasks `sequential` or `parallel`
 
-### BUILD Phase (Sequential)
+**Transition:** Update state.json `phase: BUILD`
+
+---
+
+### PHASE: BUILD (Sequential Mode)
+
 For each task:
-1. Mark in_progress
-2. **Update heartbeat**: Write `lastActivity` to `.deep/state.json` before starting
-3. Implement
-4. Validate (test, lint, typecheck)
-5. **Update heartbeat again** after validation completes
-6. Commit if pass
-7. Log issue if fail, retry (max 3x)
+1. Mark in_progress in TodoWrite
+2. Implement
+3. Validate (test, lint, typecheck)
+4. **COMMIT IMMEDIATELY** (see Git Operations below)
+5. Log issue if fail, retry (max 3x)
 
-**Heartbeat**: For long-running tasks, update `.deep/state.json.lastActivity` every 30min to prevent staleness timeout (8hr limit).
+**MANDATORY: After BUILD completes, invoke code-simplifier subagent:**
 
-### BUILD Phase (Ralph)
-1. Convert plan to `.deep/prd.json`
-2. Spawn Task agents
-3. Collect results
-4. Update prd.json
+Use Task tool with:
+- subagent_type: "general-purpose"
+- description: "Simplify: post-build cleanup"
+- prompt: "You are a code simplification specialist. Review recently changed code. Look for unnecessary complexity. Apply simplifications. DO NOT: Add features, change public interfaces, break tests. Output: SIMPLIFIED or NO_CHANGES"
 
-### REVIEW Phase
-- Build, tests, types, lint
-- Code review patterns
-- Create PR if git repo
+**Transition:** Update state.json `phase: REVIEW`
 
-### FIX Phase
+---
+
+### PHASE: BUILD (Ralph Mode)
+
+When mode=ralph:
+
+**1. Convert plan to `.deep/prd.json`** with tasks array
+
+**2. For each task where `passes: false`, spawn Task agent:**
+
+Use Task tool with:
+- subagent_type: "general-purpose"
+- description: "Ralph: task-001"
+- prompt: "You are executing a single task from a PRD backlog. Implement ONLY this task. Run validation. Commit. Output: TASK_PASSED or TASK_FAILED: [reason]"
+
+**3. For parallel tasks, spawn multiple in ONE message**
+
+**4. Process results:**
+- TASK_PASSED: Update prd.json
+- TASK_FAILED: Increment attempts, retry if < 3
+
+**5. When all tasks pass:** Run code-simplifier, then transition to REVIEW
+
+---
+
+### PHASE: REVIEW
+
+Run comprehensive validation:
+1. npm test or equivalent
+2. npm run typecheck
+3. npm run lint
+4. npm run build
+
+Record in `.deep/test-results.json`
+
+**For large changesets (20+ files):** Use RLM-style verification:
+
+```
+Task tool with:
+  subagent_type: "general-purpose"
+  description: "RLM: verify changeset"
+  prompt: |
+    You are executing RLM verification for a large changeset.
+    Follow rlm-verify skill protocol:
+    1. Chunk files by module/concern
+    2. Spawn haiku reviewers per chunk
+    3. Aggregate issues into .deep/issues.json
+    4. Write report to .deep/verification-report.md
+
+    When done: <promise>VERIFIED</promise>
+```
+
+**If issues found:** Add to `.deep/issues.json`, transition to FIX
+**If clean:** Transition to SHIP
+
+---
+
+### PHASE: FIX
+
 Address `.deep/issues.json`:
-1. Fix issue
-2. Commit
-3. Return to REVIEW
+1. Fix each issue
+2. **Commit atomically** (see Git Operations)
+3. Run validation
 
-### COMPLETE Phase
-All gates pass:
-- Tests passing
-- No type errors
-- No lint errors
-- No blocking issues
+**Transition:** Clear issues.json, return to REVIEW
 
-Output: `<promise>COMPLETE</promise>`
+---
 
-## State Management
+### PHASE: SHIP
 
-Update `.deep/state.json` at transitions:
-```json
-{ "phase": "BUILD", "mode": "ralph" }
-{ "phase": "REVIEW" }
-{ "phase": "COMPLETE", "complete": true }
+**CI Verification (Automatic):**
+
+After PR creation, the hook automatically polls CI status:
+- Polls every 15 seconds for up to 10 minutes
+- Progress shown: `CI: 3✓ 2⏳ 0✗`
+- If CI fails → transitions to FIX phase with failure details
+- If CI times out → blocks with timeout message
+- Results written to `.deep/git-results.json`
+
+**MANDATORY: Before completing, invoke verify-app subagent with smart detection:**
+
+Use Task tool with:
+- subagent_type: "general-purpose"
+- description: "Verify: smart E2E testing"
+- prompt: |
+    You are an E2E verification specialist with smart detection.
+
+    ## Step 1: Detect App Type
+    Check for: package.json scripts, src/app or src/pages, api/ routes, bin/ CLI, exports
+
+    ## Step 2: Check Environment
+    - Is dev server running? (check ports 3000, 3001, 5173, 8000)
+    - Are browser tools available? (try mcp__claude-in-chrome__tabs_context_mcp)
+
+    ## Step 3: Route to Verification Method
+    | App Type | Browser Available | Method |
+    |----------|-------------------|--------|
+    | Web App | YES | Browser E2E (invoke browser-test) |
+    | Web App | NO | HTTP curl tests |
+    | API | - | Curl endpoint tests |
+    | CLI | - | Command execution tests |
+    | Library | - | Import and type tests |
+
+    ## Step 4: Run Verification
+    For web apps with browser: Use mcp__claude-in-chrome__* tools
+    - tabs_context_mcp → tabs_create_mcp → navigate → test flows → screenshot
+
+    ## Step 5: Report Results
+    Output: VERIFIED, issues list, or SKIPPED with reason
+
+    Follow verify-app subagent protocol for full details.
+
+**MANDATORY: Git Finalization (if in git repo):**
+
+Execute ALL of these steps - do NOT skip:
+
+```bash
+# 1. Check if we're in a git repo and on a feature branch
+git rev-parse --git-dir && git branch --show-current
+
+# 2. Push the branch
+git push -u origin HEAD
+
+# 3. Create PR with auto-merge enabled
+gh pr create --base main --fill --body "$(cat <<'EOF'
+## Summary
+<auto-generated from commits>
+
+## Test plan
+- All tests pass
+- Verified via deep-loop
+
+Generated via /deep
+EOF
+)"
+
+# 4. Enable auto-merge (squash)
+gh pr merge --auto --squash
+
+# 5. Record PR URL
+gh pr view --json url -q .url
 ```
 
-## Loop Control
+**If on main/master:** Skip PR, work is already merged via atomic commits.
 
-**Check status:** `cat .deep/state.json`
-**Cancel:** `/cancel-deep` or create `.deep/FORCE_EXIT`
-**Force complete:** Create `.deep/FORCE_COMPLETE` with reason
-
-## Validation Gates
-
-Before COMPLETE, all must pass:
-- `npm test` or equivalent
-- `npm run typecheck` or `tsc --noEmit`
-- `npm run lint`
-- `npm run build`
-
-Record in `.deep/test-results.json`:
-```json
-{
-  "results": {
-    "tests": { "ran": true, "passed": true },
-    "types": { "ran": true, "passed": true },
-    "lint": { "ran": true, "passed": true },
-    "build": { "ran": true, "passed": true }
-  },
-  "allPassed": true
-}
-```
-
-## Git Integration
-
-When in git repo:
-1. Create feature branch
-2. Atomic commits per task
-3. Create PR when BUILD complete
-4. Wait for CI to pass
-5. Merge to main/master
-
-Record in `.deep/git-results.json` for verification.
-
-## Success Criteria
-
-Complete ONLY when:
+**Completion Criteria:**
 - [ ] All acceptance criteria met
 - [ ] All tests pass
 - [ ] No type errors
 - [ ] No lint errors
-- [ ] No blocking issues
-- [ ] PR merged (if git repo)
+- [ ] verify-app passes (or skipped with reason)
+- [ ] **PR created AND auto-merge enabled** (if feature branch)
+- [ ] Record PR URL in `.deep/git-results.json`
+
+**When ALL pass:** Update state.json `phase: COMPLETE, complete: true`
+Output: `<promise>COMPLETE</promise>`
+
+**Completion Summary (Automatic):**
+
+On successful exit, the hook outputs a summary:
+
+```
+## Deep Loop Complete ✓
+
+**Session:** a7f3c2b9
+**Task:** Add user validation
+**Duration:** 12 minutes
+**Iterations:** 5/10
+
+### Tasks
+4/4 completed
+
+### Verification
+Tests: ✓ | Types: ✓ | Lint: ✓ | Build: ✓
+
+### Git
+Commits: 4
+PR: #123
+CI: ✓ Passed
+```
+
+Summary is also saved to `.deep/summary.json`.
+
+---
+
+## Git Operations Reference
+
+### After Each Successful Task (BUILD/FIX phases)
+
+```bash
+# Stage changes
+git add -A
+
+# Commit with deep-loop tag
+git commit -m "$(cat <<'EOF'
+[deep] <phase>: <what was done>
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+EOF
+)"
+```
+
+### Commit Message Format
+
+| Phase | Tag | Example |
+|-------|-----|---------|
+| BUILD | `[deep] implement:` | `[deep] implement: add user validation` |
+| FIX | `[deep] fix:` | `[deep] fix: resolve type error in auth` |
+| REVIEW | `[deep] refactor:` | `[deep] refactor: simplify error handling` |
+
+### PR Creation (SHIP phase)
+
+```bash
+# Create PR
+gh pr create --base main --title "[deep] <task summary>" --body "..."
+
+# Enable auto-merge immediately
+gh pr merge --auto --squash
+
+# If CI required, this waits for checks then merges automatically
+```
+
+### Auto-Merge Requirements
+
+Auto-merge (`gh pr merge --auto`) requires:
+1. Branch protection rules allow it
+2. CI checks pass
+3. No merge conflicts
+
+If auto-merge fails, manually merge:
+```bash
+gh pr merge --squash
+```
+
+---
+
+## AI Conflict Resolution
+
+When merge conflicts occur (especially in Ralph mode with parallel branches), use AI to resolve them automatically before escalating to the user.
+
+### When Conflicts Occur
+
+1. **Ralph mode branch merges** - Parallel agents may touch same files
+2. **Integration branch creation** - Merging completed group branches
+3. **PR merge failures** - CI passes but merge conflicts exist
+
+### Resolution Protocol
+
+When `git merge` fails with conflicts:
+
+```bash
+# 1. Identify conflicted files
+git diff --name-only --diff-filter=U
+```
+
+**2. Invoke conflict-resolver subagent:**
+
+Use Task tool with:
+- subagent_type: "general-purpose"
+- model: "sonnet"
+- description: "Resolve: merge conflicts"
+- prompt: |
+    You are resolving git merge conflicts. Conflicted files:
+    [list from git diff --name-only --diff-filter=U]
+
+    For each conflicted file:
+    1. Read the file to see conflict markers (<<<<<<< HEAD, =======, >>>>>>> branch)
+    2. Understand what BOTH versions are trying to do
+    3. Edit the file to intelligently combine both changes
+    4. Remove ALL conflict markers
+    5. Ensure resulting code compiles and is valid
+
+    After resolving all conflicts:
+    1. Run `git add` on each resolved file
+    2. Run `git commit --no-edit` to complete the merge
+
+    CRITICAL: Preserve functionality from BOTH branches. The goal is integration, not picking sides.
+
+    Output: RESOLVED or FAILED: [reason]
+
+**3. If AI resolution fails:**
+
+```bash
+# Abort the merge
+git merge --abort
+```
+
+Then escalate to user:
+```
+Merge conflict could not be auto-resolved.
+Conflicted files: [list]
+Please resolve manually: git merge <branch>
+```
+
+### Conflict Resolution in Ralph Mode
+
+For parallel group workflows with integration branches:
+
+```
+Group 1 tasks complete → Create integration-group-1 branch
+  ├── Merge agent-1 branch ✓
+  ├── Merge agent-2 branch ✓
+  └── Merge agent-3 branch ⚠️ CONFLICT
+      └── Invoke conflict-resolver subagent
+          ├── SUCCESS → Continue to Group 2
+          └── FAILED → Abort, notify user, preserve branches
+```
+
+### Record Conflict Resolution
+
+Log to `.deep/conflict-log.json`:
+
+```json
+{
+  "conflicts": [
+    {
+      "timestamp": "2025-01-18T10:30:00Z",
+      "source_branch": "ralphy/agent-3-add-validation",
+      "target_branch": "integration-group-1",
+      "files": ["src/auth/validate.ts", "src/types.ts"],
+      "resolution": "AI_RESOLVED",
+      "model": "sonnet"
+    }
+  ]
+}
+```
+
+---
+
+## Subagent Invocation Summary
+
+| Phase Transition | Subagent | Required |
+|-----------------|----------|----------|
+| START -> PLAN (large codebase) | rlm-explorer | If >5000 files |
+| BUILD -> REVIEW | code-simplifier | YES |
+| REVIEW (large changeset) | rlm-verify | If >20 files changed |
+| REVIEW -> SHIP | verify-app | YES (smart detection) |
+| verify-app (web + browser) | browser-test | If web app + browser available |
+| Merge conflict (any phase) | conflict-resolver | On conflict |
+
+**These are NOT optional.** The loop MUST invoke these subagents via Task tool.
+
+### Smart Verification Flow
+
+```
+verify-app invoked
+    │
+    ├─ Detect app type
+    │   ├─ Web App? ──► Check browser tools
+    │   │               ├─ Available ──► browser-test subagent
+    │   │               └─ Unavailable ──► curl/HTTP fallback
+    │   ├─ API? ──► curl endpoint tests
+    │   ├─ CLI? ──► command execution tests
+    │   └─ Library? ──► import/type tests
+    │
+    └─ Report: VERIFIED | issues | SKIPPED
+```
+
+---
+
+## RLM Mode (Large Context Handling)
+
+For tasks involving large contexts (>5000 files OR >10MB):
+
+### Auto-Detection
+
+The loop detects when RLM mode is beneficial:
+- Codebase size check during triage
+- Changeset size check during REVIEW
+
+### How It Works
+
+1. **Chunking** - Context split into manageable pieces (~200K chars)
+2. **Sub-Calls** - Recursive LLM queries per chunk (haiku for cost)
+3. **Aggregation** - Results synthesized via final LLM call
+
+### Cost Tracking
+
+RLM operations track costs in `.deep/rlm-context.json`:
+
+```json
+{
+  "loaded_at": "2025-01-18T10:00:00Z",
+  "total_chars": 5000000,
+  "chunks": [
+    {"path": "src/", "chars": 1200000, "processed": true}
+  ],
+  "sub_calls": 15,
+  "model_used": "haiku",
+  "cost_estimate": "$0.45"
+}
+```
+
+### Limits
+
+- **Max sub-calls:** 50 (prevents runaway costs)
+- **Chunk size:** ~200K chars
+- **Cost warning:** At 30 sub-calls
+
+### Manual Trigger
+
+User can force RLM mode: "use RLM mode for this", "chunk and process"
+
+---
+
+## Loop Control
+
+**Check status:** `cat .deep/state.json`
+**Cancel:** `/cancel-deep` or set `complete: true` manually
+**Force complete:** Set `phase: COMPLETE, complete: true` in state.json
 
 ## Commands
 
 | Command | Action |
 |---------|--------|
-| `/deep [task]` | Start deep loop on task |
-| `/deep status` | Show current phase and progress |
-| `/deep tasks` | List pending persistent tasks |
-| `/deep clear-tasks` | Clear all persistent tasks |
-| `/deep cleanup` | Remove stale .deep/ directories |
+| `/deep <task>` | Start deep loop on task |
+| `/deep-status` | Show current phase and progress |
 | `/cancel-deep` | Cancel loop, set state to CANCELLED |
 
-### `/deep tasks`
-```bash
-cat .deep/persistent-tasks.json | jq '.tasks[] | select(.status != "completed")'
-```
+---
 
-### `/deep clear-tasks`
-```bash
-rm .deep/persistent-tasks.json
-```
+## Edge Case Handling (v5.5)
 
-### `/deep cleanup`
-```bash
-# Remove .deep directories older than 7 days
-find . -maxdepth 1 -name ".deep*" -type d -mtime +7 -exec rm -rf {} \;
-```
+1. **Infinite Loop Prevention** - Hard iteration limit (3/10/20)
+2. **Staleness Detection** - 8-hour threshold
+3. **Incomplete Work on Exit** - Verifies test-results.json + git-results.json
+4. **Lost Context Recovery** - Persistent tasks preserved
+5. **Over-engineering Prevention** - code-simplifier enforced
+6. **Clear Definition of Done** - Completion checklist
+7. **Git Chaos Prevention** - Atomic commits + PR verification
+8. **Parallel Task Coordination** - Lock file mechanism
+9. **Verification Blindness Fix** - verify-app enforced
+10. **Stuck Approach Detection** - User escalation after 3 failures
+11. **RLM Cost Tracking** - Warns at 30 sub-calls, blocks at 50
+12. **Active CI Polling** - Auto-polls CI for 10 min, blocks on failure
+13. **Completion Summary** - Shows session stats, tasks, commits, PR on exit
+14. **Merge Conflict Resolution** - AI conflict-resolver before user escalation
+15. **Progress Visibility** - Step detection for user-facing status updates
+16. **Smart App Detection** - Auto-detect app type for appropriate verification
+17. **Browser E2E Testing** - Chrome automation when available for web apps
 
-## Subagent Auto-Invocation
+---
 
-Subagents run automatically at specific points:
+## NOW EXECUTE
 
-| Subagent | Trigger | Purpose |
-|----------|---------|---------|
-| **code-simplifier** | After BUILD completes | Remove complexity, dead code |
-| **verify-app** | Before COMPLETE | E2E testing via browser or CLI |
+You have read the deep loop protocol. Now execute it:
 
-### After BUILD Phase
-Automatically spawn code-simplifier:
-```
-Task tool:
-  subagent_type: "general-purpose"
-  description: "Simplify code"
-  prompt: [contents of src/subagents/code-simplifier.md]
-```
-
-### Before COMPLETE Phase
-If browser available, spawn verify-app:
-```
-Task tool:
-  subagent_type: "general-purpose"
-  description: "Verify app"
-  prompt: [contents of src/subagents/verify-app.md]
-```
-
-Skip verify-app if:
-- No UI to test (library/CLI without visual)
-- Tests already cover functionality
-- User explicitly skips with `--no-verify`
-
-## Edge Case Handling (v5.0)
-
-The stop hook handles 10 critical edge cases:
-
-### 1. Infinite Loop Prevention
-- Hard iteration limit based on complexity (3/10/20)
-- BLOCKS exit when limit reached (not just warns)
-- Escape: `FORCE_EXIT` or `FORCE_COMPLETE`
-
-### 2. Staleness Detection
-- 8-hour threshold for state.json
-- Auto-cleanup on session start
-- Heartbeat mechanism for long tasks
-
-### 3. Incomplete Work on Exit
-- Verifies test-results.json before completion
-- Verifies git-results.json (PR created, CI passed, merged)
-- Resets to REVIEW if verification fails
-
-### 4. Lost Context Recovery
-- Persistent tasks in `.deep/persistent-tasks.json`
-- Session start shows resumption context
-- Task history preserved across sessions
-
-### 5. Over-engineering Prevention
-- code-simplifier subagent prompt after BUILD
-- Explicit reminders to avoid abstraction
-- Keep solutions minimal
-
-### 6. Clear Definition of Done
-- Completion checklist in REVIEW phase
-- All criteria must be checked
-- `<promise>COMPLETE</promise>` only when verified
-
-### 7. Git Chaos Prevention
-- Atomic commit protocol in BUILD
-- Branch naming convention
-- PR + CI verification before completion
-
-### 8. Parallel Task Coordination
-- Lock file mechanism (`.deep/agent.lock`)
-- 5-minute timeout for stale locks
-- Prevents race conditions on PRD
-
-### 9. Verification Blindness Fix
-- E2E verification reminder in REVIEW
-- Browser testing via mcp__claude-in-chrome
-- Real HTTP requests for APIs
-
-### 10. Stuck Approach Detection
-- Track consecutive failures per task
-- User escalation after 3 failures
-- Creates `.deep/NEEDS_USER` file
-- Loop blocked until user responds
-
-## CI/CD Integration
-
-For git repos with `gh` CLI:
-
-### Automatic PR Flow
-1. Push branch: `git push -u origin HEAD`
-2. Create PR: `gh pr create --title "..." --body "..."`
-3. Wait for CI: `gh pr checks --watch`
-4. Merge: `gh pr merge --squash --delete-branch`
-
-### git-results.json Template
-```json
-{
-  "repository": {
-    "isGitRepo": true,
-    "hasGhCli": true,
-    "branch": "feature/..."
-  },
-  "pr": {
-    "created": true,
-    "number": 123,
-    "url": "https://github.com/..."
-  },
-  "ci": {
-    "checked": true,
-    "passed": true,
-    "status": "success"
-  },
-  "merge": {
-    "merged": true,
-    "mergedAt": "ISO timestamp"
-  },
-  "enforcement": {
-    "requirePR": true,
-    "requireCIPass": true,
-    "requireMerge": true
-  },
-  "allPassed": true
-}
-```
-
-### Skip Git Verification
-If not using git or gh:
-```bash
-echo "No git/gh available" > .deep/FORCE_COMPLETE
-```
+1. **Triage** the task provided
+2. **Initialize** `.deep/` state
+3. **Run** the loop phases in order
+4. **Commit after each task** - not optional
+5. **Invoke subagents** at mandatory points via Task tool
+6. **Create PR and enable auto-merge** in SHIP phase
+7. **Ship** when all gates pass

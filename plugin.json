@@ -1,7 +1,7 @@
 {
   "name": "deep-loop",
-  "version": "5.0.0",
-  "description": "Autonomous deep development loop with 10 edge case handlers and CI/CD integration",
+  "version": "5.1.0",
+  "description": "Autonomous deep development loop with 16 edge case handlers, RLM support, and browser E2E testing",
   "author": "Marcus Gollahon",
   "commands": [],
   "skills": {
@@ -23,6 +23,21 @@
     "cancel-ralph": {
       "description": "Cancel ralph mode by completing/skipping all PRD tasks",
       "prompt_file": "skills/cancel-ralph.md",
+      "invocable": true
+    },
+    "cancel-deep": {
+      "description": "Cancel an active deep loop session",
+      "prompt_file": "skills/cancel-deep.md",
+      "invocable": true
+    },
+    "deep-status": {
+      "description": "Display current deep loop session status",
+      "prompt_file": "skills/deep-status.md",
+      "invocable": true
+    },
+    "diagnose-hooks": {
+      "description": "Troubleshoot Claude Code hook errors (PreToolUse, PostToolUse, etc.)",
+      "prompt_file": "skills/diagnose-hooks.md",
       "invocable": true
     }
   },
@@ -59,6 +74,11 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-use-hook.js\"",
             "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-validator.js\"",
+            "timeout": 10000
           }
         ]
       },
@@ -70,6 +90,11 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-use-hook.js\"",
+            "timeout": 10000
+          },
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-validator.js\"",
             "timeout": 10000
           }
         ]
@@ -88,6 +113,18 @@
     "run-verification": {
       "description": "Background verification agent for quality checks.",
       "prompt_file": "src/subagents/run-verification.md"
+    },
+    "rlm-explorer": {
+      "description": "RLM-style codebase exploration for large repos (>5000 files).",
+      "prompt_file": "src/subagents/rlm-explorer.md"
+    },
+    "browser-test": {
+      "description": "Browser-based E2E testing using Claude-in-Chrome MCP tools.",
+      "prompt_file": "src/subagents/browser-test.md"
+    },
+    "conflict-resolver": {
+      "description": "AI-powered git merge conflict resolution for Ralph mode.",
+      "prompt_file": "src/subagents/conflict-resolver.md"
     }
   }
 }

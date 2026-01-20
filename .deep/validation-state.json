@@ -1,0 +1,89 @@
+{
+  "errors": [
+    {
+      "file": "test-validator.json",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validator.json",
+      "line": null,
+      "message": "Unexpected token ']', ...\" [1, 2, 3,]\r\n}\" is not valid JSON",
+      "timestamp": "2026-01-20T14:53:31.854Z"
+    },
+    {
+      "file": "test.env",
+      "fullPath": "C:/Users/Marcus Gollahon/test.env",
+      "line": 2,
+      "message": "Invalid KEY=value format",
+      "timestamp": "2026-01-20T14:53:47.242Z"
+    },
+    {
+      "file": "test.env",
+      "fullPath": "C:/Users/Marcus Gollahon/test.env",
+      "line": 3,
+      "message": "Variable name cannot start with a number",
+      "timestamp": "2026-01-20T14:54:40.853Z"
+    },
+    {
+      "file": "test.json",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.json",
+      "line": null,
+      "message": "Unexpected token ']', ...\" [1, 2, 3,],\r\n  \"nes\"... is not valid JSON",
+      "timestamp": "2026-01-20T15:00:16.588Z"
+    },
+    {
+      "file": "test.csv",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.csv",
+      "line": 3,
+      "message": "Row has 2 columns, expected 3 (header)",
+      "timestamp": "2026-01-20T15:00:17.746Z"
+    },
+    {
+      "file": "test.csv",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.csv",
+      "line": 4,
+      "message": "Row has 4 columns, expected 3 (header)",
+      "timestamp": "2026-01-20T15:00:17.746Z"
+    },
+    {
+      "file": "test.md",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.md",
+      "line": 5,
+      "message": "YAML uses spaces for indentation, not tabs",
+      "timestamp": "2026-01-20T15:00:19.921Z"
+    },
+    {
+      "file": "test.env",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.env",
+      "line": 3,
+      "message": "Variable name cannot start with a number",
+      "timestamp": "2026-01-20T15:00:20.980Z"
+    },
+    {
+      "file": "test.py",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.py",
+      "line": 1,
+      "message": "line 1\r",
+      "timestamp": "2026-01-20T14:57:33.854Z"
+    },
+    {
+      "file": "test.ts",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.ts",
+      "message": "Unclosed brackets: 1 open",
+      "timestamp": "2026-01-20T15:00:22.437Z"
+    },
+    {
+      "file": "test.ts",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.ts",
+      "message": "Unclosed parentheses: 1 open",
+      "timestamp": "2026-01-20T15:00:22.437Z"
+    },
+    {
+      "file": "test.py",
+      "fullPath": "C:/Users/Marcus Gollahon/test-validators/test.py",
+      "line": 1,
+      "message": "SyntaxError: invalid syntax",
+      "timestamp": "2026-01-20T15:00:23.676Z"
+    }
+  ],
+  "warnings": [],
+  "lastValidated": "2026-01-20T15:00:23.676Z",
+  "filesValidated": 21
+}
