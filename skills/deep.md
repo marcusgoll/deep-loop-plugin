@@ -312,30 +312,34 @@ When `mode: "external"` in state.json, after PLAN phase:
    }
    ```
 
-2. **Generate `.deep-{session8}/loop.sh`** (see generate-loop-script.js)
-
-3. **Output handoff instructions:**
-   ```
-   External loop mode selected. Plan created and approved.
-
-   To start the autonomous loop:
-     cd {cwd}
-     bash .deep-{session8}/loop.sh
-
-   For Telegram notifications, ensure these are set:
-     export TELEGRAM_BOT_TOKEN="your-bot-token"
-     export TELEGRAM_CHAT_ID="your-chat-id"
-
-   Monitor progress:
-     tail -f .deep-{session8}/loop.log
-
-   Cancel:
-     touch .deep-{session8}/FORCE_EXIT
-
-   The loop will run until complete or max iterations reached.
+2. **Generate `.deep-{session8}/loop.sh`** via generate-loop-script.js:
+   ```bash
+   node "{plugins}/deep-loop/src/generate-loop-script.js" "{session8}" "{task}" {maxIterations}
    ```
 
-4. **Exit current session** - The bash script takes over orchestration.
+3. **Auto-launch loop in background:**
+   ```bash
+   # Use Bash tool with run_in_background: true
+   bash .deep-{session8}/loop.sh
+   ```
+
+   Record the Task ID returned by the background Bash call.
+
+4. **Output status to user:**
+   ```
+   External loop launched in background.
+
+   Session: {session8}
+   Task ID: {task_id}
+   Log: .deep-{session8}/loop.log
+
+   Monitor: tail -f .deep-{session8}/loop.log
+   Cancel: touch .deep-{session8}/FORCE_EXIT
+
+   Loop running autonomously. You can continue other work.
+   ```
+
+5. **Stay available** - Don't exit. User may have follow-up questions or want to monitor.
 
 **Note:** In external mode, assumptions are auto-approved during BUILD. The plan was already approved interactively.
 
