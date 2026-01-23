@@ -41,6 +41,21 @@ Each iteration:
 
 ---
 
+## Philosophy
+
+> **This codebase will outlive you.**
+
+Every shortcut becomes someone else's burden. Every hack compounds into technical debt that slows the whole team down.
+
+You are not just writing code. You are shaping the future of this project.
+
+- The patterns you establish will be copied
+- The corners you cut will be cut again
+- Fight entropy
+- Leave the codebase better than you found it
+
+---
+
 ## Task Sync Layer (Optional)
 
 **Feature flag:** `DEEP_LOOP_TASKS_ENABLED=true` (default: false)
@@ -187,25 +202,22 @@ Verify no API drift. If fails, fix before proceeding.
 
 ### Loop Mode Selection
 
-**Default: External loop** for STANDARD/DEEP tasks.
+**Default: Internal loop** (interactive, user watching).
 
 | Mode | When to Use | Mechanism |
 |------|-------------|-----------|
-| **Internal** | QUICK tasks, interactive, user watching | Stop hook blocks, feeds prompts |
-| **External** | STANDARD/DEEP, long-running, autonomous | Bash script orchestrates Claude calls |
+| **Internal** | Default for all tasks, interactive | Stop hook blocks, feeds prompts |
+| **External** | Long-running, autonomous, overnight | Bash script orchestrates Claude calls |
+
+**Use Internal Loop (Default):**
+- User is present and watching
+- Interactive development session
+- Any complexity level
 
 **Use External Loop When (ANY):**
-- Complexity = STANDARD or DEEP
-- Task count ≥ 3
-- Estimated changes > 5 files
-- Ralph mode selected
 - User says "overnight", "background", "daemon", "external"
-
-**Use Internal Loop When (ALL):**
-- Complexity = QUICK
-- Single task
-- User is actively monitoring
-- User says "interactive", "watch", "internal"
+- Ralph mode selected
+- User explicitly requests autonomous execution
 
 **Output in Triage:**
 ```markdown
@@ -214,9 +226,9 @@ Verify no API drift. If fails, fix before proceeding.
 **Complexity:** STANDARD
 **Tasks:** 5
 **Files affected:** ~8
-**Loop mode:** EXTERNAL (recommended)
+**Loop mode:** INTERNAL (default)
 
-Reason: Multi-file feature with 5 tasks benefits from fresh context per iteration.
+Reason: Interactive session with user present.
 ```
 
 **Task Sync (if DEEP_LOOP_TASKS_ENABLED=true):**
@@ -254,7 +266,7 @@ Extract first 8 characters of session ID from transcript path and create:
 {
   "active": true,
   "sessionId": "8405b17e",
-  "mode": "external",
+  "mode": "internal",
   "buildMode": "multi-agent",
   "maxParallel": 3,
   "phase": "PLAN",
@@ -267,16 +279,15 @@ Extract first 8 characters of session ID from transcript path and create:
 }
 ```
 
+**mode options:**
+- `"internal"` (default): Interactive, stop hook controls iteration
+- `"external"`: Autonomous, bash script orchestrates Claude calls
+
 **buildMode options:**
 - `"multi-agent"` (default): Orchestrator spawns Task agents per atomic task
 - `"single"`: Legacy single-session BUILD phase
+
 `parentTaskId` and `atomicTaskIds` populated when Task Sync enabled.
-
-The `mode` field MUST be set during TRIAGE based on complexity:
-- QUICK → `"mode": "internal"`
-- STANDARD/DEEP → `"mode": "external"`
-
-This ensures the stop hook doesn't block during PLAN phase for external tasks.
 
 ---
 
