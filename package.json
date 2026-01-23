@@ -1,8 +1,8 @@
 {
   "name": "deep-loop",
-  "version": "2.0.0",
+  "version": "7.2.1",
   "type": "module",
-  "description": "Autonomous deep development loop with PLAN → BUILD → REVIEW → FIX phases",
+  "description": "Autonomous deep development loop with Task Sync and Atlas MCP integration",
   "author": "Marcus Gollahon",
   "private": true
 }

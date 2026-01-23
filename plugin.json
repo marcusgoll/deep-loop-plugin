@@ -1,7 +1,7 @@
 {
   "name": "deep-loop",
-  "version": "7.1.0",
-  "description": "Autonomous deep development loop with senior dev mode. Includes CHALLENGE phase, adversarial review, and external loop support.",
+  "version": "7.2.1",
+  "description": "Autonomous deep development loop with senior dev mode. Includes Task Sync for crash recovery, Atlas MCP integration, and external loop support.",
   "author": "Marcus Gollahon",
   "commands": [],
   "skills": {
