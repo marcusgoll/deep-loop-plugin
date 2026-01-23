@@ -38,6 +38,9 @@ export function generateLoopScript(options) {
   const deepDir = `.deep-${sessionId}`;
   const scriptPath = path.join(cwd, deepDir, 'loop.sh');
 
+  // Normalize Windows paths to forward slashes for bash
+  const bashCwd = cwd.replace(/\\/g, '/');
+
   // Escape task description for bash
   const escapedTask = taskDescription.replace(/'/g, "'\\''");
 
@@ -63,7 +66,7 @@ set -e
 DEEP_DIR="${deepDir}"
 LOG_FILE="$DEEP_DIR/loop.log"
 TASK='${escapedTask}'
-CWD="${cwd}"
+CWD="${bashCwd}"
 
 # Telegram notification function
 notify() {
