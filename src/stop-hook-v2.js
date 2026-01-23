@@ -67,6 +67,8 @@ const STEP_PATTERNS = [
   { pattern: /(tsc|typecheck|type-check)/i, step: 'Type checking' },
   { pattern: /(npm run build|cargo build|go build)/i, step: 'Building' },
   { pattern: /Task tool|subagent/i, step: 'Running subagent' },
+  { pattern: /task-agent|TASK_COMPLETE|TASK_BLOCKED/i, step: 'Task agent' },
+  { pattern: /tasks-status\.json/i, step: 'Orchestrating tasks' },
   { pattern: /(Write|Edit) tool/i, step: 'Implementing' },
   { pattern: /(Read|Glob|Grep) tool/i, step: 'Exploring' }
 ];

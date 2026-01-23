@@ -1,7 +1,7 @@
 {
   "name": "deep-loop",
-  "version": "7.2.1",
-  "description": "Autonomous deep development loop with senior dev mode. Includes Task Sync for crash recovery, Atlas MCP integration, and external loop support.",
+  "version": "8.0.0",
+  "description": "Autonomous deep development loop with multi-agent BUILD phase. Fresh context per task, parallel execution, intelligent retries. Includes Task Sync, Atlas MCP, and external loop support.",
   "author": "Marcus Gollahon",
   "commands": [],
   "skills": {
@@ -98,6 +98,10 @@
     "conflict-resolver": {
       "description": "AI-powered git merge conflict resolution for Ralph mode.",
       "prompt_file": "src/subagents/conflict-resolver.md"
+    },
+    "task-agent": {
+      "description": "Focused atomic task executor for multi-agent BUILD phase. Receives single task, executes TDD, returns completion signal.",
+      "prompt_file": "src/subagents/task-agent.md"
     }
   }
 }

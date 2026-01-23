@@ -1,6 +1,6 @@
 # Deep Loop - Deterministic Development Protocol
 
-**Version 7.2.1** | External loop + Senior Dev Mode + Task Sync
+**Version 8.0.0** | Multi-Agent + External loop + Senior Dev Mode + Task Sync
 
 A self-correcting development loop with senior dev capabilities:
 
@@ -15,7 +15,8 @@ When `/deep` starts:
 
 ```
 ╔═══════════════════════════════════════╗
-║  DEEP LOOP v7.2.1                     ║
+║  DEEP LOOP v8.0.0                     ║
+║  Multi-Agent Build: ✓ enabled         ║
 ║  Senior Dev Mode: ✓ enabled           ║
 ║  External Loop: ✓ supported           ║
 ║  Task Sync: ✓ enabled                 ║
@@ -70,6 +71,55 @@ Task Management Layer        ← Recovery + Visibility
 ```json
 { "type": "deep-loop-atomic", "parentTaskId": "1", "sessionId": "8405b17e", "atomicIndex": 0, "commitSHA": null }
 ```
+
+---
+
+## Multi-Agent Build Architecture
+
+**NEW in v8.0.0:** BUILD phase uses Task agents for fresh context per atomic task.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────┐
+│  ORCHESTRATOR (main Claude session)             │
+│  - Manages state.json                           │
+│  - Analyzes task dependencies                   │
+│  - Spawns task agents (parallel if independent) │
+│  - Handles retries with error context           │
+│  - Outputs BUILD_COMPLETE when all done         │
+└─────────────────────────────────────────────────┘
+         │ spawn (up to 3 parallel)    ▲ promise
+         ▼                             │
+┌─────────────────────────────────────────────────┐
+│  TASK AGENT (fresh context per task)            │
+│  - Receives: task, criteria, relevant files     │
+│  - Executes TDD: RED → GREEN → REFACTOR         │
+│  - Commits atomically                           │
+│  - Returns: TASK_COMPLETE or TASK_BLOCKED       │
+└─────────────────────────────────────────────────┘
+```
+
+### Benefits
+
+| Aspect | Single Session | Multi-Agent |
+|--------|----------------|-------------|
+| Context | Accumulates, degrades | Fresh per task |
+| Parallelism | None | Up to 3 concurrent |
+| Failure isolation | Whole loop affected | Per-task isolation |
+| Retry quality | Same polluted context | New agent + error context |
+
+### Configuration (state.json)
+
+```json
+{
+  "buildMode": "multi-agent",
+  "maxParallel": 3,
+  "retryStrategy": "new-agent-with-context"
+}
+```
+
+Set `"buildMode": "single"` to use legacy single-session BUILD.
 
 ---
 
@@ -205,6 +255,8 @@ Extract first 8 characters of session ID from transcript path and create:
   "active": true,
   "sessionId": "8405b17e",
   "mode": "external",
+  "buildMode": "multi-agent",
+  "maxParallel": 3,
   "phase": "PLAN",
   "iteration": 0,
   "maxIterations": 10,
@@ -214,6 +266,10 @@ Extract first 8 characters of session ID from transcript path and create:
   "atomicTaskIds": []
 }
 ```
+
+**buildMode options:**
+- `"multi-agent"` (default): Orchestrator spawns Task agents per atomic task
+- `"single"`: Legacy single-session BUILD phase
 `parentTaskId` and `atomicTaskIds` populated when Task Sync enabled.
 
 The `mode` field MUST be set during TRIAGE based on complexity:
@@ -349,15 +405,154 @@ When `mode: "external"` in state.json, after PLAN phase:
 
 ---
 
-### PHASE: BUILD (TDD)
+### PHASE: BUILD (Multi-Agent TDD)
 
 **Test-Driven Development is MANDATORY.**
-**NO PARTIAL COMPLETION - Tasks must be 100% done or not done.**
+**Multi-Agent mode spawns fresh Task agents per atomic task.**
+
+#### Build Mode Selection
+
+Check `state.json.buildMode`:
+- `"multi-agent"` (default): Orchestrator spawns Task agents
+- `"single"`: Legacy single-session BUILD
 
 **Task Sync (if DEEP_LOOP_TASKS_ENABLED=true):**
 ```
 TaskUpdate(parentTaskId, { status: "in_progress", metadata: { phase: "BUILD" } })
 ```
+
+---
+
+#### Multi-Agent BUILD (Default)
+
+**You are the ORCHESTRATOR.** Your job:
+1. Parse atomic tasks from plan.md
+2. Analyze dependencies between tasks
+3. Spawn Task agents (parallel if independent)
+4. Handle results and retries
+5. Output BUILD_COMPLETE when all tasks done
+
+##### Step 1: Parse Tasks and Dependencies
+
+Read plan.md and identify:
+- Atomic tasks with acceptance criteria
+- Dependencies (task B needs task A's output)
+- Independent tasks (can run in parallel)
+
+Write to `.deep-{session8}/tasks-status.json`:
+```json
+{
+  "tasks": [
+    { "id": 0, "title": "...", "status": "pending", "dependsOn": [], "attempts": 0 },
+    { "id": 1, "title": "...", "status": "pending", "dependsOn": [0], "attempts": 0 },
+    { "id": 2, "title": "...", "status": "pending", "dependsOn": [], "attempts": 0 }
+  ]
+}
+```
+
+##### Step 2: Spawn Task Agents
+
+**For independent tasks (no unmet dependencies), spawn up to 3 in parallel:**
+
+```javascript
+// Pseudo-code for orchestrator logic
+pendingTasks = tasks.filter(t => t.status === 'pending' && allDepsComplete(t))
+independentBatch = pendingTasks.slice(0, 3)
+
+// Spawn in parallel using Task tool
+for each task in independentBatch:
+  Task({
+    subagent_type: "general-purpose",
+    description: `Build: ${task.title}`,
+    prompt: buildTaskAgentPrompt(task)
+  })
+```
+
+**Task agent prompt template:**
+```markdown
+# Task Agent - Atomic Task Executor
+
+## Your Task
+**Title:** {task.title}
+**Acceptance Criteria:**
+{task.criteria}
+
+## Relevant Context
+{atlas_pack output OR explicit file list}
+
+## Locked Decisions (DO NOT DEVIATE)
+{contents of decisions.md}
+
+## Instructions
+1. RED: Write failing test, commit
+2. GREEN: Implement to pass, commit
+3. REFACTOR: Clean up (optional), commit
+4. Validate: test, lint, types
+
+## Output
+- Success: <promise>TASK_COMPLETE</promise>
+- Blocked: <promise>TASK_BLOCKED:reason</promise>
+```
+
+##### Step 3: Handle Results
+
+**On TASK_COMPLETE:**
+```json
+Update tasks-status.json: task.status = "complete"
+Update tasks-status.json: task.commitSHA = git rev-parse HEAD
+```
+
+**On TASK_BLOCKED:**
+```json
+task.attempts += 1
+task.lastError = "blocked reason"
+
+if task.attempts < 2:
+  // Retry same task
+  task.status = "pending"
+else:
+  // Spawn NEW agent with error context (learning from failure)
+  Task({
+    prompt: `
+      ## Retry with Error Context
+
+      Previous attempts failed with:
+      ${task.lastError}
+
+      [previous agent learnings if any]
+
+      Try a different approach. ${originalPrompt}
+    `
+  })
+
+if task.attempts >= 3:
+  task.status = "escalated"
+  // Ask user for help
+  AskUserQuestion({ question: "Task blocked after 3 attempts: {reason}. How to proceed?" })
+```
+
+##### Step 4: Continue Until All Complete
+
+Loop:
+1. Check tasks-status.json for pending tasks with met dependencies
+2. Spawn batch of up to 3 independent task agents
+3. Process results
+4. Repeat until all tasks complete or escalated
+
+##### Step 5: Post-Build
+
+After all tasks complete, invoke code-simplifier:
+```
+Task({
+  subagent_type: "general-purpose",
+  description: "Simplify: post-build cleanup",
+  prompt: "Review recently changed code. Remove unnecessary complexity."
+})
+```
+
+---
+
+#### Legacy Single-Session BUILD (buildMode: "single")
 
 For each task from plan.md:
 
@@ -365,73 +560,32 @@ For each task from plan.md:
 ```
 atlas_find_duplicates(intent: "{what_you_want_to_create}")
 ```
-Reuse existing code if found. Don't duplicate.
 
-**For frontend/UI tasks:** Invoke `frontend-design` skill via Skill tool:
-```
-Skill({ skill: "frontend-design", args: "{component or UI task description}" })
-```
-Use when task involves: React components, UI layouts, CSS/styling, pages, forms, modals, or any user-facing interface. The skill ensures high design quality and avoids generic AI aesthetics.
+**For frontend/UI tasks:** Invoke `frontend-design` skill.
 
 1. **RED** - Write failing test first
-   - Define expected behavior
-   - Run test → confirm it fails
    - Commit: `[deep] test: add failing test for <feature>`
 
 2. **GREEN** - Write minimal code to pass
-   - Implement just enough to pass the test
-   - Run test → confirm it passes
    - Commit: `[deep] implement: <feature>`
 
 3. **REFACTOR** - Clean up (optional)
-   - Improve code without changing behavior
-   - Tests must still pass
    - Commit: `[deep] refactor: <what>`
 
 4. **Validate** - Run full suite (test, lint, types)
-5. **Log failures** to issues.json if any
+5. **Log failures** to issues.json
 
-**Task Sync per atomic task (if DEEP_LOOP_TASKS_ENABLED=true):**
-```
-On task start:
-  TaskUpdate(atomicTaskId, { status: "in_progress" })
+---
 
-On task complete (after commit):
-  commitSHA = git rev-parse HEAD
-  TaskUpdate(atomicTaskId, { status: "completed", metadata: { commitSHA: "{sha}", iteration: {n} } })
-```
+#### Completion Requirements (Both Modes)
 
 **CRITICAL: NO PARTIAL COMPLETION ALLOWED**
 
-Before marking ANY task complete, verify:
-- [ ] ALL acceptance criteria from plan.md are met (not some, ALL)
-- [ ] Tests pass for the ENTIRE feature (not just parts)
-- [ ] No TODOs, FIXMEs, or "will implement later" comments
-- [ ] No placeholder code or stub implementations
-- [ ] Feature works end-to-end (not just individual pieces)
-
-**If task cannot be fully completed:**
-1. DO NOT mark as complete
-2. DO NOT move to next task
-3. Log blocker to issues.json with specific reason
-4. Attempt to resolve blocker (max 3 retries)
-5. Only after 3 failed attempts: escalate to user
-
-**NEVER output "partially complete" - either DONE or BLOCKED.**
-
-**TDD Checklist per task:**
-- [ ] Test written BEFORE implementation
-- [ ] Test fails initially (proves it tests something)
-- [ ] Implementation makes test pass
-- [ ] No untested code paths
-- [ ] 100% of acceptance criteria met
-
-**After all tasks:** Invoke code-simplifier subagent via Task tool:
-```
-subagent_type: "general-purpose"
-description: "Simplify: post-build cleanup"
-prompt: "Review recently changed code. Remove unnecessary complexity. DO NOT add features or change interfaces."
-```
+Before BUILD_COMPLETE:
+- [ ] ALL atomic tasks complete (not some, ALL)
+- [ ] All tests pass
+- [ ] No TODOs, FIXMEs, or placeholder code
+- [ ] code-simplifier has run
 
 **Transition:** Update state.json `"phase": "REVIEW"`
 **Output:** `<promise>BUILD_COMPLETE</promise>`
@@ -555,12 +709,20 @@ gh pr merge --auto --squash
 
 ## Subagent Summary
 
-| Transition | Subagent | Required |
-|------------|----------|----------|
+| Context | Subagent | Required |
+|---------|----------|----------|
+| BUILD (multi-agent) | task-agent | Per atomic task |
 | BUILD -> REVIEW | code-simplifier | YES |
 | REVIEW -> SHIP | verify-app | YES |
 
-Invoke via Task tool with `subagent_type: "general-purpose"`.
+**Invoke via Task tool:**
+```javascript
+Task({
+  subagent_type: "general-purpose",
+  description: "Build: {task_title}",
+  prompt: "..." // See task-agent.md template
+})
+```
 
 ---
 

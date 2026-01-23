@@ -7,7 +7,8 @@ Display comprehensive deep loop session status with progress metrics.
 ALWAYS output version first:
 ```
 ╔═══════════════════════════════════════╗
-║  DEEP LOOP v7.2.1                     ║
+║  DEEP LOOP v8.0.0                     ║
+║  Multi-Agent Build: ✓ enabled         ║
 ║  Senior Dev Mode: ✓ enabled           ║
 ║  External Loop: ✓ supported           ║
 ║  Task Sync: {✓ enabled | ○ disabled}  ║
@@ -58,6 +59,10 @@ echo ""
 **Loop Mode Values:**
 - `internal` - Stop hook controls iteration (default for QUICK)
 - `external` - Bash script controls iteration (default for STANDARD/DEEP)
+
+**Build Mode Values:**
+- `multi-agent` - Orchestrator spawns Task agents per atomic task (default)
+- `single` - Legacy single-session BUILD phase
 
 **Phase Progress Block:**
 ```
@@ -254,6 +259,44 @@ Update state.json `current_step` based on recent tool calls:
 | Write/Edit to source files | Implementing |
 | Read/Glob/Grep | Exploring |
 | Task tool (subagent) | Running subagent |
+| Task agent spawn | Orchestrating tasks |
+| TASK_COMPLETE/TASK_BLOCKED | Task agent complete |
+
+---
+
+### 7. Multi-Agent BUILD Status (if buildMode: "multi-agent")
+
+If in BUILD phase with multi-agent mode, read `tasks-status.json`:
+
+```bash
+cat .deep-*/tasks-status.json 2>/dev/null
+```
+
+**Display:**
+```
+  ┌─────────────────────────────────────────────────┐
+  │ Multi-Agent BUILD Status                        │
+  ├─────────────────────────────────────────────────┤
+  │ Mode: multi-agent    Max Parallel: 3            │
+  │                                                 │
+  │ Tasks:                                          │
+  │   ✓ [0] Setup database schema          (1 try)  │
+  │   ✓ [1] Create API endpoints           (1 try)  │
+  │   ⟳ [2] Add authentication middleware  (2 tries)│
+  │   ○ [3] Write integration tests        (blocked)│
+  │   ○ [4] Add rate limiting              (pending)│
+  │                                                 │
+  │ Active Agents: 1                                │
+  │ Completed: 2/5    Failed: 0    Escalated: 0     │
+  └─────────────────────────────────────────────────┘
+
+Legend: ✓ complete  ⟳ in_progress  ○ pending  (blocked) = waiting on dependency
+```
+
+**Retry Status:**
+- Show attempt count for each task
+- Highlight tasks with 2+ attempts
+- Show "ESCALATED" if attempts >= 3 and needs user input
 
 ---
 
