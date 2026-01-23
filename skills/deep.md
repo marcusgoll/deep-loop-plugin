@@ -1,6 +1,6 @@
 # Deep Loop - Deterministic Development Protocol
 
-**Version 7.1.0** | External loop + Senior Dev Mode
+**Version 7.2.1** | External loop + Senior Dev Mode + Task Sync
 
 A self-correcting development loop with senior dev capabilities:
 
@@ -11,11 +11,14 @@ A self-correcting development loop with senior dev capabilities:
 When `/deep` starts, output:
 ```
 ╔═══════════════════════════════════════╗
-║  DEEP LOOP v7.1.0                     ║
+║  DEEP LOOP v7.2.1                     ║
 ║  Senior Dev Mode: ✓ enabled           ║
 ║  External Loop: ✓ supported           ║
+║  Task Sync: {✓ enabled | ○ disabled}  ║
 ╚═══════════════════════════════════════╝
 ```
+
+Check `DEEP_LOOP_TASKS_ENABLED` env var. If `true`, Task Sync is enabled.
 
 ## Key Mechanism
 
@@ -30,6 +33,67 @@ Each iteration:
 6. Repeat until DEEP_COMPLETE
 
 **State lives in files, not context.** Each iteration reads fresh state.
+
+---
+
+## Task Sync Layer (Optional)
+
+**Feature flag:** `DEEP_LOOP_TASKS_ENABLED=true` (default: false)
+
+When enabled, Claude Code Task Management tools sync with file state for:
+- **Crash recovery:** Tasks persist across context clears
+- **Visibility:** `TaskList` shows progress without reading files
+- **Ralph mode:** Multiple sessions claim tasks via metadata
+
+### Architecture
+
+```
+Files (.deep-{session}/)     ← SOURCE OF TRUTH
+       ↕ sync at phase boundaries
+Task Management Layer        ← Recovery + Visibility
+```
+
+**Files win conflicts.** Task layer is optional enhancement.
+
+### Metadata Schema
+
+**Parent task:**
+```json
+{ "type": "deep-loop", "sessionId": "8405b17e", "mode": "sequential", "complexity": "STANDARD", "phase": "BUILD" }
+```
+
+**Atomic subtask:**
+```json
+{ "type": "deep-loop-atomic", "parentTaskId": "1", "sessionId": "8405b17e", "atomicIndex": 0, "commitSHA": null }
+```
+
+---
+
+## Atlas MCP Integration (Optional)
+
+If Atlas MCP is configured, use it during deep loop:
+
+### PLAN Phase
+```
+atlas_pack(task: "{task_description}", budget: 50)
+```
+Gather relevant context before planning. Output goes to `pack.json`.
+
+### BUILD Phase (Before Creating New Code)
+```
+atlas_find_duplicates(intent: "{what_you_want_to_create}")
+```
+Check for existing utilities/helpers before writing new ones.
+
+### REVIEW Phase
+```
+atlas check
+```
+Verify no API drift. If fails, fix before proceeding.
+
+**Note:** Atlas tools are optional. Deep loop works without them.
+
+---
 
 ## Phase Completion Promises
 
@@ -101,6 +165,17 @@ Each iteration:
 Reason: Multi-file feature with 5 tasks benefits from fresh context per iteration.
 ```
 
+**Task Sync (if DEEP_LOOP_TASKS_ENABLED=true):**
+```
+TaskCreate({
+  subject: "[DEEP] {brief_task_summary}",
+  description: "{user_requirement}",
+  activeForm: "Triaging {task}",
+  metadata: { type: "deep-loop", sessionId: "{session8}", mode: "{internal|external}", complexity: "{QUICK|STANDARD|DEEP}" }
+})
+```
+Save returned task ID to `state.json` as `parentTaskId`.
+
 ---
 
 ## Step 2: Initialize State
@@ -130,9 +205,12 @@ Extract first 8 characters of session ID from transcript path and create:
   "iteration": 0,
   "maxIterations": 10,
   "startedAt": "2025-01-20T10:00:00Z",
-  "task": "Brief task description"
+  "task": "Brief task description",
+  "parentTaskId": null,
+  "atomicTaskIds": []
 }
 ```
+`parentTaskId` and `atomicTaskIds` populated when Task Sync enabled.
 
 The `mode` field MUST be set during TRIAGE based on complexity:
 - QUICK → `"mode": "internal"`
@@ -147,6 +225,12 @@ This ensures the stop hook doesn't block during PLAN phase for external tasks.
 ### PHASE: PLAN
 
 **Two-step planning: Assumptions first, then detailed plan.**
+
+#### Step 0: Gather Context (if Atlas available)
+```
+atlas_pack(task: "{task_description}", budget: 50)
+```
+Read `pack.json` for relevant files/symbols before planning.
 
 #### Step 1: Assumptions Preview
 
@@ -187,6 +271,23 @@ Also create `.deep-{session8}/decisions.md`:
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
 | ... | ... | ... |
+```
+
+**Task Sync (if DEEP_LOOP_TASKS_ENABLED=true):**
+
+After plan approval, create atomic subtasks:
+```
+For each atomic task in plan.md:
+  taskId = TaskCreate({
+    subject: "task-{index}: {task_title}",
+    description: "{acceptance_criteria}",
+    activeForm: "Building {task_title}",
+    metadata: { type: "deep-loop-atomic", parentTaskId: "{parentTaskId}", sessionId: "{session8}", atomicIndex: {index} }
+  })
+  Append taskId to state.json atomicTaskIds[]
+
+If sequential mode (not Ralph):
+  TaskUpdate(taskId, { addBlockedBy: [prevTaskId] })
 ```
 
 **Transition (Internal Mode):** Update state.json `"phase": "BUILD"`
@@ -245,7 +346,18 @@ When `mode: "external"` in state.json, after PLAN phase:
 **Test-Driven Development is MANDATORY.**
 **NO PARTIAL COMPLETION - Tasks must be 100% done or not done.**
 
+**Task Sync (if DEEP_LOOP_TASKS_ENABLED=true):**
+```
+TaskUpdate(parentTaskId, { status: "in_progress", metadata: { phase: "BUILD" } })
+```
+
 For each task from plan.md:
+
+**Before creating new utilities/helpers (if Atlas available):**
+```
+atlas_find_duplicates(intent: "{what_you_want_to_create}")
+```
+Reuse existing code if found. Don't duplicate.
 
 1. **RED** - Write failing test first
    - Define expected behavior
@@ -264,6 +376,16 @@ For each task from plan.md:
 
 4. **Validate** - Run full suite (test, lint, types)
 5. **Log failures** to issues.json if any
+
+**Task Sync per atomic task (if DEEP_LOOP_TASKS_ENABLED=true):**
+```
+On task start:
+  TaskUpdate(atomicTaskId, { status: "in_progress" })
+
+On task complete (after commit):
+  commitSHA = git rev-parse HEAD
+  TaskUpdate(atomicTaskId, { status: "completed", metadata: { commitSHA: "{sha}", iteration: {n} } })
+```
 
 **CRITICAL: NO PARTIAL COMPLETION ALLOWED**
 
@@ -309,6 +431,7 @@ Run comprehensive validation:
 2. `npm run typecheck`
 3. `npm run lint`
 4. `npm run build`
+5. `atlas check` (if Atlas available) - verify no API drift
 
 Record in `.deep-{session8}/test-results.json`:
 ```json
@@ -368,6 +491,16 @@ gh pr merge --auto --squash
 
 **When ALL complete:**
 - Update state.json: `"phase": "COMPLETE", "complete": true`
+
+**Task Sync (if DEEP_LOOP_TASKS_ENABLED=true):**
+```
+finalCommitSHA = git rev-parse HEAD
+TaskUpdate(parentTaskId, {
+  status: "completed",
+  metadata: { phase: "COMPLETE", commitSHA: "{finalCommitSHA}", completedAt: "{timestamp}" }
+})
+```
+
 - **Output:** `<promise>DEEP_COMPLETE</promise>`
 
 ---

@@ -7,11 +7,14 @@ Display comprehensive deep loop session status with progress metrics.
 ALWAYS output version first:
 ```
 ╔═══════════════════════════════════════╗
-║  DEEP LOOP v7.1.0                     ║
+║  DEEP LOOP v7.2.1                     ║
 ║  Senior Dev Mode: ✓ enabled           ║
 ║  External Loop: ✓ supported           ║
+║  Task Sync: {✓ enabled | ○ disabled}  ║
 ╚═══════════════════════════════════════╝
 ```
+
+Check `DEEP_LOOP_TASKS_ENABLED` env var for Task Sync status.
 
 ## Actions
 
@@ -113,6 +116,40 @@ DONE=$(grep -c "^## \[x\] task-" .deep/completed-tasks.md 2>/dev/null || echo "0
   │   task-006: Add error handling to API           │
   │   task-007: Write tests for new endpoint        │
   └─────────────────────────────────────────────────┘
+```
+
+### 4b. Task Management View (if DEEP_LOOP_TASKS_ENABLED=true)
+
+**If Task Sync enabled, also run:**
+```
+TaskList()
+```
+
+Filter results by `metadata.type === 'deep-loop' || metadata.type === 'deep-loop-atomic'`
+Further filter by `metadata.sessionId === '{current_session}'` if session-specific.
+
+**Display:**
+```
+  ┌─────────────────────────────────────────────────┐
+  │ Task Management View (Sync Layer)                │
+  ├─────────────────────────────────────────────────┤
+  │ Parent: [DEEP] Implement auth feature            │
+  │   Status: in_progress  Phase: BUILD             │
+  │                                                  │
+  │ Atomic Tasks:                                    │
+  │   ✓ task-001: Add login endpoint     [abc123]   │
+  │   ✓ task-002: Add JWT middleware     [def456]   │
+  │   ⟳ task-003: Add session store      (blocked)  │
+  │   ○ task-004: Write integration tests           │
+  └─────────────────────────────────────────────────┘
+
+Legend: ✓ completed  ⟳ in_progress  ○ pending  (blocked) = has blockedBy
+```
+
+**If Task Sync disabled:**
+```
+  Task Sync: ○ disabled
+  Set DEEP_LOOP_TASKS_ENABLED=true to enable crash recovery + visibility
 ```
 
 ### 5. Recent Activity Log
