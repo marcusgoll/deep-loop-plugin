@@ -146,7 +146,7 @@ ${taskSyncPrompt}
 When ALL work is complete: <promise>DEEP_COMPLETE</promise>"
 
   # Run Gemini with the phase prompt (-y for yolo mode, -m for model)
-  if ! node "\$GEMINI_CLI" "\$PHASE_PROMPT" -y -m gemini-2.5-flash -o text 2>&1 | tee -a "\$LOG_FILE"; then
+  if ! node "\$GEMINI_CLI" "\$PHASE_PROMPT" -y -m gemini-3-flash-preview -o text 2>&1 | tee -a "\$LOG_FILE"; then
     echo "Gemini exited with error at iteration \$iteration" | tee -a "\$LOG_FILE"
     notify "ERROR" "Gemini exited with error at iteration \$iteration"
   fi
