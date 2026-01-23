@@ -367,6 +367,12 @@ atlas_find_duplicates(intent: "{what_you_want_to_create}")
 ```
 Reuse existing code if found. Don't duplicate.
 
+**For frontend/UI tasks:** Invoke `frontend-design` skill via Skill tool:
+```
+Skill({ skill: "frontend-design", args: "{component or UI task description}" })
+```
+Use when task involves: React components, UI layouts, CSS/styling, pages, forms, modals, or any user-facing interface. The skill ensures high design quality and avoids generic AI aesthetics.
+
 1. **RED** - Write failing test first
    - Define expected behavior
    - Run test → confirm it fails
