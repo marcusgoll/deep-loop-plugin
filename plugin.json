@@ -1,13 +1,18 @@
 {
   "name": "deep-loop",
-  "version": "5.1.0",
-  "description": "Autonomous deep development loop with 16 edge case handlers, RLM support, and browser E2E testing",
+  "version": "7.1.0",
+  "description": "Autonomous deep development loop with senior dev mode. Includes CHALLENGE phase, adversarial review, and external loop support.",
   "author": "Marcus Gollahon",
   "commands": [],
   "skills": {
     "deep": {
-      "description": "Enter deep craftsman mode with deterministic PLAN -> BUILD -> REVIEW -> FIX loop. Auto-triages complexity and uses Internal Ralph v4.0 for parallel task execution.",
+      "description": "Enter deep craftsman mode with PLAN -> BUILD -> REVIEW -> FIX -> SHIP loop. Uses promise-based phase completion.",
       "prompt_file": "skills/deep.md",
+      "invocable": true
+    },
+    "deep-quick": {
+      "description": "Quick mode for small tasks. Skips planning, 3-iteration limit. Use for typos, simple fixes, <30 lines.",
+      "prompt_file": "skills/deep-quick.md",
       "invocable": true
     },
     "deep-cleanup": {
@@ -52,59 +57,16 @@
           }
         ]
       }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/session-start-hook.js\"",
-            "timeout": 5000
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": {
-          "tool_name": "Edit"
-        },
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-use-hook.js\"",
-            "timeout": 10000
-          },
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-validator.js\"",
-            "timeout": 10000
-          }
-        ]
-      },
-      {
-        "matcher": {
-          "tool_name": "Write"
-        },
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-use-hook.js\"",
-            "timeout": 10000
-          },
-          {
-            "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/post-tool-validator.js\"",
-            "timeout": 10000
-          }
-        ]
-      }
     ]
   },
   "subagents": {
     "code-simplifier": {
       "description": "Simplifies code after BUILD phase - removes complexity. Invoke via Task tool.",
       "prompt_file": "src/subagents/code-simplifier.md"
+    },
+    "decision-checker": {
+      "description": "Validates BUILD implementation against locked decisions in decisions.md. Prevents mid-build pivots.",
+      "prompt_file": "src/subagents/decision-checker.md"
     },
     "verify-app": {
       "description": "E2E verification before COMPLETE - browser or CLI testing.",

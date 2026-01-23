@@ -14,7 +14,24 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-const PERSISTENT_TASKS_FILE = '.deep/persistent-tasks.json';
+// Session-specific directory management
+let DEEP_DIR = '.deep'; // Default, will be updated with session ID
+let sessionId = null;
+
+function initDeepDir(sid) {
+  sessionId = sid;
+  if (sid && sid.length >= 8) {
+    // Use short session ID (first 8 chars) for readability
+    DEEP_DIR = `.deep-${sid.slice(0, 8)}`;
+  }
+  return DEEP_DIR;
+}
+
+function getDeepPath(filename) {
+  return path.join(DEEP_DIR, filename);
+}
+
+const PERSISTENT_TASKS_FILE = () => getDeepPath('persistent-tasks.json');
 const DEFAULT_TASK_STALE_HOURS = 24;
 const DEFAULT_CLEANUP_DAYS = 7;
 
@@ -154,10 +171,10 @@ function cleanupStaleDeepDirs(maxAgeDays) {
 
 function readPersistentTasks() {
   try {
-    if (!fs.existsSync(PERSISTENT_TASKS_FILE)) {
+    if (!fs.existsSync(PERSISTENT_TASKS_FILE())) {
       return null;
     }
-    return JSON.parse(fs.readFileSync(PERSISTENT_TASKS_FILE, 'utf8'));
+    return JSON.parse(fs.readFileSync(PERSISTENT_TASKS_FILE(), 'utf8'));
   } catch (e) {
     return null;
   }
@@ -244,4 +261,31 @@ The session will continue. When you try to exit, pending tasks will be enforced.
   process.exit(0);
 }
 
-main();
+// Read hook input from stdin to get session_id
+let hookInput = '';
+process.stdin.setEncoding('utf8');
+
+process.stdin.on('data', (chunk) => {
+  hookInput += chunk;
+});
+
+process.stdin.on('end', () => {
+  try {
+    const input = JSON.parse(hookInput);
+    // Initialize session-specific directory
+    initDeepDir(input.session_id);
+  } catch (e) {
+    // No valid input, use legacy .deep directory
+    initDeepDir(null);
+  }
+  main();
+});
+
+// Timeout - don't hang indefinitely waiting for stdin
+setTimeout(() => {
+  if (!hookInput) {
+    // No stdin received, use legacy .deep directory
+    initDeepDir(null);
+    main();
+  }
+}, 3000);
