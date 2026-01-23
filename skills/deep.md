@@ -8,17 +8,21 @@ A self-correcting development loop with senior dev capabilities:
 
 ## Startup Banner
 
-When `/deep` starts, output:
+When `/deep` starts:
+
+1. **First**, run: `echo $DEEP_LOOP_TASKS_ENABLED` to check Task Sync status
+2. **Then** output banner with correct status:
+
 ```
 ╔═══════════════════════════════════════╗
 ║  DEEP LOOP v7.2.1                     ║
 ║  Senior Dev Mode: ✓ enabled           ║
 ║  External Loop: ✓ supported           ║
-║  Task Sync: {✓ enabled | ○ disabled}  ║
+║  Task Sync: ✓ enabled                 ║
 ╚═══════════════════════════════════════╝
 ```
 
-Check `DEEP_LOOP_TASKS_ENABLED` env var. If `true`, Task Sync is enabled.
+Show `✓ enabled` if `DEEP_LOOP_TASKS_ENABLED=true`, else `○ disabled`.
 
 ## Key Mechanism
 
