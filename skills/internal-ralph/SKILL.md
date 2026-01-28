@@ -1,3 +1,9 @@
+---
+name: internal-ralph
+description: Skill from deep-loop plugin
+version: 8.0.0
+---
+
 # Internal Ralph Mode (Max Subscription)
 
 ## Overview

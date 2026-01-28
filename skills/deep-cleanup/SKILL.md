@@ -1,3 +1,9 @@
+---
+name: deep-cleanup
+description: Skill from deep-loop plugin
+version: 8.0.0
+---
+
 # Deep Cleanup
 
 Manually clean up stale files from deep loop sessions.

@@ -1,3 +1,9 @@
+---
+name: diagnose-hooks
+description: Skill from deep-loop plugin
+version: 8.0.0
+---
+
 # Diagnose Hook Errors
 
 Troubleshoot Claude Code hook errors (PreToolUse, PostToolUse, etc.)

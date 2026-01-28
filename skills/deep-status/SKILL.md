@@ -1,3 +1,9 @@
+---
+name: deep-status
+description: Skill from deep-loop plugin
+version: 8.0.0
+---
+
 # Deep Loop Status - Rich Display
 
 Display comprehensive deep loop session status with progress metrics.

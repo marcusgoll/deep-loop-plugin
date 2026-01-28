@@ -1,3 +1,9 @@
+---
+name: cancel-ralph
+description: Skill from deep-loop plugin
+version: 8.0.0
+---
+
 # Cancel Ralph Mode
 
 Stop ralph mode immediately by marking all PRD tasks as complete or deleting the PRD.

@@ -1,3 +1,9 @@
+---
+name: start-ralph
+description: Skill from deep-loop plugin
+version: 8.0.0
+---
+
 # Start Ralph Mode
 
 Create a PRD backlog and enter ralph mode for autonomous long-running task processing.
