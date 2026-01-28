@@ -1,3 +1,9 @@
+---
+name: deep-quick
+description: Skill from deep-loop plugin
+version: 8.0.0
+---
+
 # Deep Quick - Fast Mode for Small Tasks
 
 Skip planning ceremony for quick tasks. Straight to BUILD with 3-iteration limit.

@@ -1,3 +1,9 @@
+---
+name: deep
+description: Skill from deep-loop plugin
+version: 8.0.0
+---
+
 # Deep Loop - Deterministic Development Protocol
 
 **Version 8.0.0** | Multi-Agent + External loop + Senior Dev Mode + Task Sync
