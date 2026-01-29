@@ -1,0 +1,27 @@
+{
+  "description": "Deep Loop plugin hooks for session management",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/auto-update.js\"",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/src/stop-hook-v2.js\"",
+            "timeout": 30000
+          }
+        ]
+      }
+    ]
+  }
+}
