@@ -1,7 +1,7 @@
 ---
 name: diagnose-hooks
 description: Skill from deep-loop plugin
-version: 8.0.0
+version: 9.0.0
 ---
 
 # Diagnose Hook Errors

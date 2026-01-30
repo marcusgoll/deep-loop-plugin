@@ -1,7 +1,7 @@
 ---
 name: deep-quick
 description: Skill from deep-loop plugin
-version: 8.0.0
+version: 9.0.0
 ---
 
 # Deep Quick - Fast Mode for Small Tasks

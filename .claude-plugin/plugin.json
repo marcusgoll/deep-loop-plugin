@@ -1,7 +1,7 @@
 {
   "name": "deep-loop",
-  "version": "8.0.0",
-  "description": "Autonomous deep development loop with multi-agent BUILD phase. Fresh context per task, parallel execution, intelligent retries.",
+  "version": "9.0.0",
+  "description": "Autonomous deep development loop with multi-agent BUILD phase. Fresh context per task, parallel execution, intelligent retries. Includes deep-add, deep-execute, deep-plan, deep-triage, deep-fullstack skills.",
   "author": {
     "name": "Marcus Gollahon",
     "email": "marcus@example.com"
