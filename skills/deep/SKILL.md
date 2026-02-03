@@ -62,6 +62,38 @@ You are not just writing code. You are shaping the future of this project.
 
 ---
 
+## When to Ask User (Rare)
+
+**Default: Proceed autonomously.** User invoked /deep = implicit trust.
+
+Score each assumption 1-3:
+- **3 (Technical):** Proceed autonomously (stack, patterns, performance tradeoffs)
+- **2 (Minor ambiguity):** Interpret generously, proceed
+- **1 (Business logic unclear):** MUST ask
+
+**Only surface score=1 to user. Max 2 questions/task.**
+
+### Always Autonomous
+- Tech stack choices (analyze codebase, decide)
+- Code patterns (follow existing conventions)
+- Minor scope clarifications (interpret generously)
+- Performance tradeoffs <10% (engineering judgment)
+- Test strategy (TDD mandatory per protocol)
+
+### Ask Only When
+- Ambiguous business logic (e.g., "edit posts" = edit others' posts?)
+- Destructive ops (delete prod data, breaking API changes requiring user awareness)
+- Budget blowout (task estimated 3x longer than triaged, user should know)
+
+**Example:**
+
+✅ "Add caching" → Autonomously choose Redis (matches existing infra)
+❌ "Delete inactive users" → Ask: "Delete = soft delete or hard delete? Threshold = 90 days?"
+
+See `.claude/rules/hedging.md` for prescriptive tone guidance.
+
+---
+
 ## Task Sync Layer (Optional)
 
 **Feature flag:** `DEEP_LOOP_TASKS_ENABLED=true` (default: false)
@@ -309,38 +341,81 @@ atlas_pack(task: "{task_description}", budget: 50)
 ```
 Read `pack.json` for relevant files/symbols before planning.
 
-#### Step 1: Assumptions Preview
+#### Step 1: Locked Assumptions (Auto-Approved)
 
-Before detailed planning, output your assumptions to the user:
+Output assumptions as locked declarations, proceed immediately:
 
 ```markdown
-## Planning Assumptions
+## Locked Assumptions (Auto-Approved)
 
-**Task Understanding:**
-- [What I think you're asking for]
+**Task:** [What you're building - specific, not vague]
+**Stack:** [Technology] BECAUSE [reason - codebase patterns, requirements, etc.]
+**Files:** [List of files to modify]
+**Scope IN:** [Included features/behavior]
+**Scope OUT:** [Explicitly excluded - prevents scope creep]
+**Key Bets:** [Critical decisions] - no alternatives considered
 
-**Technical Approach:**
-- [Technology/pattern I plan to use]
-- [Files I expect to modify]
-
-**Scope Boundaries:**
-- [What I WILL do]
-- [What I WON'T do (out of scope)]
-
-**Key Decisions:**
-- [Decision 1]: [My planned choice]
-- [Decision 2]: [My planned choice]
+These are LOCKED. Proceeding to detailed plan immediately.
 ```
 
-**Wait for user approval** via AskUserQuestion before proceeding.
+**Rationale:** User invoked /deep = implicit trust. Faster time-to-first-commit, less decision fatigue. See `.claude/rules/hedging.md` for prescriptive tone guidance.
+
+#### Step 1.5: Root Cause Analysis (Mandatory Gate)
+
+Before detailed planning, force re-evaluation with existing context:
+
+**Question:** Are we solving the ROOT PROBLEM or treating a SYMPTOM?
+
+```markdown
+## Root Cause Analysis
+
+**Surface request:** [Stated task from user]
+**Underlying need:** [Inferred root problem]
+**Architectural issue:** [Is there deeper design flaw? YES/NO + explanation]
+
+**Classification:**
+- [ ] SYMPTOM: Treating immediate pain point (root out of scope)
+- [ ] ROOT: Addressing underlying design/architecture issue (preferred)
+
+**If SYMPTOM chosen:**
+Root problem documented in decisions.md under "Known Technical Debt"
+Continuing with symptom fix (root logged for future)
+
+**If ROOT chosen:**
+Expanded scope to address root cause
+Decision locked to prevent symptom-only implementation
+```
+
+See `.claude/rules/root-cause.md` for classification guidance.
+
+**This gate ensures durable solutions, not fragile patches.**
 
 #### Step 2: Detailed Plan
 
-After user approves, create `.deep-{session8}/plan.md`:
+Create `.deep-{session8}/plan.md`:
 - Problem statement
 - Testable acceptance criteria
-- Atomic task breakdown
+- Atomic task breakdown (see atomicity rules below)
 - Risk assessment
+
+**Task Atomicity Rules (MANDATORY):**
+
+Each atomic task MUST:
+- Touch ≤3 files (if >3, split further)
+- Complete in ≤20 minutes
+- Have 1-3 acceptance criteria (specific, testable)
+- Produce ≤1 primary commit (RED+GREEN+REFACTOR = 1 logical change)
+
+**Examples:**
+
+❌ BAD: "Implement user authentication" (too coarse, 10+ files, 2+ hours)
+
+✅ GOOD:
+- "Add User model with email/password" (15 min, 2 files)
+- "Implement JWT signing endpoint" (20 min, 1 file)
+- "Add auth middleware" (10 min, 1 file)
+
+**Anti-pattern:** Tasks that span multiple subsystems or require hours of work.
 
 Also create `.deep-{session8}/decisions.md`:
 ```markdown
@@ -418,7 +493,26 @@ When `mode: "external"` in state.json, after PLAN phase:
 
 5. **Stay available** - Don't exit. User may have follow-up questions or want to monitor.
 
-**Note:** In external mode, assumptions are auto-approved during BUILD. The plan was already approved interactively.
+**External Mode: Fully Autonomous Execution**
+
+When `mode="external"`, the loop operates with zero mid-stream user interaction:
+
+**Auto-approved:**
+- PLAN assumptions (logged, not prompted)
+- Decision drift (auto-resolved via decision-checker, logged)
+- Task failures (auto-retry 3x → escalate to log, not user)
+
+**User reviews `.deep-{session8}/loop.log` AFTER completion.**
+
+**Zero interruptions** - defeats "overnight mode" if user must approve mid-stream.
+
+**Max autonomous time:** ≤8 hours
+- If not DEEP_COMPLETE after 8h → pause, log, notify user
+
+**Guardrails:**
+- Commit frequency monitoring (no commits >45 min → stuck, escalate)
+- Test passage trends (declining → bad direction, escalate)
+- Drift classifier (safe auto-accept, dangerous auto-revert)
 
 ---
 
@@ -467,23 +561,48 @@ Write to `.deep-{session8}/tasks-status.json`:
 }
 ```
 
-##### Step 2: Spawn Task Agents
+##### Step 2: Orchestrator Algorithm (Deterministic)
 
-**For independent tasks (no unmet dependencies), spawn up to 3 in parallel:**
+**No "what should I do?" moments. Algorithm decides.**
 
+**1. Select next batch:**
 ```javascript
-// Pseudo-code for orchestrator logic
-pendingTasks = tasks.filter(t => t.status === 'pending' && allDepsComplete(t))
-independentBatch = pendingTasks.slice(0, 3)
+// Filter ready tasks (pending + dependencies complete)
+readyTasks = tasks.filter(t => t.status === 'pending' && allDepsComplete(t))
 
-// Spawn in parallel using Task tool
-for each task in independentBatch:
+// Take first N (up to maxParallel), no prioritization debate
+batch = readyTasks.slice(0, maxParallel)  // maxParallel = 3
+```
+
+**2. Spawn agents (parallel, no waiting):**
+```javascript
+for task in batch:
   Task({
     subagent_type: "general-purpose",
     description: `Build: ${task.title}`,
-    prompt: buildTaskAgentPrompt(task)
-  })
+    prompt: buildTaskAgentPrompt(task),
+    run_in_background: false  // Wait for completion to handle results
+  }) &  // Parallel spawn
 ```
+
+**3. Handle failures (prescriptive retry):**
+```javascript
+if attempts < 2:
+  // Retry same prompt (transient error)
+  task.status = "pending"
+  task.attempts += 1
+else if attempts < 3:
+  // New agent + error context (learn from failure)
+  Task({ prompt: `Previous error: ${lastError}\n\nTry different approach.\n\n${originalPrompt}` })
+  task.attempts += 1
+else:
+  // Log escalation, continue other tasks (don't block)
+  task.status = "escalated"
+  log(`Task ${task.id} blocked after 3 attempts: ${lastError}`)
+  // DO NOT prompt user - continue with remaining tasks
+```
+
+**No manual orchestration. Deterministic scheduling.**
 
 **Task agent prompt template:**
 ```markdown
@@ -611,38 +730,107 @@ Before BUILD_COMPLETE:
 
 ### PHASE: REVIEW
 
-Run comprehensive validation:
-1. `npm test` (or equivalent)
-2. `npm run typecheck`
-3. `npm run lint`
-4. `npm run build`
-5. `atlas check` (if Atlas available) - verify no API drift
+**Binary Completion Gate (Zero Exceptions)**
+
+ALL checks MUST pass with 0 failures:
+
+1. **Tests:** 100% pass (no "flaky test" excuses)
+2. **Lint:** 0 warnings (fix or disable rule explicitly, no //ignore)
+3. **Types:** 0 errors (any `any` = instant fail)
+4. **Build:** Success (no "works on my machine")
+5. **Atlas check:** (if available) No API drift
+
+**No "mostly working" states. Binary: PASS→SHIP or FAIL→FIX.**
+
+Run validation:
+```bash
+npm test && npm run typecheck && npm run lint && npm run build && atlas check
+```
 
 Record in `.deep-{session8}/test-results.json`:
 ```json
 {
   "allPassed": true,
   "results": {
-    "tests": { "ran": true, "passed": true },
-    "types": { "ran": true, "passed": true },
-    "lint": { "ran": true, "passed": true },
+    "tests": { "ran": true, "passed": true, "failures": 0 },
+    "types": { "ran": true, "passed": true, "errors": 0 },
+    "lint": { "ran": true, "passed": true, "warnings": 0 },
     "build": { "ran": true, "passed": true }
   }
 }
 ```
 
-**If ALL pass:** Update state.json `"phase": "SHIP"`
-**If ANY fail:** Update state.json `"phase": "FIX"`, add to issues.json
+**If ALL pass (100%):** Update state.json `"phase": "SHIP"`
+**If ANY fail (even 1):** Update state.json `"phase": "FIX"`, add to issues.json (automatic, no discussion)
 **Output:** `<promise>REVIEW_COMPLETE</promise>`
+
+**Pre-SHIP Root Cause Validation:**
+
+Before proceeding to SHIP, validate:
+
+```markdown
+## Pre-Ship Root Cause Check
+
+**Did we solve root problem or just treat symptoms?**
+
+Review completed work:
+- Changes made: [List]
+- Problem addressed: [Surface vs root]
+- Technical debt introduced: [Any shortcuts?]
+- Follow-up needed: [Root issues deferred?]
+
+**Pass criteria:**
+- SYMPTOM fixed: Root documented in decisions.md as known debt ✓
+- ROOT fixed: No shortcuts, design is sound ✓
+
+**Fail criteria:**
+- Symptom fixed but root NOT documented → Revisit FIX
+- Hack/workaround without justification → Refactor or document
+
+Only SHIP when confident solution is durable, not fragile.
+```
+
+See `.claude/rules/root-cause.md` for classification.
 
 ---
 
 ### PHASE: FIX
 
+**Failure Root Cause Check (Mandatory)**
+
+When test fails or bug found, STOP and ask:
+
+**Is this test failure a symptom of a deeper issue?**
+
+Check for:
+- Race condition masking timing issue
+- Flaky test revealing state leakage
+- Edge case exposing design flaw
+- Error message hiding real problem
+
+**Decision:**
+- **SYMPTOM:** Note in test comment, fix locally
+- **ROOT:** Expand FIX scope to address underlying issue
+
+**Examples:**
+
+❌ "Test fails randomly" → Add retry logic (SYMPTOM)
+✅ "Test fails randomly" → Fix shared state pollution (ROOT)
+
+❌ "API timeout" → Add retry (SYMPTOM)
+✅ "API timeout" → Fix N+1 query causing timeouts (ROOT)
+
+See `.claude/rules/root-cause.md` for classification.
+
+**Don't patch over problems - solve them.**
+
+---
+
 Address `.deep-{session8}/issues.json`:
-1. Fix each issue
-2. Commit atomically
-3. Run validation
+1. **Run root cause check** for each failure
+2. Fix each issue (root or symptom, documented)
+3. Commit atomically
+4. Run validation
 
 **When all fixed:** Clear issues.json, update state.json `"phase": "REVIEW"`
 **Output:** `<promise>FIX_COMPLETE</promise>`
@@ -687,6 +875,77 @@ TaskUpdate(parentTaskId, {
 ```
 
 - **Output:** `<promise>DEEP_COMPLETE</promise>`
+
+---
+
+### PHASE: LESSONS_LEARNED (Post-Completion Self-Review)
+
+**Before exiting /deep loop, reflect on what went wrong and create prevention rules.**
+
+Every correction should add a rule so it never happens again. This is continuous improvement.
+
+**Reflection Prompts:**
+
+1. **Wrong assumptions:** What did I assume incorrectly? When discovered? How to catch earlier?
+2. **Unescalated confusion:** What ambiguity did I guess on instead of escalating?
+3. **Overcomplication:** What code is more complex than needed? Why?
+4. **Scope creep:** What out-of-scope changes did I make? Why?
+5. **Missed root cause:** Did I solve symptom instead of root? What's the underlying issue?
+
+**Output to `.deep-{session8}/lessons-learned.md`:**
+
+```markdown
+# Lessons Learned - {timestamp}
+
+## Issue 1: [Title]
+**What happened:** [Description of mistake/issue]
+**Caught:** [Which phase/when discovered]
+**Prevention:** [Rule to prevent recurrence]
+
+## Issue 2: [Title]
+**What happened:** [Description]
+**Caught:** [When]
+**Prevention:** [Rule]
+```
+
+**Examples:**
+
+```markdown
+## Issue 1: Assumed JWT in headers, actually in cookies
+**What happened:** Implemented JWT extraction from Authorization header, failed in tests
+**Caught:** BUILD phase test failures
+**Prevention:** In PLAN phase, grep for existing auth patterns before assuming: `grep -r "jwt\|token" middleware/`
+
+## Issue 2: Created abstraction class for 2 use cases
+**What happened:** Built ConfigManager class, only used in 2 places
+**Caught:** Self-review flagged premature abstraction
+**Prevention:** Task-agent blocks abstractions with <3 uses (add to simplicity.md)
+
+## Issue 3: Added cache, didn't fix N+1 query (symptom fix)
+**What happened:** Slow API → added Redis cache, performance still degraded after cache expired
+**Caught:** Performance monitoring showed spikes at cache TTL
+**Prevention:** FIX phase checks query patterns before adding cache (root vs symptom)
+```
+
+**User Promotion Workflow:**
+
+After /deep completes, user reviews `.deep-{session8}/lessons-learned.md`.
+
+For valuable rules, promote to plugin files:
+```bash
+# Add to task-agent.md
+echo "Check existing auth patterns before assuming: grep -r 'auth' ." >> agents/task-agent.md
+
+# Or update rules files
+echo "Abstractions require 3+ uses (not 2)" >> .claude/rules/simplicity.md
+```
+
+**Metrics to Track:**
+- Lessons per session (track over time)
+- Rule promotion rate (how many become permanent)
+- Repeat mistakes (same lesson twice = enforcement failure)
+
+This builds institutional knowledge - don't repeat mistakes.
 
 ---
 

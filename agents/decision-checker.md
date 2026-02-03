@@ -103,27 +103,61 @@ Recommendation:
 - Update decisions.md with user approval before proceeding
 ```
 
-## Drift Handling
+## Drift Handling (Auto-Resolution)
 
 When DRIFT_DETECTED:
 
-1. **Pause BUILD** - Do not proceed to REVIEW
-2. **Ask user** via AskUserQuestion:
-   ```json
-   {
-     "question": "Implementation drifted from plan. How to proceed?",
-     "header": "Decision Drift",
-     "options": [
-       {"label": "Revert to plan", "description": "Undo drift, implement as originally planned"},
-       {"label": "Update decisions", "description": "Lock the new approach instead"},
-       {"label": "Ignore drift", "description": "Proceed anyway (not recommended)"}
-     ]
-   }
-   ```
+### Auto-Resolution Strategy
 
-3. **If revert**: Undo drifted changes, re-implement
-4. **If update**: Modify decisions.md, continue to REVIEW
-5. **If ignore**: Log warning, proceed with risk noted
+Classify drift severity:
+
+**MINOR (auto-accept):**
+- Equivalent library (lodash → ramda for same operation)
+- Different variable naming (maintains semantics)
+- Functionally equivalent implementation
+- Same API surface, different internals
+
+**MAJOR (auto-revert):**
+- Incompatible architecture (REST → GraphQL)
+- Breaking API changes (signature modifications)
+- Database schema conflicts
+- Security/auth pattern deviations
+
+### Classification Heuristic
+
+```
+if functionally_equivalent AND api_compatible:
+    severity = MINOR
+    action = AUTO_ACCEPT
+else if breaks_architecture OR breaks_api OR breaks_db_schema:
+    severity = MAJOR
+    action = AUTO_REVERT
+else:
+    severity = MAJOR  # Default to safer option
+    action = AUTO_REVERT
+```
+
+### Execution
+
+1. **Classify drift** using heuristic above
+2. **MINOR:** Log to `.deep-{session8}/drift-log.md`, proceed
+3. **MAJOR:** Auto-revert changes, re-implement per plan
+4. **Inform user** (notification, not question)
+
+### Drift Log Format
+
+```.deep-{session8}/drift-log.md
+## Drift Event {timestamp}
+
+**Severity:** MINOR
+**Decision:** Use Ramda instead of Lodash
+**Planned:** Lodash map
+**Actual:** Ramda map
+**Action:** AUTO_ACCEPT (functionally equivalent)
+**Rationale:** Same operation, team familiar with Ramda
+```
+
+**Rationale:** Zero decision fatigue. Loop continues autonomously. See anti-prompting principles.
 
 ## Integration Points
 
