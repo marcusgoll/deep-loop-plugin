@@ -1,6 +1,6 @@
 {
   "name": "deep-loop",
-  "version": "9.0.0",
+  "version": "10.0.0",
   "type": "module",
   "description": "Autonomous deep development loop with Task Sync and Atlas MCP integration. Includes deep-add, deep-execute, deep-plan, deep-triage, deep-fullstack skills.",
   "author": "Marcus Gollahon",
