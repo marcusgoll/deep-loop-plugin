@@ -1,6 +1,6 @@
 # Deep Loop
 
-**v8.0.0** | Autonomous development loop for Claude Code
+**v9.0.0** | Autonomous development loop for Claude Code
 
 A deterministic, self-correcting development protocol with multi-agent BUILD phase, TDD enforcement, and senior dev mode.
 

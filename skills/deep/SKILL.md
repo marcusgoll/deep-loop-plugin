@@ -6,7 +6,7 @@ version: 9.0.0
 
 # Deep Loop - Deterministic Development Protocol
 
-**Version 8.0.0** | Multi-Agent + External loop + Senior Dev Mode + Task Sync
+**Version 9.0.0** | Multi-Agent + External loop + Senior Dev Mode + Task Sync
 
 A self-correcting development loop with senior dev capabilities:
 
@@ -21,7 +21,7 @@ When `/deep` starts:
 
 ```
 ╔═══════════════════════════════════════╗
-║  DEEP LOOP v8.0.0                     ║
+║  DEEP LOOP v9.0.0                     ║
 ║  Multi-Agent Build: ✓ enabled         ║
 ║  Senior Dev Mode: ✓ enabled           ║
 ║  External Loop: ✓ supported           ║
@@ -129,7 +129,7 @@ Task Management Layer        ← Recovery + Visibility
 
 ## Multi-Agent Build Architecture
 
-**NEW in v8.0.0:** BUILD phase uses Task agents for fresh context per atomic task.
+**NEW in v9.0.0:** Auto-applied protocol via AGENTS.md pattern. Use `/deep` for verbose multi-agent mode.
 
 ### Architecture
 
