@@ -143,8 +143,8 @@ ${taskSyncPrompt}
 When ALL work is complete: <promise>DEEP_COMPLETE</promise>"
 
   # Run Claude Code CLI with the phase prompt
-  # Uses OAuth tokens from ~/.claude/.credentials.json automatically
-  if ! claude -p "\$PHASE_PROMPT" \\
+  # Unset ANTHROPIC_API_KEY to force OAuth token usage (Windows fix)
+  if ! env -u ANTHROPIC_API_KEY claude -p "\$PHASE_PROMPT" \\
     --output-format text \\
     --allowedTools "Read,Edit,Write,Bash,Grep,Glob,Task" \\
     --dangerously-skip-permissions 2>&1 | tee -a "\$LOG_FILE"; then
