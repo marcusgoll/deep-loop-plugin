@@ -4,11 +4,16 @@
  * Generate External Loop Script
  *
  * Creates a bash script for external loop mode orchestration.
- * The script runs Gemini CLI iteratively until DEEP_COMPLETE or max iterations.
+ * The script runs Claude Code CLI iteratively until DEEP_COMPLETE or max iterations.
  *
  * Task Sync Integration (v7.2.0):
  * - If DEEP_LOOP_TASKS_ENABLED=true, includes TaskList query for Ralph mode
  * - Allows multiple sessions to claim different atomic tasks
+ *
+ * Migration (v7.3.0): Gemini CLI → Claude Code CLI
+ * - Uses OAuth tokens from ~/.claude/.credentials.json
+ * - No env vars needed
+ * - --dangerously-skip-permissions for full autonomy
  */
 
 import fs from 'fs';
@@ -84,18 +89,10 @@ notify() {
 # Ensure we're in the right directory
 cd "$CWD" || { echo "Failed to cd to $CWD"; exit 1; }
 
-# Gemini CLI path (installed globally via npm)
-GEMINI_CLI="$HOME/AppData/Roaming/npm/node_modules/@google/gemini-cli/dist/index.js"
-
-# Check dependencies
-if ! command -v node &> /dev/null; then
-  echo "Error: 'node' not found in PATH"
-  exit 1
-fi
-
-if [[ ! -f "\$GEMINI_CLI" ]]; then
-  echo "Error: Gemini CLI not found at \$GEMINI_CLI"
-  echo "Install with: npm install -g @google/gemini-cli"
+# Check Claude Code CLI is available
+if ! command -v claude &> /dev/null; then
+  echo "Error: Claude Code CLI not found"
+  echo "Install from: https://claude.ai/download"
   exit 1
 fi
 
@@ -145,10 +142,14 @@ Do NOT ask for user confirmation - execute autonomously.
 ${taskSyncPrompt}
 When ALL work is complete: <promise>DEEP_COMPLETE</promise>"
 
-  # Run Gemini with the phase prompt (-y for yolo mode, -m for model)
-  if ! node "\$GEMINI_CLI" "\$PHASE_PROMPT" -y -m gemini-3-flash-preview -o text 2>&1 | tee -a "\$LOG_FILE"; then
-    echo "Gemini exited with error at iteration \$iteration" | tee -a "\$LOG_FILE"
-    notify "ERROR" "Gemini exited with error at iteration \$iteration"
+  # Run Claude Code CLI with the phase prompt
+  # Uses OAuth tokens from ~/.claude/.credentials.json automatically
+  if ! claude -p "\$PHASE_PROMPT" \\
+    --output-format text \\
+    --allowedTools "Read,Edit,Write,Bash,Grep,Glob,Task" \\
+    --dangerously-skip-permissions 2>&1 | tee -a "\$LOG_FILE"; then
+    echo "Claude exited with error at iteration \$iteration" | tee -a "\$LOG_FILE"
+    notify "ERROR" "Claude exited with error at iteration \$iteration"
   fi
 
   # Check for DEEP_COMPLETE in state.json

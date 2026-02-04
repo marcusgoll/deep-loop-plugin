@@ -1,12 +1,12 @@
 ---
 name: deep
 description: Skill from deep-loop plugin
-version: 9.0.0
+version: 10.0.0
 ---
 
 # Deep Loop - Deterministic Development Protocol
 
-**Version 9.0.0** | Multi-Agent + External loop + Senior Dev Mode + Task Sync
+**Version 10.0.0** | Multi-Agent + External loop + Anti-Prompting + Task Sync
 
 A self-correcting development loop with senior dev capabilities:
 
@@ -21,7 +21,7 @@ When `/deep` starts:
 
 ```
 ╔═══════════════════════════════════════╗
-║  DEEP LOOP v9.0.0                     ║
+║  DEEP LOOP v10.0.0                    ║
 ║  Multi-Agent Build: ✓ enabled         ║
 ║  Senior Dev Mode: ✓ enabled           ║
 ║  External Loop: ✓ supported           ║
