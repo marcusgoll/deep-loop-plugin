@@ -1,7 +1,8 @@
 ---
 name: deep-add
-description: Add tasks to the shared deep loop task queue. Use when user wants to add tasks for later execution by /deep execute.
+description: Add tasks to deep loop queue (.deep/tasks.md). Use when user asks to 'add task', 'queue this', 'deep add'. Interactively gathers task details.
 version: 9.0.0
+argument-hint: [task to add]
 ---
 
 # Deep Add - Interactive Task Queue Management

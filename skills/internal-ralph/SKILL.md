@@ -1,7 +1,8 @@
 ---
 name: internal-ralph
-description: Skill from deep-loop plugin
+description: Internal ralph mode executor. Processes PRD backlog using Task subagents. Called by start-ralph, not user-invoked directly.
 version: 9.0.0
+user-invocable: false
 ---
 
 # Internal Ralph Mode (Max Subscription)

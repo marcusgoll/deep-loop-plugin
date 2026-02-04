@@ -1,7 +1,9 @@
 ---
 name: deep-quick
-description: Skill from deep-loop plugin
+description: Fast mode for small tasks (<30 lines, single file). Use when user asks for 'quick fix', 'fast fix', 'simple change'. Skips planning, 3-iteration limit.
 version: 9.0.0
+argument-hint: [quick fix description]
+allowed-tools: Read, Write, Edit, Bash, Grep, Glob
 ---
 
 # Deep Quick - Fast Mode for Small Tasks

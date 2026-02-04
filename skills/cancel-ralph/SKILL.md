@@ -1,6 +1,6 @@
 ---
 name: cancel-ralph
-description: Skill from deep-loop plugin
+description: Stop ralph mode PRD processing. Use when user asks to 'cancel ralph', 'stop autonomous mode'. Halts background execution.
 version: 9.0.0
 ---
 

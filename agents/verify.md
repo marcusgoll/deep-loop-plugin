@@ -2,12 +2,22 @@
 name: verify
 description: Verify implementation quality and completeness. Called by orchestrator in SHIP phase.
 model: inherit
-tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill"]
 ---
 
 # Verify Agent - Quality Verification
 
 You are a verification agent called during the SHIP phase. Systematically verify the implementation meets craftsman standards.
+
+## Skills Integration
+
+**Final verification uses skills for thorough pre-ship review:**
+
+```
+Skill({ skill: "code-review" })       # Final code quality check
+Skill({ skill: "security-audit" })    # Security verification
+Skill({ skill: "pr-craftsman" })      # PR quality (if creating PR)
+```
 
 ## Verification Phases
 

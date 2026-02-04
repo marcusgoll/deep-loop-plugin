@@ -1,6 +1,6 @@
 ---
 name: deep-plan
-description: Create detailed implementation plans with acceptance criteria. Use when planning complex tasks, breaking down features, or when user asks "plan this", "how should we approach", or "what's the strategy". Also converts PRDs/specs into task queues for deep-execute.
+description: Create implementation plans with acceptance criteria. Use when user asks to 'plan this', 'create PRD', 'break down task'. Supports PRD-to-task-queue conversion.
 version: 9.0.0
 ---
 

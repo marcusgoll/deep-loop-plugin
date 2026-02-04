@@ -1,7 +1,8 @@
 ---
 name: deep-cleanup
-description: Skill from deep-loop plugin
+description: Clean up stale deep loop files. Use when user asks to 'clean up', 'remove .deep directories'. Removes old session artifacts.
 version: 9.0.0
+allowed-tools: Bash
 ---
 
 # Deep Cleanup

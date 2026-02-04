@@ -1,6 +1,6 @@
 ---
 name: start-ralph
-description: Skill from deep-loop plugin
+description: Start autonomous PRD processing (ralph mode). Use when user asks for 'overnight mode', 'process PRD', 'autonomous execution'. Long-running background tasks.
 version: 9.0.0
 ---
 

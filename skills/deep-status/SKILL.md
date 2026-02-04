@@ -1,7 +1,8 @@
 ---
 name: deep-status
-description: Skill from deep-loop plugin
+description: Check deep loop progress and session state. Use when user asks 'what status', 'where are we', 'deep status'. Shows phase, tasks, and iteration count.
 version: 9.0.0
+allowed-tools: Read, Bash, Grep, Glob
 ---
 
 # Deep Loop Status - Rich Display

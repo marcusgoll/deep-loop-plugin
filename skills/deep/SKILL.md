@@ -1,12 +1,14 @@
 ---
 name: deep
-description: Skill from deep-loop plugin
-version: 10.0.0
+description: Start deterministic development loop (PLAN→BUILD→REVIEW→FIX→SHIP). Use when user asks to 'deep loop', 'implement feature', 'build with TDD', or mentions multi-agent BUILD. Supports external/ralph modes.
+version: 10.1.0
+argument-hint: [task description]
+allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Task, Skill
 ---
 
 # Deep Loop - Deterministic Development Protocol
 
-**Version 10.0.0** | Multi-Agent + External loop + Anti-Prompting + Task Sync
+**Version 10.1.0** | Multi-Agent + Skills Integration + External loop + Task Sync
 
 A self-correcting development loop with senior dev capabilities:
 
@@ -21,9 +23,9 @@ When `/deep` starts:
 
 ```
 ╔═══════════════════════════════════════╗
-║  DEEP LOOP v10.0.0                    ║
+║  DEEP LOOP v10.1.0                    ║
 ║  Multi-Agent Build: ✓ enabled         ║
-║  Senior Dev Mode: ✓ enabled           ║
+║  Skills Integration: ✓ enabled        ║
 ║  External Loop: ✓ supported           ║
 ║  Task Sync: ✓ enabled                 ║
 ╚═══════════════════════════════════════╝
@@ -59,6 +61,50 @@ You are not just writing code. You are shaping the future of this project.
 - The corners you cut will be cut again
 - Fight entropy
 - Leave the codebase better than you found it
+
+---
+
+## Skills Integration (MANDATORY)
+
+**Use skills for quality gates at each phase.** Skills provide specialized expertise.
+
+| Phase | Required Skills | Purpose |
+|-------|-----------------|---------|
+| **BUILD** | `/tdd-workflow` | Test-first development, RED→GREEN→REFACTOR |
+| **REVIEW** | `/code-review`, `/security-audit` | Quality and security validation |
+| **FIX** | `/debug-investigate` | Root cause analysis, not symptom patching |
+| **SHIP** | `/pr-craftsman` | Well-structured PR with proper description |
+
+### Skill Invocation
+
+Use the Skill tool to invoke skills:
+```
+Skill({ skill: "code-review" })
+Skill({ skill: "security-audit" })
+```
+
+### Phase-Skill Mapping
+
+**BUILD Phase:**
+- Before writing code: `Skill({ skill: "tdd-workflow" })`
+- For frontend: Also invoke `frontend-quality` or `react-best-practices`
+
+**REVIEW Phase (MANDATORY):**
+- `Skill({ skill: "code-review" })` - Catch bugs, style issues, anti-patterns
+- `Skill({ skill: "security-audit" })` - OWASP top 10, auth/authz, input validation
+- If issues found → phase fails → FIX phase
+
+**FIX Phase:**
+- `Skill({ skill: "debug-investigate" })` - Root cause, not symptoms
+- Reference `.claude/rules/root-cause.md`
+
+**SHIP Phase:**
+- `Skill({ skill: "pr-craftsman" })` - Proper PR title, description, labels
+
+### External Mode
+
+External loop (`--external`) now includes Skill tool in `--allowedTools`.
+Skills are available in both internal and external modes.
 
 ---
 
@@ -240,22 +286,23 @@ Verify no API drift. If fails, fix before proceeding.
 
 ### Loop Mode Selection
 
-**Default: Internal loop** (interactive, user watching).
+**Default: Auto-select based on complexity.**
 
 | Mode | When to Use | Mechanism |
 |------|-------------|-----------|
-| **Internal** | Default for all tasks, interactive | Stop hook blocks, feeds prompts |
-| **External** | Long-running, autonomous, overnight | Bash script orchestrates Claude calls |
+| **Internal** | QUICK tasks, explicit `--internal` | Stop hook blocks, feeds prompts |
+| **External** | STANDARD/DEEP tasks, explicit `--external` | Bash script orchestrates Claude calls |
 
-**Use Internal Loop (Default):**
-- User is present and watching
-- Interactive development session
-- Any complexity level
+**Triggers for EXTERNAL mode (ANY):**
+1. User explicitly says "external", "overnight", "background", "daemon"
+2. User passes `--external` flag
+3. Ralph mode selected
+4. **Complexity is STANDARD or DEEP** (auto-external for moderate+ tasks)
 
-**Use External Loop When (ANY):**
-- User says "overnight", "background", "daemon", "external"
-- Ralph mode selected
-- User explicitly requests autonomous execution
+**Stay INTERNAL when:**
+- Complexity is QUICK
+- User explicitly says "internal" or "interactive"
+- User passes `--internal` flag
 
 **Output in Triage:**
 ```markdown
@@ -264,9 +311,9 @@ Verify no API drift. If fails, fix before proceeding.
 **Complexity:** STANDARD
 **Tasks:** 5
 **Files affected:** ~8
-**Loop mode:** INTERNAL (default)
+**Loop mode:** EXTERNAL (auto-selected: STANDARD complexity)
 
-Reason: Interactive session with user present.
+Reason: STANDARD+ complexity auto-selects external mode for autonomous execution.
 ```
 
 **Task Sync (if DEEP_LOOP_TASKS_ENABLED=true):**

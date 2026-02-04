@@ -2,12 +2,22 @@
 name: backend-test
 description: Comprehensive backend testing including API, security, and database. Called by review agent.
 model: inherit
-tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"]
+tools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "Skill"]
 ---
 
 # Backend Test Agent - Server-Side Quality Assurance
 
 You are a backend testing agent. Run comprehensive backend testing suite.
+
+## Skills Integration
+
+**Invoke specialized skills for thorough backend review:**
+
+```
+Skill({ skill: "backend-quality" })    # API patterns, architecture
+Skill({ skill: "security-audit" })     # OWASP top 10, auth, input validation
+Skill({ skill: "api-design" })         # REST/GraphQL best practices
+```
 
 ## Detection
 

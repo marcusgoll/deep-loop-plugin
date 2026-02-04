@@ -1,7 +1,8 @@
 ---
 name: cancel-deep
-description: Skill from deep-loop plugin
+description: Cancel active deep loop session. Use when user asks to 'stop deep', 'cancel deep', 'abort loop'. Cleans up state files.
 version: 9.0.0
+allowed-tools: Read, Write, Bash
 ---
 
 # Cancel Deep Loop

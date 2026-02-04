@@ -137,6 +137,12 @@ Execute the current phase according to the deep loop protocol.
 Commit progress atomically after each task.
 Output phase completion promise when phase is done.
 
+SKILLS AVAILABLE - Use these for quality:
+- BUILD phase: Use /tdd-workflow for test-first development
+- REVIEW phase: Use /code-review and /security-audit before shipping
+- FIX phase: Use /debug-investigate for root cause analysis
+- SHIP phase: Use /pr-craftsman for PR creation
+
 IMPORTANT: External mode - assumptions are pre-approved. Proceed with the plan.
 Do NOT ask for user confirmation - execute autonomously.
 ${taskSyncPrompt}
@@ -146,7 +152,7 @@ When ALL work is complete: <promise>DEEP_COMPLETE</promise>"
   # Unset ANTHROPIC_API_KEY to force OAuth token usage (Windows fix)
   if ! env -u ANTHROPIC_API_KEY claude -p "\$PHASE_PROMPT" \\
     --output-format text \\
-    --allowedTools "Read,Edit,Write,Bash,Grep,Glob,Task" \\
+    --allowedTools "Read,Edit,Write,Bash,Grep,Glob,Task,Skill" \\
     --dangerously-skip-permissions 2>&1 | tee -a "\$LOG_FILE"; then
     echo "Claude exited with error at iteration \$iteration" | tee -a "\$LOG_FILE"
     notify "ERROR" "Claude exited with error at iteration \$iteration"

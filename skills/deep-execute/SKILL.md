@@ -1,7 +1,8 @@
 ---
 name: deep-execute
-description: Execute tasks from the shared deep loop task queue. Processes tasks with claim-based coordination for multi-session support.
+description: Process queued tasks from .deep/tasks.md. Use when user asks to 'execute queue', 'process tasks', 'run queued work'. Supports multi-session claim-based coordination.
 version: 9.0.0
+allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Task
 ---
 
 # Deep Execute - Task Queue Processor

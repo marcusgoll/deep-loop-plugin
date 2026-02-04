@@ -1,6 +1,6 @@
 ---
 name: diagnose-hooks
-description: Skill from deep-loop plugin
+description: Troubleshoot hook errors. Use when user sees 'PreToolUse hook error', 'PostToolUse error', or asks to 'diagnose hooks'. Identifies and fixes plugin hook failures.
 version: 9.0.0
 ---
 

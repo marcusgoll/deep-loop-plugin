@@ -1,7 +1,8 @@
 ---
 name: deep-fullstack
-description: Coordinate full-stack development with shared types and E2E testing. Use when building features that span frontend and backend, API contracts, or when user asks "full-stack", "end-to-end", or "connect frontend to backend".
+description: Coordinate frontend+backend development with shared types. Use when building full-stack features, 'connect frontend to API', or 'end-to-end'. Includes E2E testing.
 version: 9.0.0
+allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Task
 ---
 
 # Deep Full-Stack - Coordinated Client/Server Development
