@@ -98,26 +98,6 @@ notify() {
   fi
 }
 
-# mkdir-based lock for claims.json (portable, no flock needed)
-claims_lock() {
-  local LOCK_DIR="$DEEP_DIR/claims.lock"
-  local ATTEMPTS=0
-  while ! mkdir "\$LOCK_DIR" 2>/dev/null; do
-    ATTEMPTS=\$((ATTEMPTS + 1))
-    if [[ \$ATTEMPTS -ge 30 ]]; then
-      # Stale lock - force remove (lock holder likely dead)
-      rm -rf "\$LOCK_DIR"
-      mkdir "\$LOCK_DIR" 2>/dev/null || true
-      break
-    fi
-    sleep 1
-  done
-}
-
-claims_unlock() {
-  rm -rf "$DEEP_DIR/claims.lock" 2>/dev/null || true
-}
-
 cd "$CWD" || { echo "Failed to cd to $CWD"; exit 1; }
 
 # Verify claude CLI
@@ -131,9 +111,6 @@ mkdir -p "$DEEP_DIR"
 [ -f "$DEEP_DIR/claims.json" ] || echo '{}' > "$DEEP_DIR/claims.json"
 [ -f "$DEEP_DIR/completed-tasks.md" ] || touch "$DEEP_DIR/completed-tasks.md"
 [ -f "$DEEP_DIR/git-conflicts.json" ] || echo '{}' > "$DEEP_DIR/git-conflicts.json"
-
-# Clean stale lock from previous run
-rm -rf "$DEEP_DIR/claims.lock" 2>/dev/null || true
 
 echo "=========================================="
 echo "  DEEP EXECUTE - CONCURRENT WORKERS"
@@ -188,30 +165,18 @@ run_worker() {
 
     echo "[\$WORKER_ID] Loop \$LOOPS: claiming next task..." >> "\$LOG" 2>/dev/null
 
-    # Acquire claims lock before invoking claude (worker prompt reads+writes claims.json)
-    claims_lock
-    # Lock released by worker claude process writing claims.json, but we also
-    # release here as safety net after claude exits
-    # Note: claude process handles the actual claim write; lock prevents
-    # two workers from reading claims.json simultaneously during claim check
-
     WORKER_PROMPT='${escapedPrompt}
 
 ADDITIONAL CONTEXT:
 - Your WORKER_ID is: '"\$WORKER_ID"'
-- Claims lock is held. After writing claims.json, the lock will be released.
-- Working directory: ${bashCwd}'
+- Working directory: ${bashCwd}
+- IMPORTANT: When reading claims.json, if another worker claimed the same task between your read and write, pick a different task. Use file timestamps to detect stale reads.'
 
+    # Stream output to log in real-time via tee, capture for result parsing
     OUTPUT=\$(claude -p "\$WORKER_PROMPT" \\
       --output-format text \\
       --allowedTools "Read,Edit,Write,Bash,Grep,Glob,Task,Skill" \\
-      --dangerously-skip-permissions 2>&1 || true)
-
-    # Release claims lock after claude exits
-    claims_unlock
-
-    # Append output to log (separate from capture to avoid tee issues)
-    echo "\$OUTPUT" >> "\$LOG" 2>/dev/null
+      --dangerously-skip-permissions 2>&1 | tee -a "\$LOG" || true)
 
     # Parse result
     if echo "\$OUTPUT" | grep -q "QUEUE_EMPTY"; then
@@ -325,7 +290,6 @@ fi
 
 # Cleanup
 rm -f $DEEP_DIR/worker-*.result
-rm -rf "$DEEP_DIR/claims.lock" 2>/dev/null || true
 rm -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" 2>/dev/null || true
 
 SUMMARY="Done: \$TOTAL_DONE | Failed: \$TOTAL_FAILED | Blocked: \$TOTAL_BLOCKED | Time: \${MINUTES}m \${SECONDS_REM}s"
