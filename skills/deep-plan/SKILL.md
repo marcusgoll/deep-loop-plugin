@@ -1,7 +1,8 @@
 ---
 name: deep-plan
 description: Create implementation plans with acceptance criteria. Use when user asks to 'plan this', 'create PRD', 'break down task'. Supports PRD-to-task-queue conversion.
-version: 9.0.0
+version: 9.2.0
+argument-hint: [task] or --prd [file] or --generate [description]
 ---
 
 # Deep Plan - Strategic Planning & PRD Conversion
@@ -110,6 +111,9 @@ cat package.json 2>/dev/null || cat Cargo.toml 2>/dev/null || cat requirements.t
 
 # Find related code
 grep -r "relevant_keyword" --include="*.ts" --include="*.py" -l
+
+# Check for ADRs
+ls docs/adr/ 2>/dev/null || ls docs/adrs/ 2>/dev/null || ls adr/ 2>/dev/null
 ```
 
 ### Questions to Answer
@@ -117,6 +121,7 @@ grep -r "relevant_keyword" --include="*.ts" --include="*.py" -l
 - What patterns does the codebase use?
 - What dependencies are involved?
 - Are there tests we can learn from?
+- **Do any ADRs constrain the implementation approach?**
 
 ## Phase 2: Problem Definition
 
@@ -217,6 +222,10 @@ Each task should:
 ### Key Decisions
 1. **[Decision]**: [Why this approach vs alternatives]
 2. **[Decision]**: [Why this approach vs alternatives]
+
+### ADR Constraints
+[List any ADRs from docs/adr/ that constrain this task's implementation]
+- ADR-XXXX: [Constraint summary and how it affects this task]
 
 ### Dependencies
 - [Package/library]: [Version] - [Purpose]
@@ -332,6 +341,46 @@ If not found, use AskUserQuestion:
 }
 ```
 
+## Step 1.5: Discover ADR Constraints
+
+**Before parsing the PRD, scan for Architecture Decision Records.**
+
+```bash
+# Check common ADR locations
+for d in docs/adr docs/adrs adr adrs doc/adr .github/adr; do
+  [ -d "$d" ] && echo "ADR directory found: $d"
+done
+
+# Also check for inline decisions files
+for f in decisions.md DECISIONS.md docs/decisions.md .deep/decisions.md; do
+  [ -f "$f" ] && echo "Decisions file found: $f"
+done
+```
+
+### If ADRs Found
+
+1. **Read each ADR file** in the directory
+2. **Extract constraints** — look for:
+   - `## Decision`: The chosen approach
+   - `## Status`: Only apply `accepted` ADRs (skip `proposed`, `deprecated`, `superseded`)
+   - `## Consequences`: Constraints that affect implementation
+3. **Build constraint map** — key/value pairs:
+
+```
+ADR Constraints:
+  ADR-0003 (Auth): Use Clerk, JWT in cookies (not headers)
+  ADR-0004 (Database): SQLAlchemy ORM only, no raw SQL, bidirectional relationships
+  ADR-0006 (Design): CSS variables for colors, no hardcoded hex, no dark: prefix
+  ADR-0009 (Error): RFC7807 error format
+  ADR-0011 (Rate): All endpoints require @limiter decorator
+```
+
+4. **Carry constraints forward** — inject into task generation (Step 3) so each task includes relevant ADR constraints as acceptance criteria
+
+### If No ADRs Found
+
+Proceed without — the decision-checker agent will still validate during REVIEW.
+
 ## Step 2: Parse PRD Structure
 
 Extract these sections:
@@ -354,6 +403,7 @@ For each User Story / Feature:
   3. Find acceptance criteria (checkboxes or bullet points)
   4. Identify dependencies (mentions of other features)
   5. Assess priority (explicit or inferred from order)
+  6. Match relevant ADR constraints (from Step 1.5) to this feature
 ```
 
 ## Step 3: Generate Atomic Tasks
@@ -381,15 +431,25 @@ For each User Story / Feature:
 **Attempts:** 0
 **Depends:** task-YYY (optional)
 **Source:** PRD section "{section name}"
+**ADR Constraints:** ADR-XXXX (if applicable)
 
 {Description from PRD}
 
 - [ ] {Acceptance criterion 1}
 - [ ] {Acceptance criterion 2}
+- [ ] {ADR constraint as criterion, e.g., "No raw SQL - use ORM (ADR-0004)"}
 - [ ] Tests pass
 
 ---
 ```
+
+**ADR Integration Rules:**
+- Only add ADR constraints relevant to the specific task
+- Database tasks → include ADR-0004 constraints
+- Auth tasks → include ADR-0003 constraints
+- UI tasks → include ADR-0006 constraints
+- API endpoint tasks → include ADR-0009, ADR-0011 constraints
+- Format: `{constraint description} (ADR-XXXX)`
 
 ## Step 4: Determine Dependencies
 
@@ -433,6 +493,11 @@ Present summary before writing:
 
 Source: docs/PRD.md
 Feature: User Authentication System
+
+ADR Constraints Applied:
+  ADR-0003: Auth via Clerk, JWT in cookies
+  ADR-0004: SQLAlchemy ORM, bidirectional relationships
+  (none found = "No ADRs found in project")
 
 Tasks Generated: 12
   +- High Priority: 5
@@ -684,8 +749,9 @@ When `/deep plan` is invoked:
    - Run Mode 2 (PRD -> tasks) automatically
 3. **If PRD conversion mode:**
    - Find/request PRD source
-   - Parse structure
-   - Generate atomic tasks
+   - **Discover ADR constraints** (scan docs/adr/, decisions.md)
+   - Parse structure (with ADR constraint matching)
+   - Generate atomic tasks (embed relevant ADR constraints as acceptance criteria)
    - Determine dependencies
    - Review with user
    - Write to .deep/tasks.md
