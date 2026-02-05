@@ -142,9 +142,6 @@ run_worker() {
   # Ensure log file exists
   touch "\$LOG" 2>/dev/null || true
 
-  # Unset API key to force OAuth (Windows-compatible, no env -u)
-  unset ANTHROPIC_API_KEY 2>/dev/null || true
-
   echo "[\$WORKER_ID] Worker \$WORKER_NUM started" >> "\$LOG" 2>/dev/null
 
   while true; do
@@ -173,7 +170,8 @@ ADDITIONAL CONTEXT:
 - IMPORTANT: When reading claims.json, if another worker claimed the same task between your read and write, pick a different task. Use file timestamps to detect stale reads.'
 
     # Stream output to log in real-time via tee, capture for result parsing
-    OUTPUT=\$(claude -p "\$WORKER_PROMPT" \\
+    # env -u strips invalid API key so Claude Max auth takes over
+    OUTPUT=\$(env -u ANTHROPIC_API_KEY claude -p "\$WORKER_PROMPT" \\
       --output-format text \\
       --allowedTools "Read,Edit,Write,Bash,Grep,Glob,Task,Skill" \\
       --dangerously-skip-permissions 2>&1 | tee -a "\$LOG" || true)
