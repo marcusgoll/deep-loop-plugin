@@ -162,6 +162,14 @@ run_worker() {
 
     echo "[\$WORKER_ID] Loop \$LOOPS: claiming next task..." >> "\$LOG" 2>/dev/null
 
+    # Start heartbeat writer (proves worker is alive while claude buffers output)
+    HEARTBEAT_FILE="$DEEP_DIR/worker-\${WORKER_NUM}.heartbeat"
+    (while true; do
+      echo "\$(date '+%H:%M:%S') loop=\$LOOPS" > "\$HEARTBEAT_FILE"
+      sleep 15
+    done) &
+    HEARTBEAT_PID=\$!
+
     WORKER_PROMPT='${escapedPrompt}
 
 ADDITIONAL CONTEXT:
@@ -175,6 +183,9 @@ ADDITIONAL CONTEXT:
       --output-format text \\
       --allowedTools "Read,Edit,Write,Bash,Grep,Glob,Task,Skill" \\
       --dangerously-skip-permissions 2>&1 | tee -a "\$LOG" || true)
+
+    # Kill heartbeat writer
+    kill \$HEARTBEAT_PID 2>/dev/null; wait \$HEARTBEAT_PID 2>/dev/null
 
     # Parse result
     if echo "\$OUTPUT" | grep -q "QUEUE_EMPTY"; then
@@ -233,11 +244,55 @@ echo "All $WORKERS workers launched. Waiting for completion..."
 echo "Monitor: tail -f $DEEP_DIR/worker-*.log"
 echo ""
 
+# Master monitor loop - checks heartbeat freshness every 30s
+monitor_workers() {
+  while true; do
+    [[ -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" ]] && break
+    echo ""
+    echo "[\$(date '+%H:%M:%S')] === Worker Status ==="
+    for i in \$(seq 1 $WORKERS); do
+      HB="$DEEP_DIR/worker-\${i}.heartbeat"
+      if [[ -f "\$HB" ]]; then
+        HB_TIME=\$(stat -c%Y "\$HB" 2>/dev/null || stat -f%m "\$HB" 2>/dev/null)
+        NOW=\$(date +%s)
+        AGE=\$(( NOW - HB_TIME ))
+        CONTENT=\$(cat "\$HB" 2>/dev/null)
+        if [[ \$AGE -gt 120 ]]; then
+          echo "  ⚠ Worker \$i: STALE (\${AGE}s) - \$CONTENT"
+          # Telegram warn on stale >5min (deduplicate with flag file)
+          if [[ \$AGE -gt 300 ]] && [[ ! -f "$DEEP_DIR/worker-\${i}.stale-notified" ]]; then
+            notify "WARN" "Worker \$i STALE for \${AGE}s (last: \$CONTENT)"
+            touch "$DEEP_DIR/worker-\${i}.stale-notified"
+          fi
+        else
+          echo "  ✓ Worker \$i: alive (\${AGE}s) - \$CONTENT"
+          # Clear stale notification flag if worker recovered
+          rm -f "$DEEP_DIR/worker-\${i}.stale-notified" 2>/dev/null
+        fi
+      else
+        echo "  … Worker \$i: starting"
+      fi
+    done
+    # Show completion counts from logs
+    for i in \$(seq 1 $WORKERS); do
+      DONE=\$(grep -c "TASK_COMPLETE" "$DEEP_DIR/worker-\${i}.log" 2>/dev/null || echo 0)
+      [[ \$DONE -gt 0 ]] && echo "  Worker \$i: \$DONE tasks completed"
+    done
+    sleep 30
+  done
+}
+
+monitor_workers &
+MONITOR_PID=\$!
+
 # Wait for all workers
 EXIT_CODE=0
 for pid in "\${PIDS[@]}"; do
   wait \$pid || EXIT_CODE=1
 done
+
+# Kill monitor
+kill \$MONITOR_PID 2>/dev/null; wait \$MONITOR_PID 2>/dev/null
 
 END_TIME=\$(date +%s)
 DURATION=\$(( END_TIME - START_TIME ))
@@ -288,6 +343,8 @@ fi
 
 # Cleanup
 rm -f $DEEP_DIR/worker-*.result
+rm -f $DEEP_DIR/worker-*.heartbeat
+rm -f $DEEP_DIR/worker-*.stale-notified
 rm -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" 2>/dev/null || true
 
 SUMMARY="Done: \$TOTAL_DONE | Failed: \$TOTAL_FAILED | Blocked: \$TOTAL_BLOCKED | Time: \${MINUTES}m \${SECONDS_REM}s"
