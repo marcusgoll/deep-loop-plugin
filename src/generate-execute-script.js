@@ -90,6 +90,7 @@ DEEP_DIR="$CWD/.deep"
 WORKERS=${workers}
 MAX_LOOPS_PER_WORKER=50
 PIDS=()
+MONITOR_PID=""
 
 # Telegram notification
 notify() {
@@ -102,6 +103,46 @@ notify() {
       -d parse_mode="Markdown" > /dev/null 2>&1 || true
   fi
 }
+
+# Graceful shutdown on signal (Ctrl+C, kill, etc.)
+cleanup_and_exit() {
+  echo ""
+  echo "⚠ Signal received - shutting down workers..."
+  touch "$DEEP_DIR/FORCE_EXECUTE_EXIT"
+
+  # Kill monitor first
+  [[ -n "\$MONITOR_PID" ]] && kill \$MONITOR_PID 2>/dev/null
+
+  # Kill all worker subshells + their claude child processes
+  for pid in "\${PIDS[@]}"; do
+    # Kill the worker's entire process group
+    kill -- -\$pid 2>/dev/null || kill \$pid 2>/dev/null
+  done
+
+  # Wait for everything to actually die (5s timeout)
+  local WAIT_START=\$(date +%s)
+  for pid in "\${PIDS[@]}"; do
+    while kill -0 \$pid 2>/dev/null; do
+      if [[ \$(( \$(date +%s) - WAIT_START )) -gt 5 ]]; then
+        kill -9 \$pid 2>/dev/null
+        break
+      fi
+      sleep 0.2
+    done
+  done
+  [[ -n "\$MONITOR_PID" ]] && { wait \$MONITOR_PID 2>/dev/null || true; }
+
+  # Cleanup temp files
+  rm -f $DEEP_DIR/worker-*.result
+  rm -f $DEEP_DIR/worker-*.heartbeat
+  rm -f $DEEP_DIR/worker-*.stale-notified
+  rm -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" 2>/dev/null || true
+
+  notify "INTERRUPTED" "Workers killed by signal. Check logs for partial work."
+  echo "Cleanup complete. Check worker logs for partial work."
+  exit 130
+}
+trap cleanup_and_exit INT TERM HUP
 
 cd "$CWD" || { echo "Failed to cd to $CWD"; exit 1; }
 
@@ -290,14 +331,17 @@ monitor_workers() {
 monitor_workers &
 MONITOR_PID=\$!
 
-# Wait for all workers
+# Wait for all workers (re-wait if interrupted by trapped signal)
 EXIT_CODE=0
 for pid in "\${PIDS[@]}"; do
-  wait \$pid || EXIT_CODE=1
+  wait \$pid 2>/dev/null || EXIT_CODE=1
 done
 
 # Kill monitor
 kill \$MONITOR_PID 2>/dev/null; wait \$MONITOR_PID 2>/dev/null
+
+# Disarm trap for normal exit path
+trap - INT TERM HUP
 
 END_TIME=\$(date +%s)
 DURATION=\$(( END_TIME - START_TIME ))
