@@ -38,7 +38,7 @@ INSTRUCTIONS:
    - Skip tasks with Attempts >= 3
    - Skip tasks with Status: git-blocked (unless you can verify conflict resolved)
 3. If NO eligible tasks: output exactly QUEUE_EMPTY and stop
-4. Claim the task: update claims.json with your worker ID and 30-min expiry
+4. Claim the task using the CLAIMS LOCK PROTOCOL (see below)
 5. Execute the task through all phases:
 
    PLAN: Create mini-plan, identify files to modify
@@ -50,20 +50,26 @@ INSTRUCTIONS:
 6. On success:
    - Remove task from tasks.md
    - Append to completed-tasks.md with commit SHA, timestamp, session, files changed
-   - Remove claim from claims.json
+   - Remove claim from claims.json (use CLAIMS LOCK PROTOCOL)
    - Output: TASK_COMPLETE:{task-id}:{commit-sha}
 
 7. On failure (after 3 FIX iterations):
    - Increment Attempts in tasks.md, add Last Attempt line
-   - Release claim from claims.json
+   - Release claim from claims.json (use CLAIMS LOCK PROTOCOL)
    - Output: TASK_FAILED:{task-id}:{reason}
 
 8. On git conflict (push rejected, rebase has conflicts):
    - Create recovery branch: deep-recovery/{task-id}-{worker-id}
    - Add to git-conflicts.json
    - Mark task as git-blocked in tasks.md (do NOT increment Attempts)
-   - Release claim, reset to clean state
+   - Release claim (use CLAIMS LOCK PROTOCOL), reset to clean state
    - Output: TASK_GIT_BLOCKED:{task-id}:{conflicting-files}
+
+CLAIMS LOCK PROTOCOL (mandatory for ALL claims.json reads and writes):
+  a. Acquire lock: run "mkdir .deep/claims.lock" in bash. If exit code != 0 (already locked), sleep 2s and retry up to 10 times. If still locked after 10 retries, skip this task and try the next one.
+  b. Read and/or write claims.json while holding the lock.
+  c. Release lock: run "rmdir .deep/claims.lock" in bash.
+  ALWAYS release the lock even on error. NEVER read or write claims.json without acquiring the lock first.
 
 WORKER_ID will be set as environment variable.
 Work autonomously. Do NOT ask for confirmation. Execute the full loop for ONE task then exit.`;
@@ -109,6 +115,7 @@ fi
 # Ensure .deep directory exists
 mkdir -p "$DEEP_DIR"
 [ -f "$DEEP_DIR/claims.json" ] || echo '{}' > "$DEEP_DIR/claims.json"
+rmdir "$DEEP_DIR/claims.lock" 2>/dev/null || true  # Clean stale lock from crashed runs
 [ -f "$DEEP_DIR/completed-tasks.md" ] || touch "$DEEP_DIR/completed-tasks.md"
 [ -f "$DEEP_DIR/git-conflicts.json" ] || echo '{}' > "$DEEP_DIR/git-conflicts.json"
 
@@ -329,7 +336,7 @@ echo ""
 
 # Show completed tasks
 if [[ -f "$DEEP_DIR/completed-tasks.md" ]]; then
-  COMPLETED=\$(grep -c "^## \\[x\\]" "$DEEP_DIR/completed-tasks.md" 2>/dev/null || echo 0)
+  COMPLETED=\$(grep -ci "^## \\[x\\]" "$DEEP_DIR/completed-tasks.md" 2>/dev/null || echo 0)
   echo "Total in completed-tasks.md: \$COMPLETED"
 fi
 
