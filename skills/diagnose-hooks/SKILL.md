@@ -1,7 +1,7 @@
 ---
 name: diagnose-hooks
 description: Troubleshoot hook errors. Use when user sees 'PreToolUse hook error', 'PostToolUse error', or asks to 'diagnose hooks'. Identifies and fixes plugin hook failures.
-version: 9.0.0
+version: 11.0.0
 ---
 
 # Diagnose Hook Errors

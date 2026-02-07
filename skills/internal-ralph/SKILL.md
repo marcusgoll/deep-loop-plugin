@@ -1,7 +1,7 @@
 ---
 name: internal-ralph
 description: Internal ralph mode executor. Processes PRD backlog using Task subagents. Called by start-ralph, not user-invoked directly.
-version: 9.0.0
+version: 11.0.0
 user-invocable: false
 ---
 

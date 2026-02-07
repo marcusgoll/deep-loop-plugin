@@ -1,7 +1,7 @@
 ---
 name: deep-triage
 description: Classify task complexity as QUICK/STANDARD/DEEP. Use when user asks 'how complex', 'triage this', 'assess difficulty'. Determines appropriate workflow.
-version: 9.0.0
+version: 11.0.0
 ---
 
 # Deep Triage - Complexity Classification

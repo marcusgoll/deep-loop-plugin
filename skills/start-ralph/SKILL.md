@@ -1,7 +1,7 @@
 ---
 name: start-ralph
 description: Start autonomous PRD processing (ralph mode). Use when user asks for 'overnight mode', 'process PRD', 'autonomous execution'. Long-running background tasks.
-version: 9.0.0
+version: 11.0.0
 ---
 
 # Start Ralph Mode

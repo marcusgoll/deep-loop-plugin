@@ -38,12 +38,22 @@ INSTRUCTIONS:
    - Skip tasks with Attempts >= 3
    - Skip tasks with Status: git-blocked (unless you can verify conflict resolved)
 3. If NO eligible tasks: output exactly QUEUE_EMPTY and stop
-4. Claim the task: update claims.json with your worker ID and 30-min expiry
+
+4. CLAIM LOCKING (MANDATORY):
+   Before writing claims.json, create a lock directory:
+     mkdir .deep/claims.lock 2>/dev/null
+   If mkdir fails (exit code != 0), another worker is claiming. Wait 2s and retry (max 3 attempts).
+   After updating claims.json with your worker ID and 30-min expiry, remove the lock:
+     rmdir .deep/claims.lock
+
 5. Execute the task through all phases:
 
    PLAN: Create mini-plan, identify files to modify
    BUILD: Implement changes, write tests, run code-simplifier via Task tool (subagent_type: deep-loop:code-simplifier, model: haiku)
-   REVIEW: Run tests (npm test or pytest), lint (npm run lint), typecheck (npx tsc --noEmit)
+   REVIEW: Run tests, lint, typecheck. Then invoke quality gates:
+     - Skill({ skill: "code-review" })
+     - Skill({ skill: "security-audit" })
+     If issues found, enter FIX phase.
    FIX: If issues found, fix them (max 3 iterations, then TASK_FAILED)
    SHIP: git add + commit with message "[deep] implement: {task title}" + push with rebase retry (max 3 attempts)
 
@@ -55,7 +65,7 @@ INSTRUCTIONS:
      - Commit: {commit-sha}
      - Worker: {WORKER_ID}
      - Files: {list of changed files}
-   - Remove claim from claims.json
+   - Remove claim from claims.json (use mkdir lock/rmdir pattern)
    - Output: TASK_COMPLETE:{task-id}:{commit-sha}
 
 7. On failure (after 3 FIX iterations):
@@ -275,11 +285,30 @@ ADDITIONAL CONTEXT:
   echo "\$TASKS_DONE \$TASKS_FAILED \$TASKS_BLOCKED" > "$DEEP_DIR/worker-\${WORKER_NUM}.result" 2>/dev/null
 }
 
+# Create worktree per worker for true file isolation (if in git repo)
+if git rev-parse --is-inside-work-tree &>/dev/null; then
+  echo "Setting up git worktrees for worker isolation..."
+  for i in \$(seq 1 $WORKERS); do
+    WORKTREE="$DEEP_DIR/worktree-\$i"
+    if [[ ! -d "\$WORKTREE" ]]; then
+      BRANCH="deep-worker-\$i-\$(date +%s)"
+      git worktree add "\$WORKTREE" -b "\$BRANCH" HEAD 2>/dev/null || {
+        echo "Warning: worktree creation failed for worker \$i, using shared cwd"
+        continue
+      }
+      echo "  Created worktree for worker \$i: \$WORKTREE"
+    fi
+  done
+fi
+
 # Launch workers with staggered starts
 for i in \$(seq 1 $WORKERS); do
+  # Use worktree if it exists, otherwise shared cwd
+  WORKER_CWD="$DEEP_DIR/worktree-\$i"
+  [[ ! -d "\$WORKER_CWD" ]] && WORKER_CWD="$CWD"
   run_worker \$i &
   PIDS+=(\$!)
-  echo "Launched worker \$i (PID: \${PIDS[-1]})"
+  echo "Launched worker \$i (PID: \${PIDS[-1]}, cwd: \$WORKER_CWD)"
   if [[ \$i -lt $WORKERS ]]; then
     sleep 2  # Stagger to reduce claim contention
   fi
@@ -395,6 +424,16 @@ rm -f $DEEP_DIR/worker-*.result
 rm -f $DEEP_DIR/worker-*.heartbeat
 rm -f $DEEP_DIR/worker-*.stale-notified
 rm -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" 2>/dev/null || true
+
+# Cleanup worktrees
+if git rev-parse --is-inside-work-tree &>/dev/null; then
+  for i in \$(seq 1 $WORKERS); do
+    WORKTREE="$DEEP_DIR/worktree-\$i"
+    if [[ -d "\$WORKTREE" ]]; then
+      git worktree remove "\$WORKTREE" --force 2>/dev/null || true
+    fi
+  done
+fi
 
 SUMMARY="Done: \$TOTAL_DONE | Failed: \$TOTAL_FAILED | Blocked: \$TOTAL_BLOCKED | Time: \${MINUTES}m \${SECONDS_REM}s"
 notify "COMPLETE" "✅ \$SUMMARY"

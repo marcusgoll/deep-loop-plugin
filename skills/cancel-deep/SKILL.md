@@ -1,7 +1,7 @@
 ---
 name: cancel-deep
 description: Cancel active deep loop session. Use when user asks to 'stop deep', 'cancel deep', 'abort loop'. Cleans up state files.
-version: 9.0.0
+version: 11.0.0
 allowed-tools: Read, Write, Bash
 ---
 

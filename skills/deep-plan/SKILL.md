@@ -1,11 +1,23 @@
 ---
 name: deep-plan
 description: Create implementation plans with acceptance criteria. Use when user asks to 'plan this', 'create PRD', 'break down task'. Supports PRD-to-task-queue conversion.
-version: 9.2.0
+version: 11.0.0
 argument-hint: [task] or --prd [file] or --generate [description]
 ---
 
 # Deep Plan - Strategic Planning & PRD Conversion
+
+> **Standalone use:** `/deep-plan` for planning without executing.
+> **Inside /deep:** The PLAN phase invokes this skill's logic automatically via the stop hook. Don't invoke `/deep-plan` separately when already in a `/deep` loop.
+
+## Complexity-Aware Fast Path
+
+For **STANDARD** complexity (2-5 files): skip Phase 0 (RLM), Phase 6 (Risk Assessment), Phase 7 (Validation Strategy).
+Jump: Discovery -> Problem Definition -> Acceptance Criteria -> Task Breakdown -> Technical Approach.
+
+For **DEEP** complexity (6+ files): run all phases including RLM exploration and risk assessment.
+
+---
 
 Three modes:
 1. **Single Task Planning** - Deep dive into one task (original behavior)
@@ -58,11 +70,12 @@ When invoked, create a comprehensive implementation plan that enables determinis
 
 ### Detection
 
+Use the Glob tool to count source files:
+```
+Glob({ pattern: "**/*.{ts,tsx,js,py,go}" })
+```
+Count the results. Also check total size:
 ```bash
-# Count source files
-find . -type f \( -name "*.ts" -o -name "*.tsx" -o -name "*.js" -o -name "*.py" -o -name "*.go" \) 2>/dev/null | wc -l
-
-# Check total size
 du -sh . 2>/dev/null
 ```
 

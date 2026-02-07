@@ -1,7 +1,7 @@
 ---
 name: cancel-ralph
 description: Stop ralph mode PRD processing. Use when user asks to 'cancel ralph', 'stop autonomous mode'. Halts background execution.
-version: 9.0.0
+version: 11.0.0
 ---
 
 # Cancel Ralph Mode

@@ -1,8 +1,8 @@
 ---
 name: deep-execute
 description: Process queued tasks from .deep/tasks.md. Use when user asks to 'execute queue', 'process tasks', 'run queued work'. Supports multi-session claim-based coordination with git conflict handling.
-version: 10.0.0
-allowed-tools: Read, Write, Edit, Bash, Grep, Glob
+version: 11.0.0
+allowed-tools: Read, Write, Edit, Bash, Grep, Glob, Task, Skill
 ---
 
 # Deep Execute - Concurrent Worker Orchestrator
