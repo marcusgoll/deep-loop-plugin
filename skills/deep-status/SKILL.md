@@ -2,316 +2,141 @@
 name: deep-status
 description: Check deep loop progress and session state. Use when user asks 'what status', 'where are we', 'deep status'. Shows phase, tasks, and iteration count.
 version: 11.0.0
-allowed-tools: Read, Bash, Grep, Glob
+allowed-tools: Read, Glob, Grep
 ---
 
-# Deep Loop Status - Rich Display
+# Deep Loop Status
 
-Display comprehensive deep loop session status with progress metrics.
+Show real session state from `.deep-*` files. No phantom data.
 
-## Version Header
+## Step 1: Find Session
 
-ALWAYS output version first:
+Use Glob to find active sessions:
 ```
-╔═══════════════════════════════════════╗
-║  DEEP LOOP v8.0.0                     ║
-║  Multi-Agent Build: ✓ enabled         ║
-║  Senior Dev Mode: ✓ enabled           ║
-║  External Loop: ✓ supported           ║
-║  Task Sync: {✓ enabled | ○ disabled}  ║
-╚═══════════════════════════════════════╝
+Glob({ pattern: ".deep-*/state.json" })
 ```
 
-Check `DEEP_LOOP_TASKS_ENABLED` env var for Task Sync status.
-
-## Actions
-
-### 1. Detect Session Directory
-
-```bash
-# Find active .deep-* directories
-for d in .deep-*/; do
-  if [ -f "$d/state.json" ]; then
-    echo "Found: $d"
-  fi
-done 2>/dev/null
-
-# Fallback to legacy .deep
-if [ -f .deep/state.json ]; then
-  echo "Found: .deep/"
-fi
+Also check legacy:
+```
+Glob({ pattern: ".deep/state.json" })
 ```
 
-### 2. Read State and Display Rich Status
-
-For each session found, read state and build display:
+If **no state.json found**, output:
 
 ```
-echo ""
-echo "  =============================================="
-echo "  ||         DEEP LOOP STATUS                ||"
-echo "  =============================================="
-echo ""
+DEEP LOOP v11.0.0
+
+No active session.
+
+Start:  /deep <task>
+Quick:  /deep quick <task>
+Queue:  /deep execute
 ```
 
-**Session Info Block:**
-```
-  Session: {session8}
-  Complexity: {complexity} (quick|standard|deep)
-  Loop Mode: {mode} (internal|external)
-  Started: {startedAt}
-  Last Activity: {lastActivity}
-```
+Then STOP.
 
-**Loop Mode Values:**
-- `internal` - Stop hook controls iteration (default for QUICK)
-- `external` - Bash script controls iteration (default for STANDARD/DEEP)
+## Step 2: Read State
 
-**Build Mode Values:**
-- `multi-agent` - Orchestrator spawns Task agents per atomic task (default)
-- `single` - Legacy single-session BUILD phase
+For each session found, use Read tool on `state.json`. Extract these fields (all from actual state):
 
-**Phase Progress Block:**
+- `sessionId`
+- `phase` (CHALLENGE | RLM_EXPLORE | PLAN | BUILD | REVIEW | FIX | SHIP | COMPLETE)
+- `iteration` / `maxIterations`
+- `mode` (internal | external | quick)
+- `buildMode` (multi-agent | single)
+- `startedAt`
+- `lastActivity`
+- `task`
+- `current_step`
+- `active`
+- `complete`
+
+## Step 3: Read Task Description
+
+Read `task.md` from session dir if it exists. Use first line as task description. Fall back to `state.task` field.
+
+## Step 4: Scan Session Files
+
+Use Glob to find all files in the session directory:
 ```
-  ┌─────────────────────────────────────────────────┐
-  │ Phase: BUILD                      [===>    ] 3/10 │
-  │                                                   │
-  │ Step: Implementing                                │
-  │ Current Task: task-003 "Add validation logic"     │
-  └─────────────────────────────────────────────────┘
-```
-
-**Progress Bar Calculation:**
-```javascript
-const progress = iteration / maxIterations;
-const filled = Math.floor(progress * 10);
-const bar = '='.repeat(filled) + '>' + ' '.repeat(10 - filled - 1);
+Glob({ pattern: ".deep-{session8}/*" })
 ```
 
-**Counters Block:**
-```
-  Completed: 5   Failed: 1   Skipped: 0   Remaining: 4
-       ✓ 5        ✗ 1        ⊘ 0          ⋯ 4
-```
+For each known file, report presence. For files with countable data, read and summarize:
 
-### 3. Control Flags Check
+- **plan.md**: Use Grep to count atomic task headers (lines matching `^## ` or `^### Task`)
+- **issues.json**: Read, report array length
+- **hook-errors.log**: Use Grep to count lines matching `^\[` (each error entry starts with timestamp)
+- **test-results.json**: Read, report pass/fail if present
+- **decisions.md**: Just report exists/missing
+- **lessons-learned.md**: Just report exists/missing
+- **exploration.md**: Just report exists/missing
+- **FORCE_EXIT**: If exists, warn user
 
-```bash
-# Check for control files
-ls -la .deep-*/FORCE_EXIT .deep-*/FORCE_COMPLETE .deep-*/NEEDS_USER 2>/dev/null
-```
+## Step 5: Output Status
 
-**Display:**
-```
-  Control Flags:
-  - FORCE_EXIT: no
-  - FORCE_COMPLETE: no
-  - NEEDS_USER: no
-```
-
-### 4. Task Queue Summary (if tasks.md exists)
-
-```bash
-PENDING=$(grep -c "^## \[ \] task-" .deep/tasks.md 2>/dev/null || echo "0")
-DONE=$(grep -c "^## \[x\] task-" .deep/completed-tasks.md 2>/dev/null || echo "0")
-```
-
-**Display:**
-```
-  ┌─────────────────────────────────────────────────┐
-  │ Task Queue                                       │
-  ├─────────────────────────────────────────────────┤
-  │ Pending: 8                                       │
-  │ Completed: 5                                     │
-  │                                                  │
-  │ Next up:                                         │
-  │   task-006: Add error handling to API           │
-  │   task-007: Write tests for new endpoint        │
-  └─────────────────────────────────────────────────┘
-```
-
-### 4b. Task Management View (if DEEP_LOOP_TASKS_ENABLED=true)
-
-**If Task Sync enabled, also run:**
-```
-TaskList()
-```
-
-Filter results by `metadata.type === 'deep-loop' || metadata.type === 'deep-loop-atomic'`
-Further filter by `metadata.sessionId === '{current_session}'` if session-specific.
-
-**Display:**
-```
-  ┌─────────────────────────────────────────────────┐
-  │ Task Management View (Sync Layer)                │
-  ├─────────────────────────────────────────────────┤
-  │ Parent: [DEEP] Implement auth feature            │
-  │   Status: in_progress  Phase: BUILD             │
-  │                                                  │
-  │ Atomic Tasks:                                    │
-  │   ✓ task-001: Add login endpoint     [abc123]   │
-  │   ✓ task-002: Add JWT middleware     [def456]   │
-  │   ⟳ task-003: Add session store      (blocked)  │
-  │   ○ task-004: Write integration tests           │
-  └─────────────────────────────────────────────────┘
-
-Legend: ✓ completed  ⟳ in_progress  ○ pending  (blocked) = has blockedBy
-```
-
-**If Task Sync disabled:**
-```
-  Task Sync: ○ disabled
-  Set DEEP_LOOP_TASKS_ENABLED=true to enable crash recovery + visibility
-```
-
-### 5. Recent Activity Log
-
-Show last 3 state changes from git log or file timestamps:
+Format output as:
 
 ```
-  Recent Activity:
-  - 10:45 BUILD: Implementing task-003
-  - 10:42 BUILD: Committed task-002
-  - 10:35 PLAN: Plan approved
+DEEP LOOP v11.0.0
+
+Session:    {sessionId}
+Phase:      {phase}
+Iteration:  {iteration}/{maxIterations}
+Mode:       {mode}    Build: {buildMode}
+Task:       {first line of task.md or state.task}
+Step:       {current_step or "—"}
+Elapsed:    {humanized duration from startedAt to now}
 ```
 
-### 6. No Active Session Display
+**Elapsed calculation:** Subtract `startedAt` from current time. Format as `Xh Ym` or `Xm` if under 1 hour.
 
-If no state.json found:
-
+**Staleness warning:** If `lastActivity` is more than 1 hour ago, append:
 ```
-  ============================================
-  ||         NO ACTIVE DEEP SESSION         ||
-  ============================================
-
-  Start a new session:
-  - /deep <task>        Full deep loop
-  - /deep quick <task>  Quick mode (3 iterations)
-
-  Resume from queue:
-  - /deep execute       Process task queue
+!! STALE — last activity {humanized time} ago
+   Resume: /deep    Cancel: /cancel-deep    Force exit: touch .deep-{session8}/FORCE_EXIT
 ```
 
----
-
-## Output Format Templates
-
-### Quick Mode Status
-
+**Files section:**
 ```
-  ============================================
-  ||         QUICK MODE STATUS              ||
-  ============================================
-
-  Session: 8405b17e
-  Task: Fix typo in README.md
-  Iteration: 1/3
-
-  Status: Executing...
+Files:
+  task.md            exists
+  plan.md            exists (4 atomic tasks)
+  issues.json        exists (2 issues)
+  hook-errors.log    exists (3 errors)
+  decisions.md       missing
+  test-results.json  missing
 ```
 
-### Standard/Deep Mode Status
+Only show files that are relevant. Always show: task.md, plan.md, issues.json, hook-errors.log. Show others only if they exist.
 
+**FORCE_EXIT warning:**
 ```
-  ============================================
-  ||         DEEP LOOP STATUS               ||
-  ============================================
-
-  Session: 8405b17e           Complexity: STANDARD
-  Loop Mode: EXTERNAL         Iterations: 3/10
-  Started: 2025-01-22 10:00
-
-  ┌────────────────────────────────────────┐
-  │ BUILD [=====....] 50%                  │
-  │                                        │
-  │ Current Step: Testing                  │
-  │ Current Task: Implement user auth      │
-  └────────────────────────────────────────┘
-
-  Progress:
-    ✓ Completed: 2
-    ✗ Failed: 0
-    ⋯ Remaining: 3
-
-  Control Flags: (none active)
+!! FORCE_EXIT flag is set — session will exit on next stop hook
 ```
 
-### Stale Session Warning
+## Step 6: Actionable Next Steps
 
-If last activity > 1 hour ago:
+Based on current phase, output one line:
 
-```
-  ⚠️  SESSION STALE
-  Last activity: 3 hours ago
-
-  Options:
-  - Continue: /deep (will resume)
-  - Cancel: /cancel-deep
-  - Force complete: touch .deep-{session8}/FORCE_COMPLETE
-```
-
----
-
-## Step Detection (for current_step)
-
-Update state.json `current_step` based on recent tool calls:
-
-| Pattern Detected | Current Step |
-|-----------------|--------------|
-| `git commit`, `git add` | Committing |
-| Write/Edit to test files | Writing tests |
-| `npm test`, `vitest`, `pytest` | Testing |
-| `npm run lint`, `eslint` | Linting |
-| `tsc`, `typecheck` | Type checking |
-| Write/Edit to source files | Implementing |
-| Read/Glob/Grep | Exploring |
-| Task tool (subagent) | Running subagent |
-| Task agent spawn | Orchestrating tasks |
-| TASK_COMPLETE/TASK_BLOCKED | Task agent complete |
-
----
-
-### 7. Multi-Agent BUILD Status (if buildMode: "multi-agent")
-
-If in BUILD phase with multi-agent mode, read `tasks-status.json`:
-
-```bash
-cat .deep-*/tasks-status.json 2>/dev/null
-```
-
-**Display:**
-```
-  ┌─────────────────────────────────────────────────┐
-  │ Multi-Agent BUILD Status                        │
-  ├─────────────────────────────────────────────────┤
-  │ Mode: multi-agent    Max Parallel: 3            │
-  │                                                 │
-  │ Tasks:                                          │
-  │   ✓ [0] Setup database schema          (1 try)  │
-  │   ✓ [1] Create API endpoints           (1 try)  │
-  │   ⟳ [2] Add authentication middleware  (2 tries)│
-  │   ○ [3] Write integration tests        (blocked)│
-  │   ○ [4] Add rate limiting              (pending)│
-  │                                                 │
-  │ Active Agents: 1                                │
-  │ Completed: 2/5    Failed: 0    Escalated: 0     │
-  └─────────────────────────────────────────────────┘
-
-Legend: ✓ complete  ⟳ in_progress  ○ pending  (blocked) = waiting on dependency
-```
-
-**Retry Status:**
-- Show attempt count for each task
-- Highlight tasks with 2+ attempts
-- Show "ESCALATED" if attempts >= 3 and needs user input
-
----
+| Phase | Next Step |
+|-------|-----------|
+| CHALLENGE | "Awaiting user confirmation on approach" |
+| RLM_EXPLORE | "Exploring codebase, writing exploration.md" |
+| PLAN | "Writing plan.md with atomic task breakdown" |
+| BUILD | "Implementing. {N} tasks in plan." |
+| REVIEW | "Validating: tests, lint, types, code-review, security-audit" |
+| FIX | "{N} issues in issues.json to resolve" |
+| SHIP | "Pushing, creating PR, writing lessons-learned" |
+| COMPLETE | "Session finished. See lessons-learned.md" |
 
 ## NOW EXECUTE
 
-1. Find all `.deep-*` session directories
-2. Read `state.json` from each
-3. Build rich status display with ASCII boxes
-4. Show progress metrics and current step
-5. Display task queue summary if applicable
-6. Output formatted status to user
+1. Glob for `.deep-*/state.json`
+2. If none found, show "no active session" and stop
+3. Read state.json with Read tool
+4. Read task.md with Read tool (if exists)
+5. Glob session directory for all files
+6. Read countable files (issues.json, hook-errors.log) for summary counts
+7. Output formatted status
+8. Output next steps based on phase
