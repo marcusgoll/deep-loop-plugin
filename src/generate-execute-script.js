@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
 /**
- * Generate Execute Script
+ * Generate Execute Script — Worktree-Per-Task Concurrent Workers
  *
- * Creates a bash script for concurrent task queue processing.
- * N workers claim and execute tasks from .deep/tasks.md in parallel.
- * Each worker invokes `claude -p` for ONE task, then loops for next.
+ * Creates a bash script where each worker gets an isolated git worktree.
+ * Workers implement tasks, create PRs, monitor CI, self-correct failures,
+ * and auto-merge on success.
+ *
+ * Architecture:
+ *   Worker loop: claim task → worktree → claude -p implements → push → PR → CI → fix → merge → cleanup
  *
  * Usage: node generate-execute-script.js <workers> <cwd>
  */
@@ -14,7 +17,7 @@ import fs from 'fs';
 import path from 'path';
 
 /**
- * Generate execute.sh script for concurrent task workers
+ * Generate execute.sh script for worktree-per-task concurrent workers
  * @param {Object} options
  * @param {number} options.workers Number of concurrent workers
  * @param {string} options.cwd Working directory
@@ -30,64 +33,81 @@ export function generateExecuteScript(options) {
   const bashCwd = cwd.replace(/\\/g, '/');
 
   const workerPrompt = `You are a deep-execute worker processing ONE task from the queue.
+You are in a GIT WORKTREE. Your CWD is an isolated copy of the repo. Commit freely, do NOT push.
+
+SHARED STATE (use absolute paths):
+- Task queue: {ABSOLUTE_DEEP_DIR}/task-queue.txt
+- Claims: {ABSOLUTE_DEEP_DIR}/claims.json
+- Completed: {ABSOLUTE_DEEP_DIR}/completed-tasks.md
+- Failures: {ABSOLUTE_DEEP_DIR}/failures.md
 
 INSTRUCTIONS:
-1. Read .deep/tasks.md and .deep/claims.json
-2. Find the first unclaimed task (## [ ] task-XXX) in priority order (high > medium > low)
-   - Skip tasks claimed in claims.json (unless claim older than 30 min)
-   - Skip tasks with Attempts >= 3
-   - Skip tasks with Status: git-blocked (unless you can verify conflict resolved)
-3. If NO eligible tasks: output exactly QUEUE_EMPTY and stop
+1. Read {ABSOLUTE_DEEP_DIR}/failures.md — learn from previous failures. Skip dependency-blocked tasks, adapt approach based on logged errors.
 
-4. CLAIM LOCKING (MANDATORY):
-   Before writing claims.json, create a lock directory:
-     mkdir .deep/claims.lock 2>/dev/null
-   If mkdir fails (exit code != 0), another worker is claiming. Wait 2s and retry (max 3 attempts).
-   After updating claims.json with your worker ID and 30-min expiry, remove the lock:
-     rmdir .deep/claims.lock
+2. Read {ABSOLUTE_DEEP_DIR}/task-queue.txt — pre-sorted index of eligible tasks.
+   Format: priority|task-id|title|attempts — one per line, sorted high→medium→low
+   Pick the FIRST task-id whose id is NOT in {ABSOLUTE_DEEP_DIR}/claims.json, or whose claim is older than 30 min.
 
-5. Execute the task through all phases:
+3. If task-queue.txt is empty or all tasks are claimed: output exactly QUEUE_EMPTY and stop.
 
+4. Read ONLY the chosen task block from {ABSOLUTE_DEEP_DIR}/tasks.md by searching for:
+   ## [ ] {task-id}: ...
+   Read from that header down to the next --- separator.
+
+5. Claim the task: update {ABSOLUTE_DEEP_DIR}/claims.json with your worker ID and 30-min expiry.
+
+6. Execute the task through all phases:
    PLAN: Create mini-plan, identify files to modify
-   BUILD: Implement changes, write tests, run code-simplifier via Task tool (subagent_type: deep-loop:code-simplifier, model: haiku)
-   REVIEW: Run tests, lint, typecheck. Then invoke quality gates:
-     - Skill({ skill: "code-review" })
-     - Skill({ skill: "security-audit" })
-     If issues found, enter FIX phase.
-   FIX: If issues found, fix them (max 3 iterations, then TASK_FAILED)
-   SHIP: git add + commit with message "[deep] implement: {task title}" + push with rebase retry (max 3 attempts)
+   BUILD: Implement changes, write tests, run code-simplifier via Task tool [subagent_type: deep-loop:code-simplifier, model: haiku]
+   REVIEW: Run tests via npm test or pytest, lint via npm run lint, typecheck via npx tsc --noEmit
+   FIX: If issues found, fix them — max 3 iterations, then TASK_FAILED
+   SHIP: git add + commit with message "[deep] implement: {task title}" — do NOT push, the outer script handles PR/CI/merge.
 
-6. On success:
-   - DELETE the entire task block (## header + all lines until next ## or EOF) from tasks.md. Do NOT just mark it [x] - completely remove the lines.
-   - APPEND the completed task to completed-tasks.md in this format:
+7. On success:
+   - DELETE the entire task block from {ABSOLUTE_DEEP_DIR}/tasks.md
+   - APPEND to {ABSOLUTE_DEEP_DIR}/completed-tasks.md:
      ## [x] {task-id}: {task title}
      - Completed: {ISO timestamp}
      - Commit: {commit-sha}
      - Worker: {WORKER_ID}
      - Files: {list of changed files}
-   - Remove claim from claims.json (use mkdir lock/rmdir pattern)
-   - Output: TASK_COMPLETE:{task-id}:{commit-sha}
+   - Remove claim from {ABSOLUTE_DEEP_DIR}/claims.json
+   - Output: TASK_COMPLETE:{task-id}:{commit-sha}:{task title}
 
-7. On failure (after 3 FIX iterations):
-   - Increment Attempts in tasks.md, add Last Attempt line
-   - Release claim from claims.json
-   - Output: TASK_FAILED:{task-id}:{reason}
-
-8. On git conflict (push rejected, rebase has conflicts):
-   - Create recovery branch: deep-recovery/{task-id}-{worker-id}
-   - Add to git-conflicts.json
-   - Mark task as git-blocked in tasks.md (do NOT increment Attempts)
-   - Release claim, reset to clean state
-   - Output: TASK_GIT_BLOCKED:{task-id}:{conflicting-files}
+8. On failure — after 3 FIX iterations:
+   - Increment Attempts in {ABSOLUTE_DEEP_DIR}/tasks.md, add Last Attempt line
+   - Release claim from {ABSOLUTE_DEEP_DIR}/claims.json
+   - Output: TASK_FAILED:{task-id}:{category}:{description}
+   Categories: build-error, test-failure, lint-error, type-error, dependency-missing, unknown
 
 WORKER_ID will be set as environment variable.
-Work autonomously. Do NOT ask for confirmation. Execute the full loop for ONE task then exit.`;
+Work autonomously. Do NOT ask for confirmation. Execute the full loop for ONE task then exit.
 
-  // Escape prompt for bash heredoc
+IMPORTANT: Do NOT read the full tasks.md to find tasks. Use task-queue.txt for task selection, then read only the specific task block you need.
+IMPORTANT: Do NOT push to any remote. The outer bash script handles git push, PR creation, and CI monitoring.`;
+
+  const ciFixPrompt = `CI checks failed on this PR branch. Read the failure output below and fix the issues.
+
+INSTRUCTIONS:
+1. Read the CI failure output provided via DEEP_CI_FAILURE_OUTPUT env var
+2. Identify the root cause: build error, test failure, lint, type error, or flaky test
+3. Fix the issues in the codebase
+4. Run the same checks locally to verify your fix
+5. Commit with message "[deep] fix: CI failure - {brief description}"
+
+OUTPUT — exactly one of:
+- CI_FIX_COMPLETE:{commit-sha} — if you fixed the issue and committed
+- CI_FIX_COMPLETE:flake — if the failure is a flaky test, the outer script will push empty commit to re-trigger
+- CI_FIX_FAILED:{reason} — if you cannot fix the issue
+
+Work autonomously. Do NOT push.`;
+
+  // Escape prompts for bash heredoc
   const escapedPrompt = workerPrompt.replace(/\\/g, '\\\\').replace(/\$/g, '\\$');
+  const escapedCiFixPrompt = ciFixPrompt.replace(/\\/g, '\\\\').replace(/\$/g, '\\$');
 
   const script = `#!/bin/bash
-# Generated by /deep execute - Concurrent Worker Mode
+# Generated by /deep execute - Worktree-Per-Task Concurrent Workers
 # Workers: ${workers}
 # CWD: ${bashCwd}
 # Generated: ${new Date().toISOString()}
@@ -97,10 +117,28 @@ set -uo pipefail
 
 CWD="${bashCwd}"
 DEEP_DIR="$CWD/.deep"
+ABSOLUTE_DEEP_DIR="\$(cd "$CWD/.deep" && pwd)"
+WORKTREE_BASE="$CWD/.deep/worktrees"
 WORKERS=${workers}
-MAX_LOOPS_PER_WORKER=50
 PIDS=()
 MONITOR_PID=""
+REVIVAL_COUNTS=()
+CI_FIX_MAX=3
+CI_POLL_INTERVAL=30
+CI_POLL_TIMEOUT=1200
+
+# Dynamic loop cap: max(50, ceil(pending * 1.2) + 10), env override
+PENDING_COUNT=0
+MAX_LOOPS_PER_WORKER=\${DEEP_EXECUTE_MAX_LOOPS:-0}
+
+# Initialize revival counts
+for i in \$(seq 1 $WORKERS); do
+  REVIVAL_COUNTS[\$i]=0
+done
+
+# ==========================================
+#  UTILITY FUNCTIONS
+# ==========================================
 
 # Telegram notification
 notify() {
@@ -114,7 +152,223 @@ notify() {
   fi
 }
 
-# Graceful shutdown on signal (Ctrl+C, kill, etc.)
+# Log failure to failures.md
+log_failure() {
+  local TASK_ID="\$1"
+  local WORKER_ID="\$2"
+  local CATEGORY="\$3"
+  local ERROR_MSG="\$4"
+  local TS=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  echo "| \$TASK_ID | \$WORKER_ID | \$TS | \$CATEGORY | \$ERROR_MSG |" >> "\$ABSOLUTE_DEEP_DIR/failures.md"
+}
+
+# ==========================================
+#  WORKTREE LIFECYCLE
+# ==========================================
+
+# Cleanup orphan worktrees from previous crashed sessions
+cleanup_orphan_worktrees() {
+  echo "Cleaning up orphan worktrees..."
+
+  # Force-remove any leftover worktree dirs
+  if [[ -d "\$WORKTREE_BASE" ]]; then
+    for wt in "\$WORKTREE_BASE"/w-*; do
+      [[ -d "\$wt" ]] || continue
+      git -C "$CWD" worktree remove "\$wt" --force 2>/dev/null || rm -rf "\$wt"
+    done
+  fi
+
+  # Prune worktree bookkeeping
+  git -C "$CWD" worktree prune 2>/dev/null || true
+
+  # Remove stale deep/* branches (local only)
+  git -C "$CWD" branch --list 'deep/*' | while read -r branch; do
+    branch=\$(echo "\$branch" | xargs)
+    git -C "$CWD" branch -D "\$branch" 2>/dev/null || true
+  done
+
+  echo "Orphan cleanup complete."
+}
+
+# Create worktree for a worker iteration
+# Args: WORKER_NUM, LOOP_NUM
+# Sets: WT_DIR, WT_BRANCH
+create_worktree() {
+  local WORKER_NUM="\$1"
+  local LOOP_NUM="\$2"
+  local TS=\$(date +%s)
+  WT_BRANCH="deep/w\${WORKER_NUM}-iter\${LOOP_NUM}-\${TS}"
+  WT_DIR="\$WORKTREE_BASE/w-\${WORKER_NUM}"
+
+  # Remove existing worktree for this slot if present
+  if [[ -d "\$WT_DIR" ]]; then
+    git -C "$CWD" worktree remove "\$WT_DIR" --force 2>/dev/null || rm -rf "\$WT_DIR"
+  fi
+
+  # Fetch latest main
+  git -C "$CWD" fetch origin main --quiet 2>/dev/null || true
+
+  # Create worktree branching off origin/main
+  mkdir -p "\$WORKTREE_BASE"
+  git -C "$CWD" worktree add -b "\$WT_BRANCH" "\$WT_DIR" origin/main 2>/dev/null
+  return \$?
+}
+
+# Cleanup worktree after task
+# Args: WORKER_NUM, BRANCH, DELETE_REMOTE (0/1)
+cleanup_worktree() {
+  local WORKER_NUM="\$1"
+  local BRANCH="\$2"
+  local DELETE_REMOTE="\${3:-0}"
+  local DIR="\$WORKTREE_BASE/w-\${WORKER_NUM}"
+
+  # Remove worktree
+  if [[ -d "\$DIR" ]]; then
+    git -C "$CWD" worktree remove "\$DIR" --force 2>/dev/null || rm -rf "\$DIR"
+  fi
+  git -C "$CWD" worktree prune 2>/dev/null || true
+
+  # Remove local branch
+  if [[ -n "\$BRANCH" ]]; then
+    git -C "$CWD" branch -D "\$BRANCH" 2>/dev/null || true
+  fi
+
+  # Optionally remove remote branch
+  if [[ "\$DELETE_REMOTE" == "1" && -n "\$BRANCH" ]]; then
+    git -C "$CWD" push origin --delete "\$BRANCH" 2>/dev/null || true
+  fi
+}
+
+# ==========================================
+#  PR / CI / MERGE PIPELINE
+# ==========================================
+
+# Create a PR from a branch
+# Args: BRANCH, TASK_ID, TITLE, WT_DIR
+# Sets: PR_NUM
+create_pr() {
+  local BRANCH="\$1"
+  local TASK_ID="\$2"
+  local TITLE="\$3"
+
+  # Push branch to remote
+  git -C "$CWD" push -u origin "\$BRANCH" 2>/dev/null || return 1
+
+  # Create PR
+  PR_NUM=\$(cd "$CWD" && gh pr create \\
+    --base main \\
+    --head "\$BRANCH" \\
+    --title "[deep] \$TITLE" \\
+    --body "Automated by deep-execute worker.
+
+Task: \$TASK_ID
+Branch: \$BRANCH
+
+---
+*Auto-generated by deep-execute worktree pipeline*" 2>/dev/null | grep -oE '[0-9]+$')
+
+  [[ -n "\$PR_NUM" ]] && return 0 || return 1
+}
+
+# Wait for CI checks to complete
+# Args: PR_NUM
+# Returns: 0 = pass, 1 = fail, 2 = timeout
+wait_for_ci() {
+  local PR="\$1"
+  local ELAPSED=0
+
+  while [[ \$ELAPSED -lt \$CI_POLL_TIMEOUT ]]; do
+    # Check force exit
+    [[ -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" ]] && return 2
+
+    sleep \$CI_POLL_INTERVAL
+    ELAPSED=\$((ELAPSED + CI_POLL_INTERVAL))
+
+    # Get check status
+    local STATUS=\$(cd "$CWD" && gh pr checks "\$PR" 2>/dev/null)
+
+    if echo "\$STATUS" | grep -qi "fail\\|error"; then
+      return 1
+    fi
+
+    # All checks pass if no pending/queued and at least one pass
+    if echo "\$STATUS" | grep -qi "pass\\|success"; then
+      if ! echo "\$STATUS" | grep -qi "pending\\|queued\\|in_progress"; then
+        return 0
+      fi
+    fi
+
+    # No checks at all yet — keep waiting
+  done
+
+  return 2  # timeout
+}
+
+# Get CI failure output for debugging
+# Args: PR_NUM
+get_ci_failure_output() {
+  local PR="\$1"
+
+  # Get the failed run ID
+  local RUN_ID=\$(cd "$CWD" && gh run list --branch "\$(gh pr view "\$PR" --json headRefName -q .headRefName 2>/dev/null)" \\
+    --status failure --limit 1 --json databaseId -q '.[0].databaseId' 2>/dev/null)
+
+  if [[ -n "\$RUN_ID" ]]; then
+    cd "$CWD" && gh run view "\$RUN_ID" --log-failed 2>/dev/null | tail -100
+  else
+    echo "Could not retrieve CI failure logs"
+  fi
+}
+
+# Merge a PR with squash
+# Args: PR_NUM
+# Returns: 0 = merged, 1 = failed (conflict or other)
+merge_pr() {
+  local PR="\$1"
+  cd "$CWD" && gh pr merge "\$PR" --squash --delete-branch 2>/dev/null
+  return \$?
+}
+
+# ==========================================
+#  SELF-CORRECTION
+# ==========================================
+
+# Revive a dead worker
+# Args: SLOT
+revive_worker() {
+  local SLOT="\$1"
+  local OLD_PID="\${PIDS[\$SLOT]:-}"
+  local REVIVES="\${REVIVAL_COUNTS[\$SLOT]:-0}"
+
+  if [[ \$REVIVES -ge 3 ]]; then
+    echo "Worker \$SLOT: max revivals (3) reached, not reviving" >> "$DEEP_DIR/monitor.log"
+    notify "ERROR" "Worker \$SLOT permanently dead after 3 revivals"
+    return 1
+  fi
+
+  # Kill if still somehow around
+  if [[ -n "\$OLD_PID" ]]; then
+    kill -- -\$OLD_PID 2>/dev/null || kill \$OLD_PID 2>/dev/null || true
+    sleep 1
+  fi
+
+  # Cleanup any leftover worktree for this slot
+  cleanup_worktree "\$SLOT" "" 0
+
+  # Relaunch
+  run_worker \$SLOT &
+  PIDS[\$SLOT]=\$!
+  REVIVAL_COUNTS[\$SLOT]=\$((REVIVES + 1))
+
+  echo "Worker \$SLOT revived (attempt \$((REVIVES + 1))/3, PID: \${PIDS[\$SLOT]})" >> "$DEEP_DIR/monitor.log"
+  notify "WARN" "Worker \$SLOT revived (attempt \$((REVIVES + 1))/3)"
+  return 0
+}
+
+# ==========================================
+#  SIGNAL HANDLING & CLEANUP
+# ==========================================
+
 cleanup_and_exit() {
   echo ""
   echo "⚠ Signal received - shutting down workers..."
@@ -125,11 +379,10 @@ cleanup_and_exit() {
 
   # Kill all worker subshells + their claude child processes
   for pid in "\${PIDS[@]}"; do
-    # Kill the worker's entire process group
     kill -- -\$pid 2>/dev/null || kill \$pid 2>/dev/null
   done
 
-  # Wait for everything to actually die (5s timeout)
+  # Wait for everything to die (5s timeout)
   local WAIT_START=\$(date +%s)
   for pid in "\${PIDS[@]}"; do
     while kill -0 \$pid 2>/dev/null; do
@@ -142,11 +395,22 @@ cleanup_and_exit() {
   done
   [[ -n "\$MONITOR_PID" ]] && { wait \$MONITOR_PID 2>/dev/null || true; }
 
+  # Cleanup ALL worktrees
+  if [[ -d "\$WORKTREE_BASE" ]]; then
+    for wt in "\$WORKTREE_BASE"/w-*; do
+      [[ -d "\$wt" ]] || continue
+      git -C "$CWD" worktree remove "\$wt" --force 2>/dev/null || rm -rf "\$wt"
+    done
+  fi
+  git -C "$CWD" worktree prune 2>/dev/null || true
+
   # Cleanup temp files
   rm -f $DEEP_DIR/worker-*.result
   rm -f $DEEP_DIR/worker-*.heartbeat
   rm -f $DEEP_DIR/worker-*.stale-notified
+  rm -f "$DEEP_DIR/task-queue.txt" "$DEEP_DIR/task-queue.txt.tmp" 2>/dev/null || true
   rm -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" 2>/dev/null || true
+  rm -f "$DEEP_DIR/monitor.log" 2>/dev/null || true
 
   notify "INTERRUPTED" "Workers killed by signal. Check logs for partial work."
   echo "Cleanup complete. Check worker logs for partial work."
@@ -154,37 +418,129 @@ cleanup_and_exit() {
 }
 trap cleanup_and_exit INT TERM HUP
 
+# ==========================================
+#  STARTUP
+# ==========================================
+
 cd "$CWD" || { echo "Failed to cd to $CWD"; exit 1; }
 
-# Verify claude CLI
+# Verify prerequisites
 if ! command -v claude &> /dev/null; then
   echo "Error: Claude Code CLI not found"
   exit 1
 fi
 
+if ! command -v gh &> /dev/null; then
+  echo "Error: GitHub CLI (gh) not found — required for PR/CI pipeline"
+  exit 1
+fi
+
+# Verify gh auth
+if ! gh auth status &>/dev/null; then
+  echo "Error: GitHub CLI not authenticated. Run: gh auth login"
+  exit 1
+fi
+
+# Verify we're in a git repo with a remote
+if ! git -C "$CWD" remote get-url origin &>/dev/null; then
+  echo "Error: No git remote 'origin' found"
+  exit 1
+fi
+
 # Ensure .deep directory exists
 mkdir -p "$DEEP_DIR"
+mkdir -p "\$WORKTREE_BASE"
 [ -f "$DEEP_DIR/claims.json" ] || echo '{}' > "$DEEP_DIR/claims.json"
 [ -f "$DEEP_DIR/completed-tasks.md" ] || touch "$DEEP_DIR/completed-tasks.md"
-[ -f "$DEEP_DIR/git-conflicts.json" ] || echo '{}' > "$DEEP_DIR/git-conflicts.json"
+
+# Init failures journal
+if [ ! -f "$DEEP_DIR/failures.md" ]; then
+  echo "# Failure Journal" > "$DEEP_DIR/failures.md"
+  echo "" >> "$DEEP_DIR/failures.md"
+  echo "| Task | Worker | Timestamp | Category | Error |" >> "$DEEP_DIR/failures.md"
+  echo "|------|--------|-----------|----------|-------|" >> "$DEEP_DIR/failures.md"
+fi
+
+# Monitor log
+> "$DEEP_DIR/monitor.log"
+
+# Cleanup orphan worktrees from previous crashes
+cleanup_orphan_worktrees
+
+# Clean expired claims (>30 min old) if jq available
+if [[ -f "$DEEP_DIR/claims.json" ]] && command -v jq &>/dev/null; then
+  NOW_ISO=\$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  jq --arg now "\$NOW_ISO" 'with_entries(select(.value.expiresAt > \$now))' \\
+    "$DEEP_DIR/claims.json" > "$DEEP_DIR/claims.json.tmp" 2>/dev/null && \\
+    mv "$DEEP_DIR/claims.json.tmp" "$DEEP_DIR/claims.json"
+fi
+
+# Build compact task index from tasks.md (eligible tasks only, sorted by priority)
+build_task_index() {
+  local OUT="$DEEP_DIR/task-queue.txt"
+  > "\$OUT"
+
+  awk '
+    /^## \\[ \\] task-/ {
+      id = \$4; gsub(/:$/, "", id)
+      title = ""; for(i=5;i<=NF;i++) title = title (i>5?" ":"") \$i
+      pri = "medium"; att = 0; next
+    }
+    /^\\*\\*Priority:\\*\\*/ { pri = \$2; next }
+    /^\\*\\*Attempts:\\*\\*/ { att = \$2+0; next }
+    /^---$/ {
+      if (id && att < 3) print pri "|" id "|" title "|" att
+      id = ""
+    }
+    END { if (id && att < 3) print pri "|" id "|" title "|" att }
+  ' "$DEEP_DIR/tasks.md" 2>/dev/null > "\$OUT.tmp"
+
+  grep "^high|"   "\$OUT.tmp" >> "\$OUT" 2>/dev/null || true
+  grep "^medium|" "\$OUT.tmp" >> "\$OUT" 2>/dev/null || true
+  grep "^low|"    "\$OUT.tmp" >> "\$OUT" 2>/dev/null || true
+  rm -f "\$OUT.tmp"
+}
+
+# Build index at startup
+build_task_index
+PENDING_COUNT=\$(wc -l < "$DEEP_DIR/task-queue.txt" | tr -d ' ')
+
+# Early exit if no eligible tasks
+if [[ \$PENDING_COUNT -eq 0 ]]; then
+  echo "No eligible tasks in queue. Nothing to do."
+  notify "COMPLETE" "Queue empty, no workers launched."
+  exit 0
+fi
+
+# Dynamic loop cap
+if [[ \$MAX_LOOPS_PER_WORKER -eq 0 ]]; then
+  # ceil(pending * 1.2) + 10, minimum 50
+  COMPUTED=\$(( (PENDING_COUNT * 12 + 9) / 10 + 10 ))
+  MAX_LOOPS_PER_WORKER=\$(( COMPUTED > 50 ? COMPUTED : 50 ))
+fi
 
 echo "=========================================="
-echo "  DEEP EXECUTE - CONCURRENT WORKERS"
+echo "  DEEP EXECUTE - WORKTREE WORKERS"
 echo "=========================================="
 echo ""
 echo "Workers: $WORKERS"
-echo "Queue: $DEEP_DIR/tasks.md"
+echo "Queue: $DEEP_DIR/tasks.md (\$PENDING_COUNT eligible)"
+echo "Index: $DEEP_DIR/task-queue.txt"
 echo "Logs: $DEEP_DIR/worker-*.log"
+echo "Worktrees: \$WORKTREE_BASE/"
 echo "Max loops/worker: \$MAX_LOOPS_PER_WORKER"
 echo ""
 echo "Force exit: touch $DEEP_DIR/FORCE_EXECUTE_EXIT"
 echo ""
 
-notify "STARTED" "Launching $WORKERS concurrent workers..."
+notify "STARTED" "Launching $WORKERS worktree workers (\$PENDING_COUNT tasks)..."
 
 START_TIME=\$(date +%s)
 
-# Worker function - runs in subshell, errors do NOT kill master
+# ==========================================
+#  WORKER FUNCTION
+# ==========================================
+
 run_worker() {
   local WORKER_NUM=\$1
   local WORKER_ID="w\${WORKER_NUM}-\$RANDOM\$RANDOM"
@@ -195,17 +551,15 @@ run_worker() {
   local LOOPS=0
   local CONSECUTIVE_UNEXPECTED=0
 
-  # Ensure log file exists
   touch "\$LOG" 2>/dev/null || true
-
-  echo "[\$WORKER_ID] Worker \$WORKER_NUM started" >> "\$LOG" 2>/dev/null
+  echo "[\$WORKER_ID] Worker \$WORKER_NUM started (worktree mode)" >> "\$LOG" 2>/dev/null
 
   while true; do
     LOOPS=\$((LOOPS + 1))
 
-    # Guard: max loops per worker
+    # Guard: max loops
     if [[ \$LOOPS -gt \$MAX_LOOPS_PER_WORKER ]]; then
-      echo "[\$WORKER_ID] Max loops (\$MAX_LOOPS_PER_WORKER) reached, stopping" >> "\$LOG" 2>/dev/null
+      echo "[\$WORKER_ID] Max loops (\$MAX_LOOPS_PER_WORKER) reached" >> "\$LOG" 2>/dev/null
       notify "WARN" "Worker \$WORKER_NUM hit max loops (\$MAX_LOOPS_PER_WORKER)"
       break
     fi
@@ -216,9 +570,25 @@ run_worker() {
       break
     fi
 
-    echo "[\$WORKER_ID] Loop \$LOOPS: claiming next task..." >> "\$LOG" 2>/dev/null
+    echo "" >> "\$LOG" 2>/dev/null
+    echo "[\$WORKER_ID] === Loop \$LOOPS ===" >> "\$LOG" 2>/dev/null
 
-    # Start heartbeat writer (proves worker is alive while claude buffers output)
+    # --- Step 1: Create worktree ---
+    echo "[\$WORKER_ID] Creating worktree..." >> "\$LOG" 2>/dev/null
+    WT_DIR="" WT_BRANCH=""
+    if ! create_worktree "\$WORKER_NUM" "\$LOOPS"; then
+      echo "[\$WORKER_ID] Failed to create worktree, retrying in 5s..." >> "\$LOG" 2>/dev/null
+      sleep 5
+      CONSECUTIVE_UNEXPECTED=\$((CONSECUTIVE_UNEXPECTED + 1))
+      if [[ \$CONSECUTIVE_UNEXPECTED -ge 3 ]]; then
+        echo "[\$WORKER_ID] 3 consecutive worktree failures, stopping" >> "\$LOG" 2>/dev/null
+        break
+      fi
+      continue
+    fi
+    echo "[\$WORKER_ID] Worktree: \$WT_DIR (branch: \$WT_BRANCH)" >> "\$LOG" 2>/dev/null
+
+    # --- Step 2: Start heartbeat ---
     HEARTBEAT_FILE="$DEEP_DIR/worker-\${WORKER_NUM}.heartbeat"
     (while true; do
       echo "\$(date '+%H:%M:%S') loop=\$LOOPS" > "\$HEARTBEAT_FILE"
@@ -226,48 +596,144 @@ run_worker() {
     done) &
     HEARTBEAT_PID=\$!
 
-    WORKER_PROMPT='${escapedPrompt}
+    # --- Step 3: Run claude -p in worktree ---
+    WORKER_PROMPT='${escapedPrompt}'
+    # Replace placeholder with actual absolute path
+    WORKER_PROMPT=\$(echo "\$WORKER_PROMPT" | sed "s|{ABSOLUTE_DEEP_DIR}|\$ABSOLUTE_DEEP_DIR|g")
+    WORKER_PROMPT="\$WORKER_PROMPT
 
 ADDITIONAL CONTEXT:
-- Your WORKER_ID is: '"\$WORKER_ID"'
-- Working directory: ${bashCwd}
-- IMPORTANT: When reading claims.json, if another worker claimed the same task between your read and write, pick a different task. Use file timestamps to detect stale reads.'
+- Your WORKER_ID is: \$WORKER_ID
+- Working directory (worktree): \$WT_DIR
+- Main repo: ${bashCwd}
+- IMPORTANT: When reading claims.json, if another worker claimed the same task, pick a different task."
 
-    # Stream output to log in real-time via tee, capture for result parsing
-    # env -u strips invalid API key so Claude Max auth takes over
-    OUTPUT=\$(env -u ANTHROPIC_API_KEY claude -p "\$WORKER_PROMPT" \\
+    OUTPUT=\$(cd "\$WT_DIR" && env -u ANTHROPIC_API_KEY claude -p "\$WORKER_PROMPT" \\
       --output-format text \\
       --allowedTools "Read,Edit,Write,Bash,Grep,Glob,Task,Skill" \\
       --dangerously-skip-permissions 2>&1 | tee -a "\$LOG" || true)
 
-    # Kill heartbeat writer
+    # Kill heartbeat
     kill \$HEARTBEAT_PID 2>/dev/null; wait \$HEARTBEAT_PID 2>/dev/null
 
-    # Parse result
+    # --- Step 4: Parse result ---
     if echo "\$OUTPUT" | grep -q "QUEUE_EMPTY"; then
       echo "[\$WORKER_ID] Queue empty, stopping" >> "\$LOG" 2>/dev/null
+      cleanup_worktree "\$WORKER_NUM" "\$WT_BRANCH" 0
       CONSECUTIVE_UNEXPECTED=0
       break
+
     elif echo "\$OUTPUT" | grep -q "TASK_COMPLETE"; then
-      TASKS_DONE=\$((TASKS_DONE + 1))
       TASK_INFO=\$(echo "\$OUTPUT" | grep "TASK_COMPLETE" | tail -1)
-      echo "[\$WORKER_ID] ✓ \$TASK_INFO" >> "\$LOG" 2>/dev/null
+      TASK_ID=\$(echo "\$TASK_INFO" | cut -d: -f2)
+      COMMIT_SHA=\$(echo "\$TASK_INFO" | cut -d: -f3)
+      TASK_TITLE=\$(echo "\$TASK_INFO" | cut -d: -f4-)
+      echo "[\$WORKER_ID] Task complete: \$TASK_ID (\$COMMIT_SHA)" >> "\$LOG" 2>/dev/null
       CONSECUTIVE_UNEXPECTED=0
+
+      # --- Step 5: Rename branch to deep/{task-id} ---
+      FINAL_BRANCH="deep/\$TASK_ID"
+      git -C "\$WT_DIR" branch -m "\$WT_BRANCH" "\$FINAL_BRANCH" 2>/dev/null || true
+      WT_BRANCH="\$FINAL_BRANCH"
+
+      # --- Step 6: PR/CI/Merge pipeline ---
+      echo "[\$WORKER_ID] Creating PR for \$TASK_ID..." >> "\$LOG" 2>/dev/null
+      PR_NUM=""
+      if create_pr "\$WT_BRANCH" "\$TASK_ID" "\$TASK_TITLE"; then
+        echo "[\$WORKER_ID] PR #\$PR_NUM created" >> "\$LOG" 2>/dev/null
+
+        # Wait for CI
+        echo "[\$WORKER_ID] Waiting for CI on PR #\$PR_NUM..." >> "\$LOG" 2>/dev/null
+        CI_ATTEMPTS=0
+        CI_PASSED=false
+
+        while [[ \$CI_ATTEMPTS -lt \$CI_FIX_MAX ]]; do
+          wait_for_ci "\$PR_NUM"
+          CI_RESULT=\$?
+
+          if [[ \$CI_RESULT -eq 0 ]]; then
+            CI_PASSED=true
+            break
+          elif [[ \$CI_RESULT -eq 2 ]]; then
+            echo "[\$WORKER_ID] CI timeout on PR #\$PR_NUM" >> "\$LOG" 2>/dev/null
+            break
+          fi
+
+          # CI failed — attempt fix
+          CI_ATTEMPTS=\$((CI_ATTEMPTS + 1))
+          echo "[\$WORKER_ID] CI failed (attempt \$CI_ATTEMPTS/\$CI_FIX_MAX), invoking fix..." >> "\$LOG" 2>/dev/null
+
+          FAILURE_OUTPUT=\$(get_ci_failure_output "\$PR_NUM")
+
+          CI_FIX_PROMPT='${escapedCiFixPrompt}'
+
+          FIX_OUTPUT=\$(cd "\$WT_DIR" && DEEP_CI_FAILURE_OUTPUT="\$FAILURE_OUTPUT" \\
+            env -u ANTHROPIC_API_KEY claude -p "\$CI_FIX_PROMPT
+
+CI FAILURE OUTPUT:
+\$FAILURE_OUTPUT" \\
+            --output-format text \\
+            --allowedTools "Read,Edit,Write,Bash,Grep,Glob" \\
+            --dangerously-skip-permissions 2>&1 | tee -a "\$LOG" || true)
+
+          if echo "\$FIX_OUTPUT" | grep -q "CI_FIX_COMPLETE:flake"; then
+            # Flaky test — push empty commit to re-trigger
+            echo "[\$WORKER_ID] Flake detected, pushing empty commit" >> "\$LOG" 2>/dev/null
+            (cd "\$WT_DIR" && git commit --allow-empty -m "[deep] re-trigger CI (flake)" && \\
+              git push origin "\$WT_BRANCH") 2>/dev/null
+          elif echo "\$FIX_OUTPUT" | grep -q "CI_FIX_COMPLETE"; then
+            echo "[\$WORKER_ID] CI fix applied, pushing..." >> "\$LOG" 2>/dev/null
+            (cd "\$WT_DIR" && git push origin "\$WT_BRANCH") 2>/dev/null
+          elif echo "\$FIX_OUTPUT" | grep -q "CI_FIX_FAILED"; then
+            FIX_REASON=\$(echo "\$FIX_OUTPUT" | grep "CI_FIX_FAILED" | tail -1 | cut -d: -f2-)
+            echo "[\$WORKER_ID] CI fix failed: \$FIX_REASON" >> "\$LOG" 2>/dev/null
+            break
+          fi
+        done
+
+        if \$CI_PASSED; then
+          # Merge
+          echo "[\$WORKER_ID] CI passed, merging PR #\$PR_NUM..." >> "\$LOG" 2>/dev/null
+          if merge_pr "\$PR_NUM"; then
+            echo "[\$WORKER_ID] ✓ PR #\$PR_NUM merged" >> "\$LOG" 2>/dev/null
+            TASKS_DONE=\$((TASKS_DONE + 1))
+          else
+            echo "[\$WORKER_ID] ⚠ Merge failed (conflict?), leaving PR open" >> "\$LOG" 2>/dev/null
+            TASKS_BLOCKED=\$((TASKS_BLOCKED + 1))
+            log_failure "\$TASK_ID" "\$WORKER_ID" "merge-conflict" "PR #\$PR_NUM merge failed"
+          fi
+        else
+          # CI never passed
+          echo "[\$WORKER_ID] ✗ CI failed after \$CI_ATTEMPTS fixes, closing PR" >> "\$LOG" 2>/dev/null
+          (cd "$CWD" && gh pr close "\$PR_NUM" --comment "CI failed after \$CI_ATTEMPTS fix attempts. Closing." --delete-branch) 2>/dev/null || true
+          TASKS_FAILED=\$((TASKS_FAILED + 1))
+          log_failure "\$TASK_ID" "\$WORKER_ID" "ci-failure" "CI failed after \$CI_ATTEMPTS fix attempts"
+        fi
+      else
+        echo "[\$WORKER_ID] ⚠ Failed to create PR for \$TASK_ID" >> "\$LOG" 2>/dev/null
+        TASKS_FAILED=\$((TASKS_FAILED + 1))
+        log_failure "\$TASK_ID" "\$WORKER_ID" "pr-creation" "Failed to push branch or create PR"
+      fi
+
+      # Cleanup worktree (don't delete remote branch — PR handles it)
+      cleanup_worktree "\$WORKER_NUM" "\$WT_BRANCH" 0
+
     elif echo "\$OUTPUT" | grep -q "TASK_FAILED"; then
-      TASKS_FAILED=\$((TASKS_FAILED + 1))
       TASK_INFO=\$(echo "\$OUTPUT" | grep "TASK_FAILED" | tail -1)
+      TASK_ID=\$(echo "\$TASK_INFO" | cut -d: -f2)
+      FAIL_CAT=\$(echo "\$TASK_INFO" | cut -d: -f3)
+      FAIL_DESC=\$(echo "\$TASK_INFO" | cut -d: -f4-)
       echo "[\$WORKER_ID] ✗ \$TASK_INFO" >> "\$LOG" 2>/dev/null
+      TASKS_FAILED=\$((TASKS_FAILED + 1))
+      log_failure "\$TASK_ID" "\$WORKER_ID" "\$FAIL_CAT" "\$FAIL_DESC"
+      cleanup_worktree "\$WORKER_NUM" "\$WT_BRANCH" 0
       CONSECUTIVE_UNEXPECTED=0
-    elif echo "\$OUTPUT" | grep -q "TASK_GIT_BLOCKED"; then
-      TASKS_BLOCKED=\$((TASKS_BLOCKED + 1))
-      TASK_INFO=\$(echo "\$OUTPUT" | grep "TASK_GIT_BLOCKED" | tail -1)
-      echo "[\$WORKER_ID] ⚠ \$TASK_INFO" >> "\$LOG" 2>/dev/null
-      CONSECUTIVE_UNEXPECTED=0
+
     else
       CONSECUTIVE_UNEXPECTED=\$((CONSECUTIVE_UNEXPECTED + 1))
       echo "[\$WORKER_ID] No result token (streak: \$CONSECUTIVE_UNEXPECTED)" >> "\$LOG" 2>/dev/null
+      cleanup_worktree "\$WORKER_NUM" "\$WT_BRANCH" 0
 
-      # 3 consecutive unexpected outputs = something is wrong, bail
       if [[ \$CONSECUTIVE_UNEXPECTED -ge 3 ]]; then
         echo "[\$WORKER_ID] 3 consecutive failures, stopping" >> "\$LOG" 2>/dev/null
         notify "ERROR" "Worker \$WORKER_NUM stopped: 3 consecutive unexpected outputs"
@@ -275,42 +741,27 @@ ADDITIONAL CONTEXT:
       fi
     fi
 
+    # Rebuild task index for next iteration
+    build_task_index
+
     # Brief pause before next claim
-    sleep 1
+    sleep 2
   done
 
   echo "[\$WORKER_ID] Final: done=\$TASKS_DONE failed=\$TASKS_FAILED blocked=\$TASKS_BLOCKED" >> "\$LOG" 2>/dev/null
-
-  # Write summary for aggregation
   echo "\$TASKS_DONE \$TASKS_FAILED \$TASKS_BLOCKED" > "$DEEP_DIR/worker-\${WORKER_NUM}.result" 2>/dev/null
 }
 
-# Create worktree per worker for true file isolation (if in git repo)
-if git rev-parse --is-inside-work-tree &>/dev/null; then
-  echo "Setting up git worktrees for worker isolation..."
-  for i in \$(seq 1 $WORKERS); do
-    WORKTREE="$DEEP_DIR/worktree-\$i"
-    if [[ ! -d "\$WORKTREE" ]]; then
-      BRANCH="deep-worker-\$i-\$(date +%s)"
-      git worktree add "\$WORKTREE" -b "\$BRANCH" HEAD 2>/dev/null || {
-        echo "Warning: worktree creation failed for worker \$i, using shared cwd"
-        continue
-      }
-      echo "  Created worktree for worker \$i: \$WORKTREE"
-    fi
-  done
-fi
+# ==========================================
+#  LAUNCH WORKERS
+# ==========================================
 
-# Launch workers with staggered starts
 for i in \$(seq 1 $WORKERS); do
-  # Use worktree if it exists, otherwise shared cwd
-  WORKER_CWD="$DEEP_DIR/worktree-\$i"
-  [[ ! -d "\$WORKER_CWD" ]] && WORKER_CWD="$CWD"
   run_worker \$i &
-  PIDS+=(\$!)
-  echo "Launched worker \$i (PID: \${PIDS[-1]}, cwd: \$WORKER_CWD)"
+  PIDS[\$i]=\$!
+  echo "Launched worker \$i (PID: \${PIDS[\$i]})"
   if [[ \$i -lt $WORKERS ]]; then
-    sleep 2  # Stagger to reduce claim contention
+    sleep 3  # Stagger to reduce claim contention
   fi
 done
 
@@ -319,40 +770,70 @@ echo "All $WORKERS workers launched. Waiting for completion..."
 echo "Monitor: tail -f $DEEP_DIR/worker-*.log"
 echo ""
 
-# Master monitor loop - checks heartbeat freshness every 30s
+# ==========================================
+#  MONITOR + WORKER REVIVAL
+# ==========================================
+
 monitor_workers() {
   while true; do
     [[ -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" ]] && break
+    echo "" >> "$DEEP_DIR/monitor.log"
+    echo "[\$(date '+%H:%M:%S')] === Worker Status ===" >> "$DEEP_DIR/monitor.log"
+
+    # Also print to stdout
     echo ""
     echo "[\$(date '+%H:%M:%S')] === Worker Status ==="
+
     for i in \$(seq 1 $WORKERS); do
       HB="$DEEP_DIR/worker-\${i}.heartbeat"
+      PID="\${PIDS[\$i]:-}"
+
       if [[ -f "\$HB" ]]; then
         HB_TIME=\$(stat -c%Y "\$HB" 2>/dev/null || stat -f%m "\$HB" 2>/dev/null)
         NOW=\$(date +%s)
         AGE=\$(( NOW - HB_TIME ))
         CONTENT=\$(cat "\$HB" 2>/dev/null)
-        if [[ \$AGE -gt 120 ]]; then
-          echo "  ⚠ Worker \$i: STALE (\${AGE}s) - \$CONTENT"
-          # Telegram warn on stale >5min (deduplicate with flag file)
-          if [[ \$AGE -gt 300 ]] && [[ ! -f "$DEEP_DIR/worker-\${i}.stale-notified" ]]; then
+
+        if [[ \$AGE -gt 600 ]]; then
+          # Stale >10min and PID alive → hard kill + revive
+          if [[ -n "\$PID" ]] && kill -0 \$PID 2>/dev/null; then
+            echo "  ✗ Worker \$i: HUNG (\${AGE}s), killing and reviving" | tee -a "$DEEP_DIR/monitor.log"
+            kill -9 \$PID 2>/dev/null || true
+            wait \$PID 2>/dev/null || true
+            revive_worker \$i
+          fi
+        elif [[ \$AGE -gt 300 ]]; then
+          echo "  ⚠ Worker \$i: STALE (\${AGE}s) - \$CONTENT" | tee -a "$DEEP_DIR/monitor.log"
+
+          # PID dead + stale >5min → revive
+          if [[ -n "\$PID" ]] && ! kill -0 \$PID 2>/dev/null; then
+            echo "  → Worker \$i: DEAD, reviving..." | tee -a "$DEEP_DIR/monitor.log"
+            revive_worker \$i
+          elif [[ ! -f "$DEEP_DIR/worker-\${i}.stale-notified" ]]; then
             notify "WARN" "Worker \$i STALE for \${AGE}s (last: \$CONTENT)"
             touch "$DEEP_DIR/worker-\${i}.stale-notified"
           fi
         else
-          echo "  ✓ Worker \$i: alive (\${AGE}s) - \$CONTENT"
-          # Clear stale notification flag if worker recovered
+          echo "  ✓ Worker \$i: alive (\${AGE}s) - \$CONTENT" | tee -a "$DEEP_DIR/monitor.log"
           rm -f "$DEEP_DIR/worker-\${i}.stale-notified" 2>/dev/null
         fi
       else
-        echo "  … Worker \$i: starting"
+        # No heartbeat — check if PID is dead
+        if [[ -n "\$PID" ]] && ! kill -0 \$PID 2>/dev/null; then
+          echo "  ✗ Worker \$i: DEAD (no heartbeat), reviving..." | tee -a "$DEEP_DIR/monitor.log"
+          revive_worker \$i
+        else
+          echo "  … Worker \$i: starting" | tee -a "$DEEP_DIR/monitor.log"
+        fi
       fi
     done
-    # Show completion counts from logs
+
+    # Show completion counts
     for i in \$(seq 1 $WORKERS); do
       DONE=\$(grep -c "TASK_COMPLETE" "$DEEP_DIR/worker-\${i}.log" 2>/dev/null || echo 0)
       [[ \$DONE -gt 0 ]] && echo "  Worker \$i: \$DONE tasks completed"
     done
+
     sleep 30
   done
 }
@@ -360,10 +841,21 @@ monitor_workers() {
 monitor_workers &
 MONITOR_PID=\$!
 
-# Wait for all workers (re-wait if interrupted by trapped signal)
-EXIT_CODE=0
-for pid in "\${PIDS[@]}"; do
-  wait \$pid 2>/dev/null || EXIT_CODE=1
+# Wait for all workers using polling (handles revived PIDs)
+while true; do
+  ALL_DONE=true
+  for i in \$(seq 1 $WORKERS); do
+    PID="\${PIDS[\$i]:-}"
+    if [[ -n "\$PID" ]] && kill -0 \$PID 2>/dev/null; then
+      ALL_DONE=false
+    fi
+  done
+  \$ALL_DONE && break
+
+  # Also break on force exit
+  [[ -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" ]] && break
+
+  sleep 5
 done
 
 # Kill monitor
@@ -377,7 +869,10 @@ DURATION=\$(( END_TIME - START_TIME ))
 MINUTES=\$(( DURATION / 60 ))
 SECONDS_REM=\$(( DURATION % 60 ))
 
-# Aggregate results (default 0 if worker crashed before writing)
+# ==========================================
+#  AGGREGATE RESULTS
+# ==========================================
+
 TOTAL_DONE=0
 TOTAL_FAILED=0
 TOTAL_BLOCKED=0
@@ -394,6 +889,61 @@ for i in \$(seq 1 $WORKERS); do
   fi
 done
 
+# ==========================================
+#  RETRY WAVE (if tasks remain and we made progress)
+# ==========================================
+
+build_task_index
+REMAINING=\$(wc -l < "$DEEP_DIR/task-queue.txt" | tr -d ' ')
+
+if [[ \$REMAINING -gt 0 && \$TOTAL_DONE -gt 0 ]]; then
+  echo ""
+  echo "=========================================="
+  echo "  RETRY WAVE - \$REMAINING tasks remaining"
+  echo "=========================================="
+
+  # Reduced workers: min(remaining, ceil(workers/2)), at least 1
+  RETRY_WORKERS=\$(( (${workers} + 1) / 2 ))
+  [[ \$RETRY_WORKERS -gt \$REMAINING ]] && RETRY_WORKERS=\$REMAINING
+  [[ \$RETRY_WORKERS -lt 1 ]] && RETRY_WORKERS=1
+
+  notify "RETRY" "Retry wave: \$RETRY_WORKERS workers for \$REMAINING remaining tasks"
+
+  # Reset state for retry
+  RETRY_PIDS=()
+  for i in \$(seq 1 \$RETRY_WORKERS); do
+    run_worker \$((100 + i)) &
+    RETRY_PIDS+=(\$!)
+    [[ \$i -lt \$RETRY_WORKERS ]] && sleep 3
+  done
+
+  # Wait for retry workers
+  for pid in "\${RETRY_PIDS[@]}"; do
+    wait \$pid 2>/dev/null || true
+  done
+
+  # Aggregate retry results
+  for i in \$(seq 1 \$RETRY_WORKERS); do
+    RESULT_FILE="$DEEP_DIR/worker-\$((100 + i)).result"
+    if [[ -f "\$RESULT_FILE" ]]; then
+      read D F B < "\$RESULT_FILE" 2>/dev/null || { D=0; F=0; B=0; }
+      TOTAL_DONE=\$((TOTAL_DONE + \${D:-0}))
+      TOTAL_FAILED=\$((TOTAL_FAILED + \${F:-0}))
+      TOTAL_BLOCKED=\$((TOTAL_BLOCKED + \${B:-0}))
+    fi
+  done
+
+  # Update timing
+  END_TIME=\$(date +%s)
+  DURATION=\$(( END_TIME - START_TIME ))
+  MINUTES=\$(( DURATION / 60 ))
+  SECONDS_REM=\$(( DURATION % 60 ))
+fi
+
+# ==========================================
+#  SUMMARY
+# ==========================================
+
 echo ""
 echo "=========================================="
 echo "  DEEP EXECUTE COMPLETE"
@@ -402,7 +952,7 @@ echo ""
 echo "Duration: \${MINUTES}m \${SECONDS_REM}s"
 echo "Completed: \$TOTAL_DONE"
 echo "Failed: \$TOTAL_FAILED"
-echo "Git-Blocked: \$TOTAL_BLOCKED"
+echo "Blocked: \$TOTAL_BLOCKED"
 echo ""
 
 # Show completed tasks
@@ -411,33 +961,45 @@ if [[ -f "$DEEP_DIR/completed-tasks.md" ]]; then
   echo "Total in completed-tasks.md: \$COMPLETED"
 fi
 
-# Show git-blocked tasks
-if [[ -f "$DEEP_DIR/git-conflicts.json" ]] && [[ \$(wc -c < "$DEEP_DIR/git-conflicts.json") -gt 3 ]]; then
-  echo ""
-  echo "Git-blocked tasks (resolve manually):"
-  echo "  git branch | grep deep-recovery/"
-  echo "  See: $DEEP_DIR/git-conflicts.json"
+# Show failures
+if [[ -f "$DEEP_DIR/failures.md" ]]; then
+  FAIL_COUNT=\$(grep -c "^|" "$DEEP_DIR/failures.md" 2>/dev/null || echo 0)
+  FAIL_COUNT=\$((FAIL_COUNT - 2))  # subtract header rows
+  [[ \$FAIL_COUNT -gt 0 ]] && echo "Failures logged: \$FAIL_COUNT (see $DEEP_DIR/failures.md)"
 fi
 
-# Cleanup
+# Show remaining
+build_task_index
+FINAL_REMAINING=\$(wc -l < "$DEEP_DIR/task-queue.txt" | tr -d ' ')
+[[ \$FINAL_REMAINING -gt 0 ]] && echo "Tasks remaining: \$FINAL_REMAINING"
+
+# ==========================================
+#  FINAL CLEANUP
+# ==========================================
+
+# Remove all worktrees
+if [[ -d "\$WORKTREE_BASE" ]]; then
+  for wt in "\$WORKTREE_BASE"/w-*; do
+    [[ -d "\$wt" ]] || continue
+    git -C "$CWD" worktree remove "\$wt" --force 2>/dev/null || rm -rf "\$wt"
+  done
+  rmdir "\$WORKTREE_BASE" 2>/dev/null || true
+fi
+git -C "$CWD" worktree prune 2>/dev/null || true
+
+# Cleanup temp files
 rm -f $DEEP_DIR/worker-*.result
 rm -f $DEEP_DIR/worker-*.heartbeat
 rm -f $DEEP_DIR/worker-*.stale-notified
+rm -f "$DEEP_DIR/task-queue.txt" "$DEEP_DIR/task-queue.txt.tmp" 2>/dev/null || true
 rm -f "$DEEP_DIR/FORCE_EXECUTE_EXIT" 2>/dev/null || true
-
-# Cleanup worktrees
-if git rev-parse --is-inside-work-tree &>/dev/null; then
-  for i in \$(seq 1 $WORKERS); do
-    WORKTREE="$DEEP_DIR/worktree-\$i"
-    if [[ -d "\$WORKTREE" ]]; then
-      git worktree remove "\$WORKTREE" --force 2>/dev/null || true
-    fi
-  done
-fi
+rm -f "$DEEP_DIR/monitor.log" 2>/dev/null || true
 
 SUMMARY="Done: \$TOTAL_DONE | Failed: \$TOTAL_FAILED | Blocked: \$TOTAL_BLOCKED | Time: \${MINUTES}m \${SECONDS_REM}s"
 notify "COMPLETE" "✅ \$SUMMARY"
 
+EXIT_CODE=0
+[[ \$TOTAL_FAILED -gt 0 ]] && EXIT_CODE=1
 exit \$EXIT_CODE
 `;
 
