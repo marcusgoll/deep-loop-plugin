@@ -381,6 +381,7 @@ npm test && npm run typecheck && npm run lint && npm run build
 \`\`\`
 Skill({ skill: "code-review" })
 Skill({ skill: "security-audit" })
+Skill({ skill: "blind-critic" })    # UI changes only; self-skips otherwise
 \`\`\`
 Log any issues found by skills to ${DEEP_DIR}/issues.json.
 
