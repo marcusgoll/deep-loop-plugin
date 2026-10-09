@@ -4,6 +4,7 @@ The injected API is authenticated private-host infrastructure, never a candidate
 callback. Mutable ref/PR writes have durable intents and are never replayed.
 Immutable Git objects are content-addressed and may be reconciled identically.
 """
+from authority import require_active
 import base64
 import hashlib
 import re
@@ -36,8 +37,12 @@ class TrustedDelivery:
         self.store.create(self.key+'.delivery-'+suffix+'.json',value)
         return 'wait_for_trusted_delivery'
 
+    def _authorized_api(self, method, route, data):
+        require_active(self.store, self.key)
+        return self.api(method, route, data)
+
     def _call(self,method,route,data=None):
-        return self.api(method,self.prefix+route,data)
+        return self._authorized_api(method,self.prefix+route,data)
 
     def _pr(self,record,commit,base):
         number=record.get('number')
@@ -55,6 +60,7 @@ class TrustedDelivery:
 
     def step(self):
         with self.store.lock():
+            require_active(self.store, self.key)
             approval=self.store.read(self.key+'.approval.json');contract=approval['contract']
             if digest(contract)!=self.key or not approval['approval_ref']:
                 raise ValueError('Exact authenticated delivery approval required')
@@ -78,10 +84,10 @@ class TrustedDelivery:
             resume_proof = (validate_resume_acceptance(contract,evidence,self.store)
                             if 'resume_verification' in contract else None)
             base=sha(delivery['source_sha'])
-            publisher=self.api('GET','user',None)
+            publisher=self._authorized_api('GET','user',None)
             if publisher.get('login')!='marcusgoll' or publisher.get('id')!=delivery['publisher_id']:
                 raise ValueError('Private publisher identity changed')
-            if self.api('GET','repos/'+REPOSITORY,None).get('id')!=delivery['repository_id']:
+            if self._authorized_api('GET','repos/'+REPOSITORY,None).get('id')!=delivery['repository_id']:
                 raise ValueError('Frozen repository identity changed')
             reference=self._call('GET','git/ref/heads/'+delivery['base_ref'])
             if reference is None or reference.get('object',{}).get('sha')!=base:

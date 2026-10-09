@@ -4,6 +4,7 @@ No default outcome, enrollment, reset, delivery or automatic failover. Productio
 service deadlines/host installation must be qualified separately. This module
 reuses controller ownership and its journal; it stores no task-status replica.
 """
+from authority import require_active
 from admission import LIMITS, digest
 from private_launch import launch_plan
 
@@ -18,6 +19,7 @@ def tick(store, controller_factory, *, expected_contract_digest=None, active_win
     contract_digest = enabled['contract_digest']
     if expected_contract_digest is not None and contract_digest != expected_contract_digest:
         raise ValueError('Enabled outcome changed during worker execution')
+    require_active(store, contract_digest)
     approval = store.read(contract_digest + '.approval.json')
     contract = approval['contract']
     if digest(contract) != contract_digest or not approval['approval_ref']:

@@ -13,6 +13,7 @@ import stat
 import tempfile
 
 from admission import digest, finish, initialize, reserve
+from authority import require_active
 from private_launch import launch_plan, recovery_action
 
 
@@ -109,13 +110,142 @@ class PrivateController:
         self.verifier = verifier
         self.contract_digest = journal.contract_digest
 
-    def _contract(self):
+    def _historical_contract(self):
         record = self.store.read(self.contract_digest + '.approval.json')
         if (set(record) != {'contract', 'approval_ref'} or
                 digest(record['contract']) != self.contract_digest or
                 not isinstance(record['approval_ref'], str) or not record['approval_ref']):
             raise ValueError('Missing or changed authenticated enrollment')
         return record['contract']
+
+    def _contract(self):
+        require_active(self.store, self.contract_digest)
+        return self._historical_contract()
+
+    def revoke(self, *, approval_ref, reason):
+        """Trusted root stop/cleanup request; no acceptance, replay or refund.
+
+        Intent itself revokes new authority. Resume only this immutable request
+        after an interruption; ambiguous native ownership remains blocked.
+        """
+        if os.geteuid() != 0 or any(not isinstance(v, str) or not v.strip() or len(v) > 4096
+                                  for v in (approval_ref, reason)):
+            raise ValueError('Explicit trusted root revocation required')
+        key = self.contract_digest
+        with self.store.lock():
+            contract = self._historical_contract()
+            revision, journal = self.journal.read()
+            try:
+                current = self.store.read('active-owner.json')
+            except FileNotFoundError:
+                current = None
+            selected = current if current and current['contract_digest'] == key else None
+            intent_name = key + '.revocation-intent.json'
+            try:
+                intent = self.store.read(intent_name)
+            except FileNotFoundError:
+                intent = {'contract_digest': key, 'approval_ref': approval_ref,
+                          'reason': reason, 'owner': selected}
+                self.store.create(intent_name, intent)
+            if (set(intent) != {'contract_digest', 'approval_ref', 'reason', 'owner'} or
+                    intent['contract_digest'] != key or intent['approval_ref'] != approval_ref or
+                    intent['reason'] != reason):
+                raise ValueError('Immutable revocation request changed')
+            revoked = {'contract_digest': key, 'intent_digest': digest(intent)}
+            try:
+                self.store.create(key + '.revoked.json', revoked)
+            except FileExistsError:
+                if self.store.read(key + '.revoked.json') != revoked:
+                    raise ValueError('Protected revocation changed')
+            complete_name = key + '.revocation-complete.json'
+            try:
+                complete = self.store.read(complete_name)
+            except FileNotFoundError:
+                complete = None
+            if complete is not None:
+                if (set(complete) != {'contract_digest', 'intent_digest', 'journal_revision'} or
+                        complete['contract_digest'] != key or
+                        complete['intent_digest'] != digest(intent) or
+                        complete['journal_revision'] != revision or selected is not None or
+                        journal['attempts'] and journal['attempts'][-1]['status'] != 'finished'):
+                    raise ValueError('Completed revocation state changed')
+                if intent['owner'] is not None:
+                    owner = intent['owner'];last = journal['attempts'][-1]
+                    original = {**journal, 'attempts': journal['attempts'][:-1] + [{**last, 'status':'reserved','progress_receipt':None}]}
+                    plan = launch_plan(original,key,run_id=owner['run_id'],run_attempt=owner['run_attempt'],session_id=owner['session_id'])
+                    proof = self.store.read(key+'.revocation-stop.json')
+                    if (proof['intent_digest'] != digest(intent) or proof['owner'] != owner or
+                            plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest']):
+                        raise ValueError('Completed revocation stop proof changed')
+                    observation = self.backend.observe_owned(plan,contract,owner,proof['invocation_id'])
+                    if not (observation['ownership_verified'] and observation['execution_finished'] and observation['cgroup_empty']):
+                        raise ValueError('Completed revocation predecessor reappeared')
+                return complete
+            owner = intent['owner']
+            if owner is not None:
+                if not journal['attempts']:
+                    raise ValueError('Revoked owner lacks charged reservation')
+                last = journal['attempts'][-1]
+                original = {**journal, 'attempts': journal['attempts'][:-1] +
+                            [{**last, 'status': 'reserved', 'progress_receipt': None}]}
+                plan = launch_plan(original, key, run_id=owner['run_id'],
+                                   run_attempt=owner['run_attempt'], session_id=owner['session_id'])
+                if (plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest'] or
+                        last['status'] == 'reserved' and revision != owner['reservation_revision']):
+                    raise ValueError('Revoked ownership history changed')
+                if selected is not None and selected != owner:
+                    raise ValueError('Revoked owner replaced')
+                proof_name = key + '.revocation-stop.json'
+                try:
+                    proof = self.store.read(proof_name)
+                except FileNotFoundError:
+                    if selected != owner:
+                        raise ValueError('Lost revoked owner requires inspection')
+                    try:
+                        native = self.store.read(owner['unit'] + '.invocation.json')
+                    except FileNotFoundError:
+                        invocation = self.backend.recover_invocation(plan, contract, owner)
+                        self._invocation(invocation)
+                        native = {'invocation_id': invocation, 'owner': owner}
+                        self.store.create(owner['unit'] + '.invocation.json', native)
+                    if native['owner'] != owner:
+                        raise ValueError('Revocation native owner changed')
+                    self._invocation(native['invocation_id'])
+                    observation = self.backend.stop_owned(plan, contract, owner, native['invocation_id'])
+                    proof = {'intent_digest': digest(intent), 'invocation_id': native['invocation_id'],
+                             'owner': owner, 'observation': observation}
+                    self.store.create(proof_name, proof)
+                observation = proof['observation']
+                if (proof['intent_digest'] != digest(intent) or proof['owner'] != owner or
+                        observation.get('unit') != owner['unit'] or
+                        observation.get('invocation_id') != proof['invocation_id'] or
+                        observation.get('ownership_verified') is not True or
+                        observation.get('execution_finished') is not True or
+                        observation.get('cgroup_empty') is not True):
+                    raise ValueError('Revocation lacks ended empty native ownership proof')
+                fresh = self.backend.observe_owned(plan, contract, owner, proof['invocation_id'])
+                if not (fresh['ownership_verified'] and fresh['execution_finished'] and fresh['cgroup_empty']):
+                    raise ValueError('Revocation predecessor no longer ended and empty')
+                if selected is None and last['status'] != 'finished':
+                    raise ValueError('Revocation lost owner before charged finish')
+                if last['status'] == 'reserved':
+                    closed = finish(journal, key, run_id=owner['run_id'],
+                                    run_attempt=owner['run_attempt'], progress_receipt=None)
+                    revision = self.journal.publish(revision, closed)
+                    if self.journal.read() != (revision, closed):
+                        raise ValueError('Uncertain revocation reconciliation')
+                if selected is not None:
+                    self.store.remove('active-owner.json')
+                elif last['status'] != 'finished':
+                    raise ValueError('Revocation lost owner before charged finish')
+            if owner is None and journal['attempts'] and journal['attempts'][-1]['status'] == 'reserved':
+                raise ValueError('Revoked reservation lacks authenticated ownership; inspection required')
+            complete = {'contract_digest': key, 'intent_digest': digest(intent),
+                        'journal_revision': revision}
+            self.store.create(complete_name, complete)
+            if self.store.read(complete_name) != complete:
+                raise ValueError('Revocation completion readback changed')
+            return complete
 
     def enroll(self, contract, approval_ref):
         """Trusted human-approval importer only, never automatic recovery."""

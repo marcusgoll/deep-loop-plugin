@@ -16,7 +16,7 @@ from private_controller import TrustedStore
 from private_launch import ROOT
 
 CONTROL = Path(ROOT)/'control'
-MODULES = ('admission.py', 'git_journal.py', 'private_launch.py',
+MODULES = ('admission.py', 'authority.py', 'git_journal.py', 'private_launch.py',
            'private_controller.py', 'systemd_observer.py', 'native_session.py',
            'native_backend.py', 'artifact_verifier.py', 'resume_verifier.py', 'private_wakeup.py',
            'worker_window.py', 'private_worker.py', 'worker_units.py',

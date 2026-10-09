@@ -261,3 +261,22 @@ only the exact contract, including `runtime.bundle_digest` and
 or execution window requires inspection. Uncertain results never authorize a
 retry or reset. Source fixtures do not establish actual host activation, human
 approval, live inference or disposable delivery.
+
+
+Outcome revocation uses `PrivateController.revoke` from a trusted root operator
+with an externally authenticated approval reference and reason. This is a source
+API, with no automatic enrollment or installed operator entrypoint. The immutable
+revocation intent immediately denies subsequent dispatch, wakeup and provider
+operations; a partial intent also denies them. Revocation authenticates the
+persisted owner, plan and retained native invocation before signaling that unit's
+control group. It tries SIGTERM, then SIGKILL if required, retaining native identity
+and requiring fresh ended/empty observation before releasing ownership.
+
+Cleanup finishes the existing charged reservation without accepting output,
+refunding budget or deleting candidate edits. Interrupted cleanup resumes the
+same immutable request. Unknown ownership, missing native evidence or changed
+terminal receipts block cleanup completion. Revocation is serialized with the
+credential-stream lock; an already-issued provider request can have an uncertain
+result and is never undone or replayed by cleanup. No new request is allowed after
+the protected intent exists. Source fixtures do not establish deployment of these
+changes or full A01-A11 qualification.

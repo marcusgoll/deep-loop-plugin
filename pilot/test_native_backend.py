@@ -30,6 +30,28 @@ class NativeBackendTests(unittest.TestCase):
     def native_observation(self):
         return {'unit':self.plan['unit'],'invocation_id':'a'*32,'active_state':'inactive',
                 'cgroup_empty':True,'ownership_verified':True,'execution_finished':True}
+    def test_revoked_qualification_cannot_submit(self):
+        from authority import OutcomeRevoked
+        self.backend.qualified=(digest(self.plan),digest(self.contract))
+        self.store.create(self.contract_digest+'.revocation-intent.json',{})
+        with patch('native_backend.subprocess.run') as run:
+            with self.assertRaises(OutcomeRevoked):self.backend.submit(self.plan,self.contract)
+            run.assert_not_called()
+        self.assertFalse(list(self.store.root.glob('*.jsonl')))
+
+    def test_stop_signals_only_exact_owned_unit_then_reads_back(self):
+        active=dict(self.native_observation(),execution_finished=False,cgroup_empty=False)
+        with patch.object(self.backend,'observe_owned',side_effect=[active,self.native_observation()]) as observe,patch('native_backend.subprocess.run') as run:
+            self.assertEqual(self.backend.stop_owned(self.plan,self.contract,self.owner,'a'*32),self.native_observation())
+        self.assertEqual(run.call_args.args[0],['/usr/bin/systemctl','kill','--kill-whom=all','--signal=SIGTERM',self.plan['unit']+'.service'])
+        self.assertEqual(observe.call_count,2)
+
+    def test_changed_owner_blocks_signal(self):
+        self.store.remove('active-owner.json');self.store.create('active-owner.json',{})
+        with patch('native_backend.subprocess.run') as run:
+            with self.assertRaises(ValueError):self.backend.stop_owned(self.plan,self.contract,self.owner,'a'*32)
+            run.assert_not_called()
+
     def test_unqualified_submission_creates_no_capture(self):
         with self.assertRaises(ValueError): self.backend.submit(self.plan,self.contract)
         self.assertFalse(list(self.store.root.glob('*.jsonl')))

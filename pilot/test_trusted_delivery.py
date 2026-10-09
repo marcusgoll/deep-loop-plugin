@@ -87,6 +87,24 @@ class DeliveryTests(unittest.TestCase):
         self.store.create(self.key+'.resume-acceptance.json',self.proof)
         self.delivery=TrustedDelivery(self.store,self.journal,self.api,lambda *a:self.data)
 
+    def test_revocation_intent_blocks_all_provider_calls(self):
+        from authority import OutcomeRevoked
+        self.store.create(self.key+'.revocation-intent.json',{})
+        with self.assertRaises(OutcomeRevoked):self.delivery.step()
+        self.assertEqual(self.calls,[])
+
+    def test_revocation_between_provider_reads_blocks_next_call(self):
+        from authority import OutcomeRevoked
+        original=self.api
+        def revoke_after_read(method,route,data):
+            result=original(method,route,data)
+            self.store.create(self.key+'.revocation-intent.json',{})
+            return result
+        self.delivery.api=revoke_after_read
+        with self.assertRaises(OutcomeRevoked):self.delivery.step()
+        self.assertEqual(len(self.calls),1)
+        self.assertFalse(any(method=='POST' for method,route,data in self.calls))
+
     def test_resume_proof_removal_after_blob_blocks_every_provider_operation(self):
         self.configure_resume();self.advance(2)
         self.store.remove(self.key+'.resume-acceptance.json')
