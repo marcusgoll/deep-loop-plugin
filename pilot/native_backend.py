@@ -113,7 +113,8 @@ class NativeBackend:
         errors = self._raw(unit+'.stderr', b'')
         properties = dict(plan['properties'], StandardInput='file:'+prompt,
                           StandardOutput='append:'+capture, StandardError='append:'+errors,
-                          LimitFSIZE=str(MAX_CAPTURE_BYTES), Slice='system.slice')
+                          LimitFSIZE=str(MAX_CAPTURE_BYTES), Slice='system.slice',
+                          Description='Deep Loop plan '+digest(plan))
         args = ['/usr/bin/systemd-run', '--unit='+unit, '--service-type=exec']
         args += ['--property='+key+'='+str(value) for key, value in properties.items()]
         # Invoke the pinned native binary directly, avoiding Node wrapper and
@@ -125,6 +126,36 @@ class NativeBackend:
                                     capture_output=True, text=True, check=True, timeout=5).stdout.strip()
         # Exact native ownership readback is required before returning identity.
         observe_unit(unit, invocation)
+        return invocation
+
+    def recover_invocation(self, plan, contract, owner):
+        """Adopt an existing root-submitted native unit; never dispatch/retry.
+
+        Protected raw files and the manager's exact immutable plan description
+        must both exist. Missing/unloaded units remain blocked, including reboot
+        loss: absence is not evidence that an uncertain submission never ran.
+        """
+        if (digest(contract) != self.contract_digest or
+                self.store.read('active-owner.json') != owner or
+                owner['plan_digest'] != digest(plan) or owner['unit'] != plan['unit']):
+            raise ValueError('Recovery intent drift')
+        for suffix in ('.prompt', '.jsonl', '.stderr'):
+            fd = self.store._open(plan['unit']+suffix, os.O_RDONLY)
+            os.close(fd)
+        result = subprocess.run(['/usr/bin/systemctl', 'show', plan['unit']+'.service',
+                                 '--property=Description', '--property=InvocationID'],
+                                capture_output=True, text=True, check=True, timeout=5)
+        properties = {}
+        for line in result.stdout.splitlines():
+            key, separator, value = line.partition('=')
+            if not separator or key in properties:
+                raise ValueError('Malformed native recovery observation')
+            properties[key] = value
+        if set(properties) != {'Description', 'InvocationID'} or properties['Description'] != 'Deep Loop plan '+digest(plan):
+            raise ValueError('Native unit has no matching immutable plan identity')
+        invocation = properties['InvocationID']
+        # Native observer validates identity, account, policy and cgroup origin.
+        observe_unit(plan['unit'], invocation)
         return invocation
 
     def observe(self, unit, invocation):

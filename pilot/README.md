@@ -46,7 +46,7 @@ Fresh device sign-in for the dedicated account has been verified privately. Thes
 
 `private_controller.py` connects explicit approval enrollment, the append-only journal, durable host-wide ownership, native submission and recovery. `TrustedStore` requires a canonical private directory and trusted nonwritable ancestors, validates file ownership/modes and rejects symlinks/hardlinks. Create `credential-stream.lock` once during explicit trusted setup; recovery never recreates a missing lock. Immutable JSON records are published without replacement and fsynced with their directory. Production retains root ownership; nonroot ownership is only for disposable tests.
 
-The controller reads the exact immutable approved contract, qualifies the backend, charges and independently reads back admission, persists global launch intent, then submits once. A crash or uncertain response blocks later launches across contracts. A missing native invocation receipt requires explicit inspection; it never replays submission. A root-owned session binding is accepted only from the trusted native adapter, never candidate text. Resume requires that binding and the same contract. Reconciliation never submits: it requires the exact invocation plus ended execution and empty cgroup proof, finishes without refund, and releases global ownership only after journal persistence. Reconciliation accepts progress only from an explicitly supplied trusted verifier after native ended-execution and empty-cgroup proof. Without that verifier it credits no progress. Two no-progress outcomes stop further attempts.
+The controller reads the exact immutable approved contract, qualifies the backend, charges and independently reads back admission, persists global launch intent, then submits once. A crash or uncertain response blocks later launches across contracts. A missing invocation receipt can be recovered only from an existing native unit with protected captures, the exact plan description and verified native ownership. Missing or unloaded units remain blocked; recovery never replays submission. A root-owned session binding is accepted only from the trusted native adapter, never candidate text. Resume requires that binding and the same contract. Reconciliation never submits: it requires the exact invocation plus ended execution and empty cgroup proof, finishes without refund, and releases global ownership only after journal persistence. Reconciliation accepts progress only from an explicitly supplied trusted verifier after native ended-execution and empty-cgroup proof. Without that verifier it credits no progress. Two no-progress outcomes stop further attempts.
 
 `systemd_observer.py` collects native properties with bounded `systemctl show` and kernel cgroup-v2 population evidence. Missing units, changed invocation/account/cgroup ownership, unexpected restart policy and unavailable population data block recovery. A released cgroup counts as empty only with the retained exact ended native invocation. Successful units use RemainAfterExit=yes; native active/exited state with MainPID=0 and an empty cgroup proves ended execution without losing invocation identity. Running or populated units cannot reconcile. Keep units retained until reconciliation; do not use `--collect` for live attempts. These observations do not authenticate Codex session events.
 
@@ -58,7 +58,7 @@ These modules provide orchestration and read-only host observation, not an insta
 
 `native_backend.py` implements private native submission behind the controller. It requires root execution, exact protected approval, a canonical root-owned binary whose SHA-256 matches the frozen contract, the dedicated account/candidate, no candidate `.git`/`.codex`/hooks/symlinks/aliased files, no unexpected system configuration and no existing private-account process. A separately produced protected qualification receipt must exactly match the executor, permission profile, candidate and no-model checks. The adapter does not produce its own qualification evidence.
 
-Submission consumes its matching in-memory qualification once, requires the persisted launch intent, creates protected prompt/output files without replacement and invokes the pinned underlying native binary directly through systemd. Prompt text is stdin data, never an argument or shell program. The unit uses the plan's account, timeouts and cgroup policy, bounded file size, fixed system slice and retained invocation. No shared daemon or wrapper/package lookup is used. Uncertain submit blocks recovery; it is never retried. No default CLI dispatch endpoint is provided.
+Submission consumes its matching in-memory qualification once, requires the persisted launch intent, creates protected prompt/output files without replacement and invokes the pinned underlying native binary directly through systemd. Prompt text is stdin data, never an argument or shell program. The unit uses the plan's account, timeouts and cgroup policy, bounded file size, fixed system slice and retained invocation. No shared daemon or wrapper/package lookup is used. Uncertain submit is never retried. Recovery can adopt its existing exact native invocation only through protected captures, plan identity and native ownership proof. No default CLI dispatch endpoint is provided.
 
 `native_session.py` validates bounded native JSONL captures. Only a top-level `thread.started` event with an exact canonical UUID can establish a session; nested tool output and prose are ignored. Conflicting UUIDs, unknown session schema and malformed stopped captures block binding. The backend reads captures only after exact native ended-execution/empty-cgroup proof. These parsing rules do not authenticate arbitrary input: provenance comes from the protected capture of the pinned native unit. Production native-policy and systemd I/O qualification remain pending, as do boot/crash recovery integration, automatic wakeup and trusted delivery.
 
@@ -80,3 +80,19 @@ before journal completion. Repeated identical output counts as no progress;
 a crash after journal completion recovers without repeating verification or
 refunding reservations. This narrowly verifies the disposable artifact, not a
 general repository build, GitHub delivery or unattended end-to-end execution.
+
+
+## Explicit wakeup transition
+
+`private_wakeup.tick` reads one protected enabled-outcome selection and its exact
+immutable approval. No selection means no work. It reuses controller ownership
+and the append-only journal rather than creating another task tracker. A wakeup
+with an owner reconciles only; a later wakeup may resume the protected previous
+session with fixed 600 model seconds and 1200 active seconds charged in advance.
+Two consecutive no-progress outcomes or three attempts stop dispatch. Exact
+artifact acceptance stops at the trusted-delivery boundary. Missing owner or
+session provenance blocks; it never silently starts a replacement task.
+
+This transition is not an installed timer. Service deadlines, host promotion,
+boot recovery and the trusted delivery adapter still require integration and
+proof. An absent or unloaded native unit cannot establish ended execution.

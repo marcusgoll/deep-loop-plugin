@@ -60,6 +60,20 @@ class NativeBackendTests(unittest.TestCase):
             observed,session=self.backend.observe(self.plan['unit'],'a'*32)
         self.assertEqual(session,SESSION)
         self.assertTrue(observed['cgroup_empty'])
+    def test_recovery_adopts_only_matching_existing_native_unit(self):
+        for suffix in ('.prompt', '.jsonl', '.stderr'):
+            self.backend._raw(self.plan['unit']+suffix,b'')
+        output = 'Description=Deep Loop plan '+digest(self.plan)+'\nInvocationID='+'a'*32+'\n'
+        with patch('native_backend.subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=output)) as run, patch('native_backend.observe_unit',return_value=self.native_observation()):
+            self.assertEqual(self.backend.recover_invocation(self.plan,self.contract,self.owner),'a'*32)
+            self.assertEqual(run.call_args.args[0][0],'/usr/bin/systemctl')
+        with patch('native_backend.subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=output.replace(digest(self.plan),'b'*64))):
+            with self.assertRaises(ValueError): self.backend.recover_invocation(self.plan,self.contract,self.owner)
+    def test_missing_capture_blocks_recovery_without_submission(self):
+        with patch('native_backend.subprocess.run') as run:
+            with self.assertRaises(FileNotFoundError): self.backend.recover_invocation(self.plan,self.contract,self.owner)
+            run.assert_not_called()
+
     def test_active_capture_is_not_finalized(self):
         observation=dict(self.native_observation(),active_state='active',cgroup_empty=False,execution_finished=False)
         with patch('native_backend.observe_unit',return_value=observation):

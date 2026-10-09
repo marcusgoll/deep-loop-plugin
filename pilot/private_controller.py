@@ -198,7 +198,18 @@ class PrivateController:
                 raise ValueError('Persisted launch plan changed')
             if last['status'] == 'reserved' and revision != owner['reservation_revision']:
                 raise ValueError('Reserved journal revision changed')
-            receipt = self.store.read(owner['unit'] + '.invocation.json')
+            try:
+                receipt = self.store.read(owner['unit'] + '.invocation.json')
+            except FileNotFoundError:
+                # Only the trusted adapter can adopt an exact existing native
+                # unit. No unit or insufficient provenance blocks; never retry.
+                recover = getattr(self.backend, 'recover_invocation', None)
+                if recover is None:
+                    raise
+                invocation = recover(plan, contract, owner)
+                self._invocation(invocation)
+                receipt = {'invocation_id': invocation, 'owner': owner}
+                self.store.create(owner['unit'] + '.invocation.json', receipt)
             if receipt['owner'] != owner:
                 raise ValueError('Changed invocation ownership')
             invocation = receipt['invocation_id']
@@ -233,6 +244,13 @@ class PrivateController:
                     previous = self.store.read(session_id + '.session.json')
                     if (previous.get('contract_digest'), previous.get('session_id')) != (self.contract_digest, session_id):
                         raise ValueError('Conflicting session binding')
+            session_receipt = {'contract_digest': self.contract_digest, 'unit': owner['unit'],
+                               'invocation_id': invocation, 'session_id': session_id}
+            try:
+                self.store.create(owner['unit'] + '.session.json', session_receipt)
+            except FileExistsError:
+                if self.store.read(owner['unit'] + '.session.json') != session_receipt:
+                    raise ValueError('Changed native attempt session observation')
             if last['status'] == 'reserved':
                 # A trusted verifier reads the stopped candidate independently.
                 # Semantic receipts omit invocation IDs/time so identical output

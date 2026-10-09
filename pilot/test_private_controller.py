@@ -221,6 +221,15 @@ class PrivateControllerTests(unittest.TestCase):
         with self.assertRaises(FileNotFoundError): self.controller.reconcile()
         self.assertEqual(self.store.read('active-owner.json')['run_id'], 1)
 
+    def test_uncertain_native_submit_is_adopted_without_replay(self):
+        self.backend.failure = True
+        with self.assertRaises(OSError): self.start()
+        self.backend.recover_invocation = lambda plan, contract, owner: self.backend.invocation
+        self.stop()
+        self.assertEqual(self.controller.reconcile(), 'finished_without_verified_progress')
+        self.assertEqual(len(self.backend.submissions), 1)
+        self.assertEqual(self.journal.state['attempts'][0]['model_seconds'], 600)
+
     def test_missing_lock_never_recreates_ownership(self):
         self.store.remove('credential-stream.lock')
         with self.assertRaises(FileNotFoundError): self.start()
