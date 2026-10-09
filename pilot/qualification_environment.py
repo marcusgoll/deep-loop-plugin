@@ -28,7 +28,34 @@ def require_absent(paths):
             raise ValueError('Unexpected policy configuration: '+str(path))
 
 
-def inspect_candidate(candidate,owner_uid,limit=4096):
+# The pinned native sandbox creates these empty root guard directories while
+# preparing its filesystem boundary. They never authorize config or contents.
+RUNTIME_GUARD_DIRS = frozenset({'.codex', '.git', '.agents', '.aws'})
+
+
+def empty_runtime_guard(fd, name, owner_uid):
+    if name not in RUNTIME_GUARD_DIRS:
+        return False
+    before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode) or before.st_uid != owner_uid:
+        raise ValueError('Unsafe native runtime guard')
+    child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+    try:
+        opened = os.fstat(child)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise ValueError('Native runtime guard changed during inspection')
+        with os.scandir(child) as entries:
+            if next(entries, None) is not None:
+                raise ValueError('Native runtime guard contains unexpected objects')
+        after = os.fstat(child)
+        if (opened.st_mtime_ns, opened.st_ctime_ns) != (after.st_mtime_ns, after.st_ctime_ns):
+            raise ValueError('Native runtime guard changed during inspection')
+    finally:
+        os.close(child)
+    return True
+
+
+def inspect_candidate(candidate,owner_uid,limit=4096,*,allow_runtime_guards=False):
     count=0
     def walk(fd,depth):
         nonlocal count
@@ -37,6 +64,8 @@ def inspect_candidate(candidate,owner_uid,limit=4096):
             for entry in iterator:
                 count+=1
                 if count>limit:raise ValueError('Candidate exceeds qualification bound')
+                if allow_runtime_guards and depth == 0 and empty_runtime_guard(fd,entry.name,owner_uid):
+                    continue
                 info=os.stat(entry.name,dir_fd=fd,follow_symlinks=False)
                 if (entry.name in {'.codex','.git','hooks.json'} or stat.S_ISLNK(info.st_mode) or
                         info.st_uid!=owner_uid or

@@ -12,6 +12,8 @@ class TransportTests(unittest.TestCase):
         with patch('github_transport.subprocess.run',return_value=response) as run:
             self.assertEqual(GitHubAPI()('GET','user'),{'login':'marcusgoll'})
         args=run.call_args.args[0]
+        self.assertEqual(args[:5],['/usr/sbin/runuser','-u','orchestrator','--','/usr/bin/env'])
+        self.assertFalse(any(value.startswith('HOME=') for value in args))
         self.assertIn('orchestrator',args);self.assertIn('github.com',args);self.assertIn('GH_CONFIG_DIR',args)
         self.assertEqual(run.call_args.kwargs['timeout'],3)
     def test_unapproved_endpoint_and_wrong_owner_never_invoke_publisher(self):

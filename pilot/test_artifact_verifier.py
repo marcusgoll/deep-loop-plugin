@@ -55,4 +55,33 @@ class ArtifactVerifierTests(unittest.TestCase):
         self.owner['contract_digest'] = digest(self.contract)
         self.assertIsNone(self.verifier(self.contract, self.owner))
 
+    def test_opted_in_native_guards_are_empty_owned_directories_only(self):
+        from qualification_environment import RUNTIME_GUARD_DIRS, inspect_candidate
+        for name in RUNTIME_GUARD_DIRS:
+            (self.root/name).mkdir()
+        verifier=ArtifactVerifier(self.root,os.getuid(),allow_runtime_guards=True)
+        self.assertIsNotNone(verifier(self.contract,self.owner))
+        inspect_candidate(self.root,os.getuid(),allow_runtime_guards=True)
+        with self.assertRaises(ValueError):self.verifier(self.contract,self.owner)
+        with self.assertRaises(ValueError):inspect_candidate(self.root,os.getuid())
+        for name in RUNTIME_GUARD_DIRS:
+            with self.subTest(name=name):
+                config=self.root/name/'unexpected'
+                config.write_bytes(b'config')
+                with self.assertRaises(ValueError):verifier(self.contract,self.owner)
+                with self.assertRaises(ValueError):inspect_candidate(self.root,os.getuid(),allow_runtime_guards=True)
+                config.unlink()
+                (self.root/name).rmdir()
+                (self.root/name).symlink_to(self.root/'source.txt')
+                with self.assertRaises(ValueError):verifier(self.contract,self.owner)
+                with self.assertRaises(ValueError):inspect_candidate(self.root,os.getuid(),allow_runtime_guards=True)
+                (self.root/name).unlink()
+                (self.root/name).mkdir()
+
+    def test_runtime_guards_remain_forbidden_in_nested_candidate_paths(self):
+        (self.root/'nested').mkdir()
+        (self.root/'nested'/'.codex').mkdir()
+        verifier=ArtifactVerifier(self.root,os.getuid(),allow_runtime_guards=True)
+        with self.assertRaises(ValueError):verifier(self.contract,self.owner)
+
 if __name__ == '__main__': unittest.main()

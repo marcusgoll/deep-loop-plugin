@@ -11,8 +11,8 @@ from artifact_verifier import ArtifactVerifier, _path
 
 
 class ResumeVerifier:
-    def __init__(self, candidate, owner_uid, store):
-        self.artifact = ArtifactVerifier(candidate, owner_uid)
+    def __init__(self, candidate, owner_uid, store, *, allow_runtime_guards=False):
+        self.artifact = ArtifactVerifier(candidate, owner_uid, allow_runtime_guards=allow_runtime_guards)
         self.store = store
 
     def _session(self, key, owner):

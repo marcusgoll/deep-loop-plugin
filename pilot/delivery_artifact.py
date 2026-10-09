@@ -10,11 +10,12 @@ from resume_verifier import validate_resume_acceptance
 
 
 class DeliveryArtifact:
-    def __init__(self,candidate,owner_uid,store=None):
+    def __init__(self,candidate,owner_uid,store=None,*,allow_runtime_guards=False):
         self.candidate,self.owner_uid=Path(candidate),owner_uid
         self.store=store
+        self.allow_runtime_guards=allow_runtime_guards
     def __call__(self,contract,evidence):
-        fresh=ArtifactVerifier(self.candidate,self.owner_uid)(contract,{'contract_digest':digest(contract)})
+        fresh=ArtifactVerifier(self.candidate,self.owner_uid,allow_runtime_guards=self.allow_runtime_guards)(contract,{'contract_digest':digest(contract)})
         if fresh!=evidence:raise ValueError('Stopped candidate acceptance changed before export')
         if 'resume_verification' in contract:
             if self.store is None:raise ValueError('Protected resume acceptance unavailable')
