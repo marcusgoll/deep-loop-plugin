@@ -139,6 +139,31 @@ class PrivateControllerTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             self.controller.enroll(self.contract, 'replacement')
         self.assertEqual(self.journal.state['attempts'], [])
+    def test_changed_persisted_plan_blocks_reconciliation(self):
+        self.start()
+        self.stop()
+        owner = self.store.read('active-owner.json')
+        self.store.remove('active-owner.json')
+        owner['plan_digest'] = 'f'*64
+        self.store.create('active-owner.json', owner)
+        with self.assertRaises(ValueError): self.controller.reconcile()
+        self.assertEqual(self.journal.state['attempts'][0]['status'], 'reserved')
+    def test_finish_before_owner_release_is_recoverable(self):
+        self.backend.session_id = None
+        self.start()
+        self.stop()
+        remove = self.store.remove
+        def interrupted(name):
+            if name == 'active-owner.json': raise OSError('Crash before release')
+            return remove(name)
+        self.store.remove = interrupted
+        with self.assertRaises(OSError): self.controller.reconcile()
+        revision = self.journal.revision
+        self.store.remove = remove
+        restarted = PrivateController(self.store, self.journal, self.backend)
+        self.assertEqual(restarted.reconcile(), 'finished_without_verified_progress')
+        self.assertEqual(self.journal.revision, revision)
+        with self.assertRaises(FileNotFoundError): self.store.read('active-owner.json')
     def test_missing_lock_never_recreates_ownership(self):
         self.store.remove('credential-stream.lock')
         with self.assertRaises(FileNotFoundError): self.start()

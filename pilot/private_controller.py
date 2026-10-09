@@ -158,7 +158,7 @@ class PrivateController:
                 raise ValueError('Uncertain durable admission readback')
             owner = {'contract_digest': self.contract_digest, 'unit': plan['unit'],
                      'plan_digest': digest(plan), 'reservation_revision': persisted,
-                     'run_id': run_id, 'run_attempt': run_attempt}
+                     'run_id': run_id, 'run_attempt': run_attempt, 'session_id': session_id}
             self.store.create('active-owner.json', owner)
             # The immutable intent precedes submission. Any crash or uncertainty
             # after this point blocks a second launch, including another contract.
@@ -180,6 +180,24 @@ class PrivateController:
             owner = self.store.read('active-owner.json')
             if owner['contract_digest'] != self.contract_digest:
                 raise ValueError('Credential stream owned by another contract')
+            revision, journal = self.journal.read()
+            if not journal['attempts']:
+                raise ValueError('Missing reserved ownership history')
+            last = journal['attempts'][-1]
+            if set(owner) != {'contract_digest', 'unit', 'plan_digest', 'reservation_revision', 'run_id', 'run_attempt', 'session_id'}:
+                raise ValueError('Malformed launch ownership')
+            if (last['run_id'], last['run_attempt']) != (owner['run_id'], owner['run_attempt']):
+                raise ValueError('Reservation ownership drift')
+            # Reconstruct the original reservation even after a finish-before-
+            # owner-release crash; neither command nor identity may drift.
+            original = {**journal, 'attempts': journal['attempts'][:-1] +
+                        [{**last, 'status': 'reserved', 'progress_receipt': None}]}
+            plan = launch_plan(original, self.contract_digest, run_id=owner['run_id'],
+                               run_attempt=owner['run_attempt'], session_id=owner['session_id'])
+            if plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest']:
+                raise ValueError('Persisted launch plan changed')
+            if last['status'] == 'reserved' and revision != owner['reservation_revision']:
+                raise ValueError('Reserved journal revision changed')
             receipt = self.store.read(owner['unit'] + '.invocation.json')
             if receipt['owner'] != owner:
                 raise ValueError('Changed invocation ownership')
@@ -188,10 +206,6 @@ class PrivateController:
             observation, session_id = self.backend.observe(owner['unit'], invocation)
             if observation.get('invocation_id') != invocation:
                 raise ValueError('Native invocation changed or unavailable')
-            revision, journal = self.journal.read()
-            last = journal['attempts'][-1]
-            if (last['run_id'], last['run_attempt']) != (owner['run_id'], owner['run_attempt']):
-                raise ValueError('Reservation ownership drift')
             proof = {k: observation.get(k) for k in ('unit', 'active_state', 'cgroup_empty', 'ownership_verified')}
             if last['status'] == 'reserved':
                 action = recovery_action(journal, self.contract_digest, proof)
