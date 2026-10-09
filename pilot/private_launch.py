@@ -6,7 +6,7 @@ and ownership checks. Model event streams are observations, never approval.
 import json
 import uuid
 
-from admission import _validate, initialize
+from admission import _validate
 
 ROOT = '/var/lib/deep-loop-private-pilot'
 ACCOUNT = 'deep-loop-pilot'
@@ -33,7 +33,6 @@ def launch_plan(journal, contract_digest, *, run_id, run_attempt, session_id=Non
             raise ValueError('Explicit session UUID required') from exc
         if str(parsed) != session_id or parsed.int == 0:
             raise ValueError('Canonical nonzero session UUID required')
-    initialize(contract_digest)
     # Reserve process shutdown and controller overhead, rather than treating
     # RuntimeMaxSec alone as the whole charged execution window.
     runtime = min(item['model_seconds'], item['active_seconds']) - STOP_SECONDS - OVERHEAD_SECONDS
@@ -53,6 +52,8 @@ def launch_plan(journal, contract_digest, *, run_id, run_attempt, session_id=Non
     else:
         command += ['resume', session_id, '-']
     unit = f'deep-loop-pilot-{contract_digest}-{run_id}-{run_attempt}'
+    if len(unit + '.service') > 255:
+        raise ValueError('Launch identity exceeds systemd unit length')
     return {'schema': 1, 'contract_digest': contract_digest, 'unit': unit,
             'candidate': candidate, 'command': command,
             'properties': {'User': ACCOUNT, 'Group': ACCOUNT,

@@ -31,6 +31,10 @@ class PrivateLaunchTests(unittest.TestCase):
             launch_plan(self.journal, D, run_id=True, run_attempt=1)
         with self.assertRaises(ValueError):
             launch_plan(self.journal, 'b'*64, run_id=1, run_attempt=1)
+    def test_oversized_identity_rejected(self):
+        journal = reserve(initialize(D), D, run_id=10**200, run_attempt=1, model_seconds=600, active_seconds=1200)
+        with self.assertRaises(ValueError):
+            launch_plan(journal, D, run_id=10**200, run_attempt=1)
     def test_no_launch_when_shutdown_cannot_fit(self):
         journal = reserve(initialize(D), D, run_id=1, run_attempt=1, model_seconds=15, active_seconds=15)
         with self.assertRaises(ValueError):
