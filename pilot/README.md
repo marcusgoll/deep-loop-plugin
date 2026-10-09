@@ -23,3 +23,11 @@ Public Actions jobs must not acquire the Pro credential or become a command gate
 References: [Codex authentication](https://learn.chatgpt.com/docs/auth), [private account-auth CI](https://learn.chatgpt.com/docs/auth/ci-cd-auth), [Git references](https://docs.github.com/en/rest/git/refs).
 
 Run from the repository root: `python3 -B -m unittest discover -s pilot -p 'test_*.py' -v`.
+
+## Private account qualification
+
+`bootstrap_private_account.py` prints its plan by default. Explicit root `--apply` on Linux creates only the fixed locked `deep-loop-pilot` system account and private home/candidate directories. Existing account/group/state, symlinks, writable parents or POSIX ACLs block application. Partial failures preserve state for inspection; never blindly rerun or delete it. No credential, model invocation or recurring scheduler is created by bootstrap.
+
+A separately authorized qualification applied this reviewed bootstrap on the private host. Independent readback verified locked password, no supplementary groups and private 0700 directories. Disposable native Codex sandbox tests under that account passed candidate writes, private direct/symlink deny-read and disabled-network controls. A transient systemd cgroup stopped a SIGTERM-resistant child. Reapplication was rejected. Raw receipts stay in the private audit packet.
+
+These controls are qualification primitives, not an installed workflow or managed execution policy. Fresh ChatGPT device sign-in requires the account owner's consent; the shared Codex session is not copied or modified. After authentication, a reviewed immutable launch configuration must enforce these controls on every invocation. Durable ownership, cumulative runtime accounting, automatic wakeup, source/session recovery and trusted delivery still need implementation and end-to-end proof. No A01–A11 gate is complete.
