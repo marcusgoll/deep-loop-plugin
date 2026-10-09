@@ -1,0 +1,515 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deep Loop coordinated-delivery verifier result",
+  "description": "Structure only. Does not authenticate approvals, verify artifact contents, evaluate numeric comparisons, or establish runtime freshness. Fixture-origin records are never goal evidence.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_origin",
+    "run_id",
+    "goal_id",
+    "criterion_id",
+    "kind",
+    "status",
+    "subject",
+    "execution",
+    "metrics",
+    "artifacts",
+    "diagnostic"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "evidence_origin": {
+      "enum": [
+        "actual_run",
+        "fixture"
+      ]
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "goal_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "criterion_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind": {
+      "enum": [
+        "visual",
+        "interaction",
+        "accessibility",
+        "contract",
+        "invariant",
+        "performance",
+        "security",
+        "build",
+        "release"
+      ]
+    },
+    "status": {
+      "enum": [
+        "PASS",
+        "FAIL",
+        "BLOCKED"
+      ]
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_fingerprint",
+        "build_fingerprint",
+        "contract_fingerprint",
+        "reference_fingerprint",
+        "environment_fingerprint"
+      ],
+      "properties": {
+        "source_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "build_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "contract_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reference_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "environment_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "verifier_id",
+        "verifier_version",
+        "verifier_fingerprint",
+        "argv",
+        "working_directory",
+        "started_at",
+        "finished_at",
+        "native_exit_code"
+      ],
+      "properties": {
+        "verifier_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "verifier_version": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "verifier_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "argv": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "working_directory": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        },
+        "started_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "finished_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "native_exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      }
+    },
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "unit",
+          "baseline",
+          "previous",
+          "current",
+          "operator",
+          "target",
+          "samples",
+          "sampling"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "unit": {
+            "type": "string",
+            "minLength": 1
+          },
+          "baseline": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "previous": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "current": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "operator": {
+            "enum": [
+              "<=",
+              ">=",
+              "==",
+              "<",
+              ">"
+            ]
+          },
+          "target": {
+            "type": "number"
+          },
+          "samples": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            }
+          },
+          "sampling": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "role",
+          "path",
+          "sha256"
+        ],
+        "properties": {
+          "role": {
+            "enum": [
+              "log",
+              "expected",
+              "actual",
+              "diff",
+              "trace",
+              "report",
+              "other"
+            ]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          }
+        }
+      }
+    },
+    "diagnostic": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "PASS",
+              "FAIL"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "source_fingerprint": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "contract_fingerprint": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "environment_fingerprint": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          "execution": {
+            "properties": {
+              "verifier_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "verifier_fingerprint": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "argv": {
+                "minItems": 1
+              },
+              "working_directory": {
+                "type": "string",
+                "minLength": 1
+              },
+              "started_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "finished_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "native_exit_code": {
+                "type": "integer"
+              }
+            }
+          },
+          "metrics": {
+            "minItems": 1,
+            "items": {
+              "properties": {
+                "current": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "artifacts": {
+            "minItems": 1,
+            "contains": {
+              "properties": {
+                "role": {
+                  "const": "log"
+                }
+              },
+              "required": [
+                "role"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "PASS",
+              "FAIL"
+            ]
+          },
+          "kind": {
+            "const": "visual"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "reference_fingerprint": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          },
+          "artifacts": {
+            "allOf": [
+              {
+                "contains": {
+                  "properties": {
+                    "role": {
+                      "const": "expected"
+                    }
+                  },
+                  "required": [
+                    "role"
+                  ]
+                }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "role": {
+                      "const": "actual"
+                    }
+                  },
+                  "required": [
+                    "role"
+                  ]
+                }
+              },
+              {
+                "contains": {
+                  "properties": {
+                    "role": {
+                      "const": "diff"
+                    }
+                  },
+                  "required": [
+                    "role"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "PASS"
+          },
+          "kind": {
+            "const": "release"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "subject": {
+            "properties": {
+              "build_fingerprint": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "PASS",
+              "FAIL"
+            ]
+          },
+          "kind": {
+            "const": "performance"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "metrics": {
+            "items": {
+              "properties": {
+                "samples": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

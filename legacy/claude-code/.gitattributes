@@ -1,0 +1,4 @@
+# Normalize all text to LF in the repo and in the working tree.
+# Without this, core.autocrlf=true makes every file show as modified on
+# Windows, which blocks auto-update.js's `git pull --ff-only`.
+* text=auto eol=lf

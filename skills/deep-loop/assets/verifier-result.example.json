@@ -1,0 +1,67 @@
+{
+  "schema_version": "1.0",
+  "evidence_origin": "fixture",
+  "run_id": "SYNTHETIC-EXAMPLE-ONLY",
+  "goal_id": "EXAMPLE-NOT-A-LIVE-GOAL",
+  "criterion_id": "EXAMPLE-VISUAL-01",
+  "kind": "visual",
+  "status": "PASS",
+  "subject": {
+    "source_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "build_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "contract_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "reference_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "environment_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "execution": {
+    "verifier_id": "example-comparator-not-bundled",
+    "verifier_version": "EXAMPLE",
+    "verifier_fingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+    "argv": [
+      "EXAMPLE-NOT-AN-EXECUTABLE",
+      "compare"
+    ],
+    "working_directory": "EXAMPLE-NOT-A-REAL-PATH",
+    "started_at": "2000-01-01T00:00:00Z",
+    "finished_at": "2000-01-01T00:00:01Z",
+    "native_exit_code": 0
+  },
+  "metrics": [
+    {
+      "name": "changed_pixel_ratio",
+      "unit": "ratio",
+      "baseline": 0.04,
+      "previous": 0.02,
+      "current": 0.004,
+      "operator": "<=",
+      "target": 0.005,
+      "samples": [
+        0.004
+      ],
+      "sampling": "Synthetic illustration only; these numbers are not recommended tolerances."
+    }
+  ],
+  "artifacts": [
+    {
+      "role": "log",
+      "path": "EXAMPLE-NOT-A-REAL-PATH/run.log",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "role": "expected",
+      "path": "EXAMPLE-NOT-A-REAL-PATH/expected.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "role": "actual",
+      "path": "EXAMPLE-NOT-A-REAL-PATH/actual.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "role": "diff",
+      "path": "EXAMPLE-NOT-A-REAL-PATH/diff.png",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ],
+  "diagnostic": "SYNTHETIC SCHEMA FIXTURE. No command ran. No artifact exists. Never use this record as acceptance or release evidence."
+}

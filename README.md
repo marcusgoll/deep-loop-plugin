@@ -1,102 +1,31 @@
 # Deep Loop
 
-**v9.0.0** | Autonomous development loop for Claude Code
+Deep Loop carries authorized work through Understand → Contract → Execute → Prove → Deliver, with observable acceptance and resumable checkpoints.
 
-A deterministic, self-correcting development protocol with multi-agent BUILD phase, TDD enforcement, and senior dev mode.
+This repository is being prepared as the public home of the new Codex skill. The old Claude Code plugin is preserved under [legacy/claude-code](legacy/claude-code/README.md); its original Git history is retained. Its version numbers and runtime hooks belong to that earlier implementation.
 
-## Features
+## Migration preview
 
-- **Multi-Agent BUILD**: Fresh context per atomic task, parallel execution (up to 3)
-- **TDD Enforcement**: RED → GREEN → REFACTOR for every task
-- **Senior Dev Mode**: Challenge assumptions, adversarial self-review
-- **External Loop**: Overnight/autonomous execution support
-- **Task Sync**: Crash recovery via Claude Code task management
-- **Atlas MCP Integration**: Optional context gathering
+This branch is a local preparation preview. The exact independently reviewed v0.5.6 skill bundle has been inserted. All 15 local package gates pass. The source snapshot has a passing independent review; the broader optimization task was interrupted without a final completion result. This is a verified migration candidate, not a released or installed skill. Publication and release approval remain pending.
 
-## Installation
+The current-skill location is [`skills/deep-loop/`](skills/deep-loop/SKILL.md), containing `SKILL.md`, references, schemas, helper scripts and behavioral tests. The package version and SHA-256 file manifest are recorded in [`release-manifest.json`](release-manifest.json). This manifest identifies bytes; it does not establish unattended runtime acceptance.
 
-```bash
-# Install from GitHub
-claude plugins install marcusgoll/deep-loop-plugin
+## Package verification
 
-# Or add to your Claude Code settings manually
-```
+Local verification passed 15 gates with 179 executed tests, 4 explicit skips, 14 pixel comparisons and 24 fixture preflights. See [verification details](docs/VERIFICATION.md), including dependencies and untested boundaries.
 
-### Manual Installation
+The helper suite uses Python. Pixel verification needs Pillow. The complete package check also resolves the installed skill-creator validator and verification-contract validator; a selected specialist fixture requires to-spec. These supporting skills are not bundled here. Optional specialists are not unconditional execution dependencies.
 
-1. Clone to your plugins directory:
-```bash
-cd ~/.claude/plugins/marketplaces/local/plugins/
-git clone https://github.com/marcusgoll/deep-loop-plugin.git deep-loop
-```
+## Automation boundary
 
-2. Restart Claude Code or run `/plugins refresh`
+Deep Loop defines the execution and acceptance workflow. Scheduling, exclusive ownership, durable recovery and cumulative limits must be established by the execution host. A checkpoint validator or successful model response alone does not prove completed delivery.
 
-## Usage
+The proposed unattended pilot uses GitHub Actions for execution ownership, native Codex for implementation, and Deep Loop for acceptance. This migration does not install or enroll that pilot, prove crash recovery, or authorize merge/deployment.
 
-```bash
-# Start a deep loop session
-/deep implement user authentication
+## Legacy compatibility
 
-# Quick mode for small fixes
-/deep quick fix typo in README
+The legacy plugin files are preserved for inspection and a separately selected legacy release. Its SessionStart and Stop hooks are not activated by this new repository layout. Existing Claude installations should remain pinned to their known legacy revision until a separately verified compatibility path is provided.
 
-# Check status
-/deep-status
+## Licensing
 
-# Cancel active session
-/cancel-deep
-```
-
-## Loop Phases
-
-```
-PLAN → BUILD → REVIEW → FIX → SHIP
-```
-
-1. **PLAN**: Assumptions preview, detailed plan with acceptance criteria
-2. **BUILD**: Multi-agent TDD execution, atomic commits
-3. **REVIEW**: Automated validation (test, lint, types, build)
-4. **FIX**: Address issues found in review
-5. **SHIP**: E2E verification, PR creation, merge
-
-## Configuration
-
-### Environment Variables
-
-```bash
-# Enable Task Sync for crash recovery
-export DEEP_LOOP_TASKS_ENABLED=true
-```
-
-### state.json Options
-
-```json
-{
-  "mode": "internal",      // "internal" (default) or "external"
-  "buildMode": "multi-agent", // "multi-agent" (default) or "single"
-  "maxParallel": 3,        // Max concurrent task agents
-  "maxIterations": 10      // Safety limit
-}
-```
-
-## Philosophy
-
-> **This codebase will outlive you.**
-
-Every shortcut becomes someone else's burden. Every hack compounds into technical debt. Fight entropy. Leave the codebase better than you found it.
-
-## Skills Included
-
-| Skill | Description |
-|-------|-------------|
-| `/deep` | Full deep loop with planning |
-| `/deep-quick` | Quick mode (3 iterations, no planning) |
-| `/deep-status` | Rich status display |
-| `/cancel-deep` | Cancel active session |
-| `/start-ralph` | PRD-driven autonomous mode |
-| `/cancel-ralph` | Cancel ralph mode |
-
-## License
-
-MIT
+The original repository [license](LICENSE) is retained. The current skill's bundled attribution/license files must be preserved when its reviewed package is inserted.
