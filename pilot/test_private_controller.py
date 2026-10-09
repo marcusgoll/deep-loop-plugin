@@ -2,10 +2,12 @@ import copy
 import os
 from pathlib import Path
 import tempfile
+import subprocess
 import unittest
 
 from admission import digest, initialize
 from private_controller import PrivateController, TrustedStore
+from git_journal import GitJournal
 
 SESSION = '12345678-1234-4234-8234-123456789012'
 
@@ -164,6 +166,24 @@ class PrivateControllerTests(unittest.TestCase):
         self.assertEqual(restarted.reconcile(), 'finished_without_verified_progress')
         self.assertEqual(self.journal.revision, revision)
         with self.assertRaises(FileNotFoundError): self.store.read('active-owner.json')
+    def test_real_git_journal_reconciles_from_new_controller_workspace(self):
+        remote = self.store.root/'journal.git'
+        first = self.store.root/'first'
+        restarted = self.store.root/'restarted'
+        for args in (['git', 'init', '--bare', str(remote)], ['git', 'init', str(first)],
+                     ['git', 'init', str(restarted)]):
+            subprocess.run(args, check=True, capture_output=True)
+        journal = GitJournal(first, str(remote), self.journal.contract_digest)
+        journal.publish(None, initialize(journal.contract_digest))
+        controller = PrivateController(self.store, journal, self.backend)
+        controller.start(run_id=1, run_attempt=1, model_seconds=600, active_seconds=1200)
+        self.stop()
+        recovered = GitJournal(restarted, str(remote), journal.contract_digest)
+        controller = PrivateController(self.store, recovered, self.backend)
+        self.assertEqual(controller.reconcile(), 'finished_without_verified_progress')
+        _, state = recovered.read()
+        self.assertEqual(state['attempts'][0]['model_seconds'], 600)
+        self.assertEqual(state['attempts'][0]['status'], 'finished')
     def test_missing_lock_never_recreates_ownership(self):
         self.store.remove('credential-stream.lock')
         with self.assertRaises(FileNotFoundError): self.start()
