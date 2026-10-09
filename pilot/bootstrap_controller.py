@@ -62,6 +62,17 @@ def apply(expected):
     for name, expected_hash in expected['modules'].items():
         if hashlib.sha256((modules/name).read_bytes()).hexdigest() != expected_hash:
             raise ValueError('Installed module readback mismatch')
+    # Flush installed files and directory entries before the receipt can claim
+    # durable installation. Do not follow any unexpected generated symlink.
+    for directory, subdirs, files in os.walk(CONTROL, topdown=False):
+        for name in files:
+            path = Path(directory)/name
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            try: os.fsync(fd)
+            finally: os.close(fd)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try: os.fsync(fd)
+        finally: os.close(fd)
     # Persist the immutable installation receipt after independent hash readback.
     store.create('installation.json', expected)
     return store.read('installation.json')
