@@ -6,7 +6,7 @@ This repository is being prepared as the public home of the new Codex skill. The
 
 ## Current package
 
-This repository contains the independently reviewed v0.5.9 source snapshot, copied without packaging changes. All 16 local package gates pass against the reviewed source. The legacy migration was merged in PR #2; this version update is proposed for review. Package checks do not establish completion of the broader optimization or unattended-workflow acceptance.
+This repository contains the independently reviewed v0.5.9 source snapshot, copied without packaging changes. All 16 local package gates pass against the reviewed source. The legacy migration was merged in PR #2; the v0.5.9 update was merged in PR #3. Package checks do not establish completion of the broader optimization or unattended-workflow acceptance.
 
 The current-skill location is [`skills/deep-loop/`](skills/deep-loop/SKILL.md), containing `SKILL.md`, references, schemas, helper scripts and behavioral tests. The package version and SHA-256 file manifest are recorded in [`release-manifest.json`](release-manifest.json). This manifest identifies bytes; it does not establish unattended runtime acceptance.
 
@@ -30,7 +30,7 @@ On Windows, use `py -3` in place of `python3`. Replace personal installed-path e
 
 Deep Loop defines the execution and acceptance workflow. Scheduling, exclusive ownership, durable recovery and cumulative limits must be established by the execution host. A checkpoint validator or successful model response alone does not prove completed delivery.
 
-The proposed unattended pilot uses GitHub Actions for execution ownership, native Codex for implementation, and Deep Loop for acceptance. This migration does not install or enroll that pilot, prove crash recovery, or authorize merge/deployment.
+The draft pilot uses a dedicated private host for ownership and native Codex execution with private ChatGPT authentication. GitHub-hosted Actions runs deterministic verification. A trusted private publisher adapter prepares an exact draft PR and reads back its checks; that publication method must be included in the frozen run approval. Disabled worker units are installed privately, but no outcome is enrolled. Crash recovery and live delivery still require end-to-end proof. See [pilot status](pilot/README.md).
 
 ## Legacy compatibility
 
