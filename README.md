@@ -6,7 +6,7 @@ This repository is being prepared as the public home of the new Codex skill. The
 
 ## Migration preview
 
-This branch is a local preparation preview. The exact independently reviewed v0.5.6 skill bundle has been inserted. All 15 local package gates pass. The source snapshot has a passing independent review; the broader optimization task was interrupted without a final completion result. This is a verified migration candidate, not a released or installed skill. Publication and release approval remain pending.
+This draft migration publishes the independently reviewed v0.5.6 source snapshot with four recorded end-of-file formatting adjustments. All 15 local package gates pass against that packaged copy. Final migration review, merge and release approval remain pending. The scoped source review does not establish completion of the broader optimization or unattended-workflow acceptance.
 
 The current-skill location is [`skills/deep-loop/`](skills/deep-loop/SKILL.md), containing `SKILL.md`, references, schemas, helper scripts and behavioral tests. The package version and SHA-256 file manifest are recorded in [`release-manifest.json`](release-manifest.json). This manifest identifies bytes; it does not establish unattended runtime acceptance.
 
@@ -14,7 +14,17 @@ The current-skill location is [`skills/deep-loop/`](skills/deep-loop/SKILL.md), 
 
 Local verification passed 15 gates with 179 executed tests, 4 explicit skips, 14 pixel comparisons and 24 fixture preflights. See [verification details](docs/VERIFICATION.md), including dependencies and untested boundaries.
 
-The helper suite uses Python. Pixel verification needs Pillow. The complete package check also resolves the installed skill-creator validator and verification-contract validator; a selected specialist fixture requires to-spec. These supporting skills are not bundled here. Optional specialists are not unconditional execution dependencies.
+The helper suite uses Python. Pixel verification needs Pillow. Required source reading uses the separate skill-optimization reader. Full package checks also need the skill-creator validator, verification-contract validator and selected to-spec fixture. These supporting skills are not bundled or publicly distributed by this migration. See [portable usage and provisioning](docs/USAGE.md); missing prerequisites remain blocking. Optional specialists are not unconditional execution dependencies.
+
+## Portable usage
+
+From a checkout, inspect the helper without installing or promoting the skill:
+
+```sh
+python3 skills/deep-loop/scripts/deep_loop.py --help
+```
+
+On Windows, use `py -3` in place of `python3`. Replace personal installed-path examples in the imported skill/reference documents with the actual helper path; [portable usage](docs/USAGE.md) supplies equivalent checkpoint commands and dependency-resolution details.
 
 ## Automation boundary
 
@@ -28,4 +38,4 @@ The legacy plugin files are preserved for inspection and a separately selected l
 
 ## Licensing
 
-The original repository [license](LICENSE) is retained. The current skill's bundled attribution/license files must be preserved when its reviewed package is inserted.
+The original repository [license](LICENSE) is retained. The current skill's bundled [attribution license](skills/deep-loop/LICENSE-wayfinder) is preserved alongside its source.
