@@ -46,7 +46,7 @@ Fresh device sign-in for the dedicated account has been verified privately. Thes
 
 `private_controller.py` connects explicit approval enrollment, the append-only journal, durable host-wide ownership, native submission and recovery. `TrustedStore` requires a canonical private directory and trusted nonwritable ancestors, validates file ownership/modes and rejects symlinks/hardlinks. Create `credential-stream.lock` once during explicit trusted setup; recovery never recreates a missing lock. Immutable JSON records are published without replacement and fsynced with their directory. Production retains root ownership; nonroot ownership is only for disposable tests.
 
-The controller reads the exact immutable approved contract, qualifies the backend, charges and independently reads back admission, persists global launch intent, then submits once. A crash or uncertain response blocks later launches across contracts. A missing native invocation receipt requires explicit inspection; it never replays submission. A root-owned session binding is accepted only from the trusted native adapter, never candidate text. Resume requires that binding and the same contract. Reconciliation never submits: it requires the exact invocation plus ended execution and empty cgroup proof, finishes without refund, and releases global ownership only after journal persistence. Current reconciliation credits no progress; independent progress verification remains a delivery integration requirement. Two no-progress outcomes stop further attempts.
+The controller reads the exact immutable approved contract, qualifies the backend, charges and independently reads back admission, persists global launch intent, then submits once. A crash or uncertain response blocks later launches across contracts. A missing native invocation receipt requires explicit inspection; it never replays submission. A root-owned session binding is accepted only from the trusted native adapter, never candidate text. Resume requires that binding and the same contract. Reconciliation never submits: it requires the exact invocation plus ended execution and empty cgroup proof, finishes without refund, and releases global ownership only after journal persistence. Reconciliation accepts progress only from an explicitly supplied trusted verifier after native ended-execution and empty-cgroup proof. Without that verifier it credits no progress. Two no-progress outcomes stop further attempts.
 
 `systemd_observer.py` collects native properties with bounded `systemctl show` and kernel cgroup-v2 population evidence. Missing units, changed invocation/account/cgroup ownership, unexpected restart policy and unavailable population data block recovery. A released cgroup counts as empty only with the retained exact ended native invocation. Successful units use RemainAfterExit=yes; native active/exited state with MainPID=0 and an empty cgroup proves ended execution without losing invocation identity. Running or populated units cannot reconcile. Keep units retained until reconciliation; do not use `--collect` for live attempts. These observations do not authenticate Codex session events.
 
@@ -65,3 +65,18 @@ Submission consumes its matching in-memory qualification once, requires the pers
 No-model host probes verified protected systemd stdin/stdout, dedicated HOME/cwd/UID, retained successful invocation with MainPID=0, private direct/symlink denial, host-parent descriptor and memory denial, network denial, and effective disabled capability flags. Apps, browser/computer actions, plugins, additional agents, child goals, dependency installers and web search are disabled for this local writer lane. These probes do not establish a live model outcome, native session capture during inference, automatic wakeup or delivery. Fresh/resumed commands and cumulative reservations use the same restrictions.
 
 The writer command also pins `forced_login_method="chatgpt"` and the OpenAI provider. Its service removes API-key, alternate Codex-home/base-URL and Node option environment inputs while retaining the dedicated login environment. Qualification verifies the private account currently reports ChatGPT authentication; Login status establishes the stored authentication method, not token freshness or subscription entitlement. Native authentication failures block execution; there is no API fallback. No API organization, key or refresh broker is provisioned.
+
+
+## Disposable artifact verification
+
+`artifact_verifier.py` independently reads the stopped candidate through bounded,
+fd-relative reads. The frozen contract supplies all baseline file hashes and one
+permitted artifact path with its exact expected SHA-256. Missing, additional or
+changed files fail acceptance; symlinks, hardlinks, foreign ownership and private
+configuration paths block verification. The verifier runs no candidate code.
+A passing semantic receipt binds the contract and resulting file hashes, without
+timestamps or invocation IDs. The controller persists it outside the candidate
+before journal completion. Repeated identical output counts as no progress;
+a crash after journal completion recovers without repeating verification or
+refunding reservations. This narrowly verifies the disposable artifact, not a
+general repository build, GitHub delivery or unattended end-to-end execution.

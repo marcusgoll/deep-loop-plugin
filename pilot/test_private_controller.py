@@ -184,6 +184,43 @@ class PrivateControllerTests(unittest.TestCase):
         _, state = recovered.read()
         self.assertEqual(state['attempts'][0]['model_seconds'], 600)
         self.assertEqual(state['attempts'][0]['status'], 'finished')
+    def test_verified_progress_is_stable_and_never_reused(self):
+        evidence = {'contract_digest': self.journal.contract_digest, 'artifact': 'fixed-hash'}
+        self.controller.verifier = lambda contract, owner: evidence
+        self.start()
+        self.assertEqual(self.controller.reconcile(), 'wait_for_predecessor')
+        self.stop()
+        self.assertEqual(self.controller.reconcile(), 'finished_with_verified_progress')
+        receipt = self.journal.state['attempts'][0]['progress_receipt']
+        self.assertEqual(self.store.read(receipt + '.progress.json'), evidence)
+        self.controller.start(run_id=2, run_attempt=1, model_seconds=600, active_seconds=1200)
+        self.assertEqual(self.controller.reconcile(), 'finished_without_verified_progress')
+        self.assertIsNone(self.journal.state['attempts'][1]['progress_receipt'])
+    def test_verified_finish_before_owner_release_recovers_without_verification_repeat(self):
+        self.controller.verifier = lambda contract, owner: {'contract_digest': self.journal.contract_digest, 'artifact': 'fixed-hash'}
+        self.start()
+        self.stop()
+        remove = self.store.remove
+        self.store.remove = lambda name: (_ for _ in ()).throw(OSError('Crash'))
+        with self.assertRaises(OSError): self.controller.reconcile()
+        self.store.remove = remove
+        restarted = PrivateController(self.store, self.journal, self.backend,
+                                      verifier=lambda *args: self.fail('Repeated verification'))
+        self.assertEqual(restarted.reconcile(), 'finished_with_verified_progress')
+
+    def test_missing_progress_evidence_blocks_finished_owner_release(self):
+        self.controller.verifier = lambda contract, owner: {'contract_digest': self.journal.contract_digest}
+        self.start()
+        self.stop()
+        remove = self.store.remove
+        self.store.remove = lambda name: (_ for _ in ()).throw(OSError('Crash'))
+        with self.assertRaises(OSError): self.controller.reconcile()
+        self.store.remove = remove
+        progress = self.journal.state['attempts'][-1]['progress_receipt']
+        remove(progress + '.progress.json')
+        with self.assertRaises(FileNotFoundError): self.controller.reconcile()
+        self.assertEqual(self.store.read('active-owner.json')['run_id'], 1)
+
     def test_missing_lock_never_recreates_ownership(self):
         self.store.remove('credential-stream.lock')
         with self.assertRaises(FileNotFoundError): self.start()

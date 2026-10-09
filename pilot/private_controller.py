@@ -11,7 +11,6 @@ import os
 from pathlib import Path
 import stat
 import tempfile
-import uuid
 
 from admission import digest, finish, initialize, reserve
 from private_launch import launch_plan, recovery_action
@@ -105,8 +104,9 @@ class PrivateController:
     observes its exact invocation/cgroup, and authenticates a session observation.
     Journal and backend are trusted implementations, not candidate callbacks.
     """
-    def __init__(self, store, journal, backend):
+    def __init__(self, store, journal, backend, verifier=None):
         self.store, self.journal, self.backend = store, journal, backend
+        self.verifier = verifier
         self.contract_digest = journal.contract_digest
 
     def _contract(self):
@@ -176,7 +176,7 @@ class PrivateController:
     def reconcile(self):
         """Wakeup/restart path: inspect and finish only, never submit or refund."""
         with self.store.lock():
-            self._contract()
+            contract = self._contract()
             owner = self.store.read('active-owner.json')
             if owner['contract_digest'] != self.contract_digest:
                 raise ValueError('Credential stream owned by another contract')
@@ -234,10 +234,32 @@ class PrivateController:
                     if (previous.get('contract_digest'), previous.get('session_id')) != (self.contract_digest, session_id):
                         raise ValueError('Conflicting session binding')
             if last['status'] == 'reserved':
-                # No adapter-generated or model-reported progress is accepted.
-                # Independent verification can be integrated separately; until
-                # then every completed invocation consumes a no-progress attempt.
-                finished = finish(journal, self.contract_digest, run_id=owner['run_id'], run_attempt=owner['run_attempt'])
+                # A trusted verifier reads the stopped candidate independently.
+                # Semantic receipts omit invocation IDs/time so identical output
+                # cannot repeatedly reset the no-progress counter.
+                evidence = self.verifier(contract, owner) if self.verifier is not None else None
+                if evidence is not None and (not isinstance(evidence, dict) or
+                        evidence.get('contract_digest') != self.contract_digest):
+                    raise ValueError('Verification evidence contract drift')
+                progress = digest(evidence) if evidence is not None else None
+                if progress in {a['progress_receipt'] for a in journal['attempts']}:
+                    progress = None
+                if progress is not None:
+                    name = progress + '.progress.json'
+                    try:
+                        self.store.create(name, evidence)
+                    except FileExistsError:
+                        if self.store.read(name) != evidence:
+                            raise ValueError('Conflicting progress evidence')
+                finished = finish(journal, self.contract_digest, run_id=owner['run_id'],
+                                  run_attempt=owner['run_attempt'], progress_receipt=progress)
                 self.journal.publish(revision, finished)
+            completed = finished if last['status'] == 'reserved' else journal
+            progress = completed['attempts'][-1]['progress_receipt']
+            if progress is not None:
+                evidence = self.store.read(progress + '.progress.json')
+                if digest(evidence) != progress or evidence.get('contract_digest') != self.contract_digest:
+                    raise ValueError('Missing or changed protected progress evidence')
             self.store.remove('active-owner.json')
-            return 'finished_without_verified_progress'
+            return ('finished_with_verified_progress' if progress is not None
+                    else 'finished_without_verified_progress')
