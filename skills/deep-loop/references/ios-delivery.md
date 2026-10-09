@@ -20,6 +20,25 @@ Name the exact endpoint and acceptance before implementation:
 
 Do not replace a requested native endpoint with a browser prototype, archive, or upload. Submission-only endpoints can finish at independently verified submission status; they do not establish availability. External waiting remains explicit when the requested endpoint is not yet reached.
 
+## Declare native coverage in the existing contract
+
+Before substantial native work, declare a compact verification matrix in the existing brief or Verification Contract and index its required cases in the existing checks. Derive cases from the project's supported device families/OS range, changed behavior, existing build/test lanes, selected endpoint and locked acceptance. Use the project's commands and reports. A small source-only change can use its focused existing checks; it does not acquire device or distribution obligations merely because the repository contains an iOS app.
+
+| When | Select from project requirements and affected risks |
+| --- | --- |
+| During development | Focused simulator configuration and affected unit/UI journeys for rapid repair; retain the broader required cases as not run. |
+| Before native handoff | Broader simulator coverage of affected supported families, OS boundaries and build configurations, including shared consumers and persistence/state recovery. |
+| Hardware-dependent or release-sensitive acceptance | Actual device cases for behavior the simulator cannot establish, and the required Release/signing/entitlement cases; Debug success is scoped to Debug. |
+| Native delivery | Independent installed-build and required journey readback at the selected simulator, device or distribution endpoint. Test results, an archive or upload cannot replace it. |
+
+Select combinations that exercise the actual requirements rather than automatically multiplying every family, OS and configuration. Record the requirement/risk basis for each selected combination and why other combinations are outside the affected scope. Existing repository/release matrices and previously approved required cases remain binding. Unknown support requirements need investigation; an unavailable runtime or device is a gap, not an exclusion. Change required coverage only through the existing acceptance authority, never by dropping an inconvenient case.
+
+Each case retains a stable ID, requirement/verifier ID, target family and simulator or physical-device identity, exact OS/runtime, Debug/Release or distribution configuration, covered journey, due stage, required disposition, and **passed / failed / not run** with evidence or a reason and next safe action. Before execution, record the intended target; after execution, record the actual target/build identity. Keep unknown identities explicit rather than inventing versions. A passed case identifies current source revision/content, app bundle/version/build or artifact identity, command/native result and inspectable logs, reports or observed journey evidence. Separate build, install, launch, attach and test observations: none alone proves all the others.
+
+Reuse [Verification Contract integration](verification-contract-integration.md) for required verifier IDs, approved invocations and source/environment/artifact bindings. Put native target/OS/build conditions in the existing environment manifest or referenced case record; include that record as an existing build/proof input when binding it. Reuse project runners rather than adding a native engine or another status authority. If checkpointing, map case `passed` to the corresponding passed check, `failed` to failed, and `not run` to pending; retain capability/authority blockers and their smallest next action in the existing issues/plan. Use `review` for implementation acceptance and `ship` for proof requiring delivery, not to postpone a due requirement. Unrun required REVIEW cases block handoff; any failed or unrun required case blocks final completion. Safe independent work can continue.
+
+The helper validates declared records, receipts and bindings; it cannot infer omitted device cases or authenticate physical hardware from a label or prose PASS. Inspect actual native execution and coverage. A browser/prototype result, different target or OS, Debug-only run, fixture result or hash-only manifest cannot satisfy a required native/device/Release case. Do not copy a passed result across cells. Changed code, target/build conditions or acceptance invalidates affected evidence under the existing conservative bindings. Retain failed broad suites and unavailable required cases visibly, even when focused checks pass.
+
 ## Verify capabilities before dependent work
 
 Inspect the actual Mac or build-service identity, compatible macOS/Xcode/SDK, selected project/workspace/scheme, simulator/device access, and existing build/test/archive commands. Use a verified remote host or service when working from Windows; do not assume the presence of a Mac connection proves Xcode or device access. Missing required capabilities block dependent verification/delivery while safe planning or source work can continue. Report native checks not run.

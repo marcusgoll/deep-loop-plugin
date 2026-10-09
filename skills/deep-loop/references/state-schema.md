@@ -12,7 +12,7 @@ Schema-4 sessions start with `uiRoute: {"kind": "pending"}`. Before source edits
 
 - `not_applicable` requires a scope-specific `reason`.
 - `specified` requires `approvedTarget` and `evidence` naming the approved visual target or exact repository pattern.
-- `greenfield` requires exactly three distinct `options`; a `selectedDirection` from those options; `selection: {source: "user", evidence}`; `designProvenance: {route: "product-design", evidence}`; `mobbin` with an evidenced `inspected` or `no_comparable` status; and nonempty `affectedSurfaces` and `plannedEvidence` arrays.
+- `greenfield` uses optional `exploration: "broad"` (default) or `"material_choice"`. Broad exploration requires exactly three distinct `options`; a material choice permits two or three. The alternatives must differ meaningfully, rather than only in their labels. Both scopes require a `selectedDirection` from those options; `selection: {source: "user", evidence}`; `designProvenance: {route: "product-design", evidence}`; `mobbin` with an evidenced `inspected` or `no_comparable` status; and nonempty `affectedSurfaces` and `plannedEvidence` arrays.
 
 The helper validates record shape, not whether the cited design decision or source was genuine. The agent still inspects the evidence. An unavailable required Mobbin pass remains pending rather than being relabeled `no_comparable`.
 

@@ -2,7 +2,7 @@
 name: deep-loop
 description: Use when intent needs clarification, decisions span sessions, or development needs resumable delivery or coordinated parent acceptance.
 metadata:
-  skill_version: "0.5.6"
+  skill_version: "0.5.9"
 ---
 
 # Deep Loop
@@ -77,7 +77,7 @@ Decision mapping can feed either delivery path. One coordinator owns the parent 
 
 Follow governing instructions and existing scope/authority; this skill grants no permission. The current shared router supersedes historical blanket approval language. Preserve specific design approvals, irreversible-action boundaries, commit/review gates, and recovery requirements. Read [merge provenance](references/merge-provenance.md) only when tracing these adaptations.
 
-Before delegating work, read [worker selection, models and concurrency](references/mattpocock-integration.md#worker-selection-models-and-concurrency). Select useful bounded work within runtime delegation rules; trivial work stays direct. This shared section applies without selecting Matt's user-only workflows. When the user selects those workflows, read the full [integration contract](references/mattpocock-integration.md) for their execution ownership and handoff.
+Before delegating work, read [worker selection, models and concurrency](references/mattpocock-integration.md#worker-selection-models-and-concurrency). Inspect the requested guarantees and current ownership, isolation, review and applicable controller capabilities; state the supported path before dispatch. Workers inherit by default; justified supported exceptions preserve user choices. Unavailable required guarantees block dependent dispatch, and a narrower path requires user selection. Trivial work stays direct. This shared section applies without selecting Matt's user-only workflows; selected workflows retain their full execution ownership and handoff contract.
 
 For eligible low-risk intake with multiple plausible installed profiles, or repair after a concrete failed objective check, follow the governing JEV policy and read the installed `jev-codex-routing` skill. Directly named skills/user overrides, protected or uncertain work bypass JEV. Its sanitized profile selection stays advisory with `applied=false`; it grants no execution or model-selection authority. Follow its existing repair limits and continue the ordinary authorized path on abstention or unavailability; passing checks need no routing call.
 
@@ -85,7 +85,7 @@ For a net-new user-facing screen or flow without an approved visual target, and 
 
 For a full project roadmap, architecture/specification handoffs, realistic product dogfooding, branch integration/closeout, or release maintenance, read [project lifecycle](references/project-lifecycle.md). Apply only the parts needed by the requested endpoint; small tasks retain the direct path. It connects the existing phases and specialist contracts without adding a controller or checkpoint schema.
 
-For creating, testing, or distributing an installable iOS app, read [iOS delivery](references/ios-delivery.md). It distinguishes browser prototypes from native artifacts and defines capability checks and endpoint evidence; it adds no build service or distribution authority.
+For creating, testing, or distributing an installable iOS app, read [iOS delivery](references/ios-delivery.md). Declare native device/OS/build coverage from project requirements for substantial work, retain each required case as passed, failed or not run, and verify the actual endpoint. Browser prototypes do not establish native proof; this adds no build service or distribution authority.
 
 For explicitly requested native goals, substantial implementation, work likely to span sessions, or coordinated delivery where runtime continuation would help, read [native goals](references/native-goals.md) before offering, creating, resuming, or updating a goal. Small fixes, explanations, and planning-only work need no goal recommendation.
 
@@ -113,9 +113,9 @@ For dependent implementation slices, recurring issues, or tracked work that may 
 
 Checks and tasks default to `stage: review`; use `ship` for delivery proof and `closeout` only for actual post-delivery retirement. REVIEW requires its due acceptance; final SHIP requires every stage. Pending implementation acceptance does not block BUILD once prerequisites and applicable design authority are settled. Archive preservation requires review and delivery proof before it defers explicit closeout records to the preserved working checkpoint.
 
-For substantive UI, register the actual scope with `--ui-request` and bind the approved Design Contract through the [UI adapter](references/ui-ux-integration.md). Its current execution, capture and case evidence is required at REVIEW and SHIP.
+For substantive UI, register the actual scope with `--ui-request` and select exploration and proof from approved acceptance through the [UI adapter](references/ui-ux-integration.md). Reuse clear targets and established patterns; unresolved material direction needs owner selection from meaningful alternatives. Exact-target fidelity retains the approved Design Contract and its current execution, capture and case evidence at REVIEW and SHIP. Established-component behavioral changes use risk-based rendered, interaction, accessibility and responsive proof; no existing bound gate is waived.
 
-New schema-4 checkpoints classify `uiRoute` as `not_applicable`, `specified`, or `greenfield`. Record the applicable evidence described in [UI/UX integration](references/ui-ux-integration.md), then run `validate --stage build` before source edits. The gate keeps non-UI work lightweight, accepts a precise approved target for specified edits, and requires Product Design, exactly three options, explicit user selection, and Mobbin provenance or an evidenced no-comparable disposition for greenfield work. Existing schema-1/2/3 checkpoints retain their recorded contract.
+New schema-4 checkpoints classify `uiRoute` as `not_applicable`, `specified`, or `greenfield`. Record the applicable evidence described in [UI/UX integration](references/ui-ux-integration.md), then run `validate --stage build` before source edits. The gate keeps non-UI work lightweight, accepts a precise approved target for specified edits, and requires Product Design, two or three meaningful options (three for broad exploration or a specialist requirement), explicit user selection, and Mobbin provenance or an evidenced no-comparable disposition for greenfield work. Existing schema-1/2/3 checkpoints retain their recorded contract.
 
 For a coordinated parent, select checks from the complete coverage index and retain the added requirements through REVIEW and SHIP. A closed decision, finished child, or empty frontier does not complete the parent. Do not switch to the defined-task path to bypass a missing required capability or approval.
 
@@ -126,6 +126,8 @@ For a coordinated parent, select checks from the complete coverage index and ret
 For substantial, risky, resumed, delegated, or external-delivery work, bind deterministic proof to its approved invocation, current source/environment and declared artifacts using [Verification Contract integration](references/verification-contract-integration.md). Keep human judgment explicit and independently inspect the result; a captured successful exit does not prove an undeclared outcome. Tiny reversible tasks may retain inspected direct proof.
 
 Keep a failed broad suite recorded as failed, including a pre-existing failure. Record passing scoped acceptance separately with its actual coverage; link the baseline defect and disposition without relabeling the suite. An out-of-scope baseline finding is not a waiver for a required acceptance check. A check is `passed` with concrete evidence, or `not_applicable` with a reason tied to the scope. A hosted-CI check passes only from an observed successful run for the exact delivery revision, recorded with provider, run URL, revision, and conclusion; workflow files, job names, or statements that CI will run later prove wiring, not execution. Fix failed checks, then rerun affected checks. Record new debt only when it exists: pay it down in this task, or retain explicit user acceptance, an owner, and a paydown task. Do not convert unresolved failures into accepted debt.
+
+Require a distinct read-only review context for agent rules/approval mechanisms, security-sensitive work, destructive migrations, and governing review obligations. For other substantial work, name the risk independent review addresses; small reversible work may use self-review and executed checks. Self-review is never independent, and required review unavailability remains a blocker. Reuse [worker review selection](references/mattpocock-integration.md#worker-selection-models-and-concurrency); review does not replace human approval or endpoint proof.
 
 For checkpointed work, before moving to SHIP:
 
