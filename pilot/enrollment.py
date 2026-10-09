@@ -4,7 +4,8 @@ The root operator authenticates the exact human approval before calling this
 adapter. It is never a worker recovery path. Durable intent makes every partial
 or uncertain transaction require inspection instead of automatic re-enrollment.
 """
-from admission import LIMITS, digest, initialize, reserve
+from frozen_contract import validate_frozen
+from admission import digest, initialize, reserve
 from private_launch import launch_plan
 from worker_window import open_window, host_clock
 
@@ -15,15 +16,11 @@ class Enrollment:
         self.preflight, self.activate, self.clock = preflight, activate, clock
 
     def apply(self, contract, *, expected_digest, approval_ref):
+        validate_frozen(contract)
         initialize(expected_digest)
         if (digest(contract) != expected_digest or self.journal.contract_digest != expected_digest or
                 not isinstance(approval_ref, str) or not approval_ref.strip() or len(approval_ref) > 4096):
             raise ValueError('Exact authenticated approve-and-run required')
-        if (contract.get('worker_wall_seconds') != LIMITS['active_seconds'] or
-                contract.get('wakeup') != {'model_seconds': 600, 'active_seconds': 1200} or
-                contract.get('verification', {}).get('baseline') != {} or
-                'resume_verification' not in contract or 'delivery' not in contract):
-            raise ValueError('Unsupported frozen disposable enrollment')
         key = expected_digest
         with self.store.lock():
             # This dedicated pilot supports one enrollment ever. Terminal or

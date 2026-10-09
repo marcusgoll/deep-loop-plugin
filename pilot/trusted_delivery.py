@@ -12,8 +12,7 @@ from urllib.parse import urlencode
 from resume_verifier import validate_resume_acceptance
 from admission import digest
 
-REPOSITORY = 'marcusgoll/deep-loop-plugin'
-ARTIFACT = 'pilot/fixtures/private-lane-smoke.txt'
+from frozen_contract import REPOSITORY, ARTIFACT, validate_delivery
 WORKFLOW = '.github/workflows/pilot-verification.yml'
 
 
@@ -75,12 +74,7 @@ class TrustedDelivery:
                     verification['artifact_path']!=ARTIFACT or
                     evidence.get('files_digest')!=digest({**verification['baseline'],ARTIFACT:verification['artifact_sha256']})):
                 raise ValueError('Untrusted delivery evidence')
-            if (set(delivery)!={'repository','repository_id','publisher_id','base_ref','source_sha','commit_date','title','body'} or
-                    delivery['repository']!=REPOSITORY or delivery['base_ref']!='codex/pilot-admission' or
-                    any(type(delivery[k])!=int or delivery[k]<1 for k in ('repository_id','publisher_id')) or
-                    not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',delivery['commit_date']) or
-                    any(not isinstance(delivery[k],str) or not delivery[k] or len(delivery[k])>4096 for k in ('title','body'))):
-                raise ValueError('Unsupported frozen delivery endpoint')
+            validate_delivery(delivery)
             resume_proof = (validate_resume_acceptance(contract,evidence,self.store)
                             if 'resume_verification' in contract else None)
             base=sha(delivery['source_sha'])

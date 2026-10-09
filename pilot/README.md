@@ -245,3 +245,16 @@ and acceptance are re-read before every delivery transition; completion includes
 the resume-proof digest. Contracts without this field retain artifact-only
 acceptance. These tests use fixture backends and do not establish live inference
 or native recovery. Preparation adds no enrollment or timer activation.
+
+`enrollment_operator.py` is the root Linux entrypoint for one exact frozen
+approve-and-run. The operator authenticates the human approval externally; an
+approval reference records provenance and does not authenticate itself. Run it
+from the frozen installed bundle with its exact contract digest. Default mode
+performs only locked preflight. Explicit `--apply --approval-ref <reference>`
+uses the single-use enrollment transaction and starts the private timer once,
+without enabling it across boots. The protected `<digest>.frozen.json` contains
+only the exact contract, including `runtime.bundle_digest` and
+`runtime.unit_plan_digest`. Existing approval, partial intent, journal enrollment
+or execution window requires inspection. Uncertain results never authorize a
+retry or reset. Source fixtures do not establish actual host activation, human
+approval, live inference or disposable delivery.
