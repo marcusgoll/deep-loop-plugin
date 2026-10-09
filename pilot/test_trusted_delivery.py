@@ -105,6 +105,53 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(len(self.calls),1)
         self.assertFalse(any(method=='POST' for method,route,data in self.calls))
 
+    def test_candidate_drift_during_final_readback_blocks_completion(self):
+        self.advance(6);original=self.api
+        def changed(method,route,data):
+            result=original(method,route,data)
+            if route.endswith('/pulls/17'):
+                self.delivery.artifact_reader=lambda *args:b'changed during final readback'
+            return result
+        self.delivery.api=changed
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertIsNone(self.delivery._record('complete'))
+
+    def test_revocation_during_final_readback_blocks_completion(self):
+        from authority import OutcomeRevoked
+        self.advance(6);original=self.api
+        def revoke(method,route,data):
+            result=original(method,route,data)
+            if route.endswith('/pulls/17'):self.store.create(self.key+'.revocation-intent.json',{})
+            return result
+        self.delivery.api=revoke
+        with self.assertRaises(OutcomeRevoked):self.delivery.step()
+        self.assertIsNone(self.delivery._record('complete'))
+
+    def test_candidate_drift_between_provider_calls_blocks_next_request(self):
+        original=self.api
+        def change_after_read(method,route,data):
+            result=original(method,route,data)
+            self.delivery.artifact_reader=lambda *args:b'changed during provider read'
+            return result
+        self.delivery.api=change_after_read
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertEqual(len(self.calls),1)
+        self.assertFalse(any(method=='POST' for method,route,data in self.calls))
+
+    def test_candidate_drift_after_blob_blocks_provider_operations(self):
+        self.advance(2)
+        self.delivery.artifact_reader=lambda *args:b'changed after verification'
+        self.calls.clear()
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertEqual(self.calls,[])
+
+    def test_candidate_drift_after_completion_invalidates_readback(self):
+        self.advance(6);self.assertEqual(self.delivery.step(),'delivered_verified_draft')
+        self.delivery.artifact_reader=lambda *args:b'changed after delivery'
+        self.calls.clear()
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertEqual(self.calls,[])
+
     def test_resume_proof_removal_after_blob_blocks_every_provider_operation(self):
         self.configure_resume();self.advance(2)
         self.store.remove(self.key+'.resume-acceptance.json')
