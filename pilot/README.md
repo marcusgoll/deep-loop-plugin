@@ -96,3 +96,21 @@ session provenance blocks; it never silently starts a replacement task.
 This transition is not an installed timer. Service deadlines, host promotion,
 boot recovery and the trusted delivery adapter still require integration and
 proof. An absent or unloaded native unit cannot establish ended execution.
+
+
+## Protected versioned promotion
+
+`promote_controller.py` prints a manifest by default. Explicit root Linux apply
+requires its externally reviewed manifest digest and an inactive, unenrolled
+pilot. It stages the nine controller/adapter/verifier/wakeup modules in a new
+hash-named protected bundle, preserves the original modules and journal, and
+verifies immutable files and durable receipt readback. Existing or partial
+bundles block reapplication. It selects no runtime, installs no timer and creates
+no approval or model call. The trusted launcher and staged source must themselves
+be externally verified before invocation.
+
+The reviewed nine-module bundle has been privately staged and hash/mode/readback
+verified. A literal Python no-model native-unit probe verified adoption of the
+same retained invocation after a lost submit response, without a second dispatch.
+This establishes an existing-unit recovery primitive, not Codex inference,
+boot recovery, an installed scheduler or GitHub delivery.
