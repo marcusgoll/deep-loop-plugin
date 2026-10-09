@@ -41,6 +41,9 @@ def apply(expected):
             raise ValueError('Untrusted controller storage parent')
     # mkdir deliberately rejects existing state, including a partial prior setup.
     CONTROL.mkdir(mode=0o700)
+    parent_fd = os.open(CONTROL.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try: os.fsync(parent_fd)
+    finally: os.close(parent_fd)
     store = TrustedStore(CONTROL)
     store.create('credential-stream.lock', {})
     modules = CONTROL/'modules'
