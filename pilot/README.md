@@ -184,3 +184,52 @@ configuration, validates the replacement, fsyncs it and checks inactive/disabled
 readback. Partial or changed installations require inspection. It never starts
 or enables the timer. Other trusted root installers must respect the same
 installation lock; filesystem replacement does not provide compare-and-swap.
+
+
+## Contract-bound qualification preparation
+
+`qualification_plan.py` derives sandbox and feature-inspection commands from
+the exact reserved native launch plan. It binds the candidate, executor and
+permission digest and permits only the fixed disposable probe path. It starts
+no process and creates no qualification receipt. The producer must verify the
+pinned executable and probe bytes, set the dedicated account and exact candidate
+working directory, reject unexpected configuration, inspect actual results and
+clean up probe files before publishing protected evidence.
+
+A private no-model grammar preflight confirmed all thirteen generated feature
+disables resolve to false. This does not prove the candidate sandbox or managed
+configuration for an enrolled run. Qualification production remains pending.
+
+The sandbox/features grammar lacks execution's ignore-config flags. Command success alone cannot prove equivalent policy loading. The
+producer must establish absence of user, ancestor-project, managed and rules
+configuration and validate effective configuration independently.
+
+`qualification_environment.py` verifies the pinned executable, dedicated
+identity, canonical private directories, bounded candidate objects, absence of
+configuration/rules and private-process inactivity. `qualification_probe.py`
+prepares literal probe scripts and validates exact observed denials, including
+both a sentinel descriptor and the parent's capture descriptor. These helpers
+do not start probes or publish qualification authority.
+
+Sandbox and feature inspection reject `--strict-config`. Strict validation now
+uses a separate app-server startup with empty input, restricted networking and
+positive/unknown-field negative controls. Native preflight proved clean success
+and explicit unknown-field rejection. The full producer subsequently passed a disposable no-model fixture on the
+private host. Any successful-command diagnostic also blocks
+qualification.
+Probe and wrapper Python use isolated mode (`-I`) to prevent candidate module
+imports before sandboxing. The root producer keeps immutable intent on an
+uncertain submission and requires retained native identity and stopped-process
+proof before reading results. The supported parser path and PID namespace correction passed independent
+review. Protected receipt readback verified the completed no-model fixture.
+
+The current suite passes 107 tests. Host qualification proved candidate writes,
+private direct/symlink denial, isolated parent PID namespace, retained parent
+targets, descriptor/capture/memory denial, network denial, strict positive and
+negative configuration controls, and exact I/O. The candidate was empty after
+cleanup; the protected receipt is root-owned 0600. No model request or enrollment
+occurred. Qualification must be repeated for the final frozen outcome.
+
+Parent `ENOENT` is accepted only with independently retained target existence
+and a different child PID namespace. Missing paths alone remain insufficient.
+Failed diagnostic fixtures and their native identities were preserved.

@@ -16,6 +16,7 @@ from native_session import MAX_CAPTURE_BYTES, session_from_capture
 from private_launch import ACCOUNT, ROOT
 from systemd_observer import observe_unit
 from worker_window import remaining
+from qualification_environment import configuration_paths, require_absent, inspect_candidate
 
 
 def permission_digest(plan):
@@ -61,15 +62,8 @@ class NativeBackend:
             info = path.lstat()
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != account.pw_uid or info.st_gid != account.pw_gid or stat.S_IMODE(info.st_mode) != 0o700:
                 raise ValueError('Private account directory ownership drift')
-        for path in candidate.rglob('*'):
-            info = path.lstat()
-            if path.name in {'.codex', '.git', 'hooks.json'} or stat.S_ISLNK(info.st_mode) or not (stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode)) or info.st_uid != account.pw_uid:
-                raise ValueError('Candidate contains unqualified execution configuration or filesystem object')
-            if stat.S_ISREG(info.st_mode) and info.st_nlink != 1:
-                raise ValueError('Candidate contains an aliased file')
-        for path in ('/etc/codex/config.toml', '/etc/codex/requirements.toml'):
-            if Path(path).exists() or Path(path).is_symlink():
-                raise ValueError('Unexpected managed system configuration requires requalification')
+        inspect_candidate(candidate,account.pw_uid)
+        require_absent(configuration_paths(candidate,account.pw_dir))
         # No other process may own this private credential stream outside the
         # controller. The no-model preflight must run before a model unit starts.
         processes = subprocess.run(['/usr/bin/pgrep', '-u', str(account.pw_uid)], capture_output=True, text=True, timeout=5)
