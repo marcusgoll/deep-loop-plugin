@@ -74,6 +74,11 @@ class NativeBackend:
         processes = subprocess.run(['/usr/bin/pgrep', '-u', str(account.pw_uid)], capture_output=True, text=True, timeout=5)
         if processes.returncode != 1:
             raise ValueError('Private identity has another process or unavailable ownership evidence')
+        authentication = subprocess.run(['sudo', '-n', '-H', '-u', ACCOUNT, '/usr/bin/env',
+                                         '--chdir='+str(candidate), str(binary), 'login', 'status'],
+                                        capture_output=True, text=True, timeout=5)
+        if authentication.returncode != 0 or 'Logged in using ChatGPT' not in authentication.stdout + authentication.stderr:
+            raise ValueError('Private account ChatGPT authentication unavailable')
         receipt = self.store.read(self.contract_digest + '.qualification.json')
         expected = {'contract_digest': self.contract_digest, 'executor': executor,
                     'permission_digest': permission_digest(plan), 'candidate': str(candidate),

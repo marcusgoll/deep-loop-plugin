@@ -17,6 +17,9 @@ class PrivateLaunchTests(unittest.TestCase):
         self.assertEqual(plan['properties']['Restart'], 'no')
         self.assertEqual(plan['properties']['RemainAfterExit'], 'yes')
         self.assertIn('web_search="disabled"', plan['command'])
+        self.assertIn('forced_login_method="chatgpt"', plan['command'])
+        self.assertIn('OPENAI_API_KEY', plan['properties']['UnsetEnvironment'].split())
+        self.assertIn('CODEX_HOME', plan['properties']['UnsetEnvironment'].split())
         disabled = [plan['command'][i+1] for i,value in enumerate(plan['command'][:-1]) if value == '--disable']
         for feature in ('apps','plugins','browser_use','computer_use','multi_agent','goals'):
             self.assertIn(feature, disabled)
