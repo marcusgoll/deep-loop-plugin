@@ -20,8 +20,10 @@ from systemd_observer import observe_unit
 def permission_digest(plan):
     command = plan['command']
     overrides = [command[i+1] for i, value in enumerate(command[:-1]) if value == '-c']
-    return digest({'overrides': overrides, 'ignore_user_config': '--ignore-user-config' in command,
-                   'ignore_rules': '--ignore-rules' in command, 'hooks_disabled': ['--disable', 'hooks'] == command[command.index('--disable'):command.index('--disable')+2]})
+    disabled = [command[i+1] for i, value in enumerate(command[:-1]) if value == '--disable']
+    return digest({'overrides': overrides, 'disabled_features': disabled,
+                   'ignore_user_config': '--ignore-user-config' in command,
+                   'ignore_rules': '--ignore-rules' in command})
 
 
 class NativeBackend:
@@ -77,7 +79,9 @@ class NativeBackend:
                     'permission_digest': permission_digest(plan), 'candidate': str(candidate),
                     'checks': {'candidate_write': True, 'private_direct_read_denied': True,
                                'private_symlink_read_denied': True, 'network_denied': True,
-                               'native_config_validated': True, 'systemd_io_validated': True}}
+                               'native_config_validated': True, 'systemd_io_validated': True,
+                               'host_parent_descriptor_read_denied': True, 'host_parent_memory_read_denied': True,
+                               'external_capabilities_disabled': True}}
         if receipt != expected:
             raise ValueError('Missing or incompatible independent native qualification')
         self.qualified = (digest(plan), digest(contract))

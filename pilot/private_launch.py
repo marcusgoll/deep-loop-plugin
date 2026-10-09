@@ -12,6 +12,10 @@ ROOT = '/var/lib/deep-loop-private-pilot'
 ACCOUNT = 'deep-loop-pilot'
 STOP_SECONDS = 5
 OVERHEAD_SECONDS = 10
+DISABLED_FEATURES = ('hooks', 'apps', 'plugins', 'remote_plugin', 'browser_use',
+                     'computer_use', 'image_generation', 'in_app_browser',
+                     'in_app_local_automation', 'multi_agent', 'goals',
+                     'skill_mcp_dependency_install', 'shell_snapshot')
 
 
 def launch_plan(journal, contract_digest, *, run_id, run_attempt, session_id=None):
@@ -43,7 +47,11 @@ def launch_plan(journal, contract_digest, *, run_id, run_attempt, session_id=Non
                   '/home': 'deny', '/run': 'deny'}
     inline = '{ ' + ', '.join(json.dumps(k) + '=' + json.dumps(v) for k, v in filesystem.items()) + ' }'
     command = ['/usr/bin/codex', 'exec', '--ignore-user-config', '--ignore-rules',
-               '--strict-config', '--json', '--disable', 'hooks', '-c', 'approval_policy="never"',
+               '--strict-config', '--json']
+    for feature in DISABLED_FEATURES:
+        command += ['--disable', feature]
+    command += ['-c', 'web_search="disabled"', '-c', 'apps._default.enabled=false',
+               '-c', 'approval_policy="never"',
                '-c', 'default_permissions="deep_loop_private"',
                '-c', 'permissions.deep_loop_private.filesystem=' + inline,
                '-c', 'permissions.deep_loop_private.network.enabled=false']

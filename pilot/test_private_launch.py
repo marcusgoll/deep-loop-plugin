@@ -15,6 +15,11 @@ class PrivateLaunchTests(unittest.TestCase):
         self.assertEqual(plan['properties']['RuntimeMaxSec'] + plan['properties']['TimeoutStopSec'] + plan['controller_overhead_seconds'], 600)
         self.assertEqual(plan['properties']['KillMode'], 'control-group')
         self.assertEqual(plan['properties']['Restart'], 'no')
+        self.assertEqual(plan['properties']['RemainAfterExit'], 'yes')
+        self.assertIn('web_search="disabled"', plan['command'])
+        disabled = [plan['command'][i+1] for i,value in enumerate(plan['command'][:-1]) if value == '--disable']
+        for feature in ('apps','plugins','browser_use','computer_use','multi_agent','goals'):
+            self.assertIn(feature, disabled)
     def test_recovery_uses_explicit_uuid_and_same_policy(self):
         session = '12345678-1234-4234-8234-123456789012'
         fresh, resumed = self.plan(), self.plan(session_id=session)
