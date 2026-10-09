@@ -39,7 +39,7 @@ from deep_loop import skill_dependency, write_json
 
 SKILL = Path(__file__).resolve().parents[1]
 BRIDGE = Path(__file__).with_name('verification_bridge.py')
-CHECKS = ('skill metadata', 'test_deep_loop.py', 'test_verify_skill.py', 'test_closeout.py', 'test_pixel_diff.py', 'test_thread_tools.py', 'test_ui_design.py', 'test_registered_ui.py', 'test_reconciliation.py', 'test_receipt_recovery.py', 'test_endpoint_readback.py', 'test_independent_checks.py', 'test_recovery_report.py', 'test_active_handoff.py', 'fixture preflights')
+CHECKS = ('skill metadata', 'test_deep_loop.py', 'test_verify_skill.py', 'test_closeout.py', 'test_pixel_diff.py', 'test_thread_tools.py', 'test_ui_design.py', 'test_registered_ui.py', 'test_reconciliation.py', 'test_receipt_recovery.py', 'test_endpoint_readback.py', 'test_independent_checks.py', 'test_recovery_report.py', 'test_active_handoff.py', 'test_adaptive_ui.py', 'fixture preflights')
 SPECIALIST = Path.home() / '.agents/skills/to-spec/SKILL.md'
 
 def read(path):

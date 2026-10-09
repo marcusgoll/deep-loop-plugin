@@ -506,14 +506,18 @@ def schema_four_issues(state):
         return ['uiRoute kind must be pending, not_applicable, specified, or greenfield.']
 
     issues = []
+    exploration = route.get('exploration', 'broad')
+    if not isinstance(exploration, str) or exploration not in ('broad', 'material_choice'):
+        issues.append('A greenfield uiRoute exploration must be broad or material_choice.')
+    counts = (2, 3) if exploration == 'material_choice' else (3,)
     options = route.get('options')
-    if (not isinstance(options, list) or len(options) != 3 or
+    if (not isinstance(options, list) or len(options) not in counts or
             any(not isinstance(option, str) or not option.strip() for option in options) or
-            len(set(options)) != 3):
-        issues.append('A greenfield uiRoute requires exactly three distinct named visual options.')
+            len({option.strip() for option in options}) != len(options)):
+        issues.append('A greenfield uiRoute requires two or three distinct named visual options for material_choice; broad exploration requires exactly three distinct named visual options.')
         options = []
     if not present(route, 'selectedDirection') or route.get('selectedDirection') not in options:
-        issues.append('A greenfield uiRoute requires a selectedDirection from the three visual options.')
+        issues.append('A greenfield uiRoute requires a selectedDirection from the declared visual options.')
     selection = route.get('selection')
     if (not isinstance(selection, dict) or selection.get('source') != 'user' or
             not present(selection, 'evidence')):

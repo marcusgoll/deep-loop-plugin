@@ -1,7 +1,7 @@
-# New-skill migration readiness
+# New-skill migration history
 
-This preview preserves every tracked file from the legacy commit, byte for byte, under legacy/claude-code. Root license and Git attribute/ignore files also remain available. No legacy hooks or plugin manifest remain at the root runtime entrypoints.
+PR #2 merged the legacy-to-Codex migration at commit 30c2a4be2302c0ed483af88362dd6ed9445d47f0. All 53 tracked legacy files remain byte-for-byte under legacy/claude-code, with Git history and licenses retained.
 
-Capture verified all 43 v0.5.6 source files against the passing independent review manifest, rechecked source hashes before/after, and verified every copied file. The public package then normalizes four trailing blank-line sequences. Both the reviewed baseline digest and those exact before/after adjustments are recorded in release-manifest.json. Local current-package checks pass against the adjusted package. This draft migration is published; final migration review, merge and release approval remain pending. The scoped review does not establish completion of the broader optimization. The known installed 0.5.0 baseline and historical 0.5.2 candidate are not selected release sources.
+This update replaces the v0.5.6 package with the independently reviewed v0.5.9 snapshot: 44 files copied without packaging adjustments. release-manifest.json binds the exact reviewed source and public copy. The current update does not modify the legacy archive.
 
-No runtime install, promotion, legacy tag creation, GitHub workflow dispatch, repository rename, merge, or deployment has occurred.
+The local Mac installation was separately promoted to v0.5.9 and hash-verified. Other hosts, release tags, deployments and unattended pilot enrollment are outside this public package update.

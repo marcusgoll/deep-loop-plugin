@@ -687,3 +687,4 @@ if __name__ == '__main__':
         print(json.dumps(render_caption(*map(Path,sys.argv[2:]))))
     else:
         unittest.main()
+
