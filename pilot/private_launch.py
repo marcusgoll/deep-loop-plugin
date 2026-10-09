@@ -68,7 +68,7 @@ def launch_plan(journal, contract_digest, *, run_id, run_attempt, session_id=Non
             'properties': {'User': ACCOUNT, 'Group': ACCOUNT,
                            'WorkingDirectory': candidate, 'SetLoginEnvironment': 'yes',
                            'UnsetEnvironment': 'OPENAI_API_KEY CODEX_API_KEY CODEX_HOME OPENAI_BASE_URL NODE_OPTIONS',
-                           'RuntimeMaxSec': runtime, 'TimeoutStopSec': STOP_SECONDS,
+                           'RuntimeMaxSec': runtime, 'TimeoutStartSec': 5, 'TimeoutStopSec': STOP_SECONDS,
                            'KillMode': 'control-group', 'SendSIGKILL': 'yes',
                            'Restart': 'no', 'RemainAfterExit': 'yes', 'NoNewPrivileges': 'yes', 'UMask': '0077'},
             'charged_model_seconds': item['model_seconds'],

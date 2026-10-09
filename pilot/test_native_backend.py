@@ -14,6 +14,7 @@ SESSION = '12345678-1234-4234-8234-123456789012'
 
 class NativeBackendTests(unittest.TestCase):
     def setUp(self):
+        clock=patch('native_backend.remaining',return_value=3600);clock.start();self.addCleanup(clock.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = TrustedStore(Path(self.temp.name).resolve(), owner_uid=os.getuid())
@@ -69,6 +70,13 @@ class NativeBackendTests(unittest.TestCase):
             self.assertEqual(run.call_args.args[0][0],'/usr/bin/systemctl')
         with patch('native_backend.subprocess.run',return_value=subprocess.CompletedProcess([],0,stdout=output.replace(digest(self.plan),'b'*64))):
             with self.assertRaises(ValueError): self.backend.recover_invocation(self.plan,self.contract,self.owner)
+    def test_short_window_blocks_native_dispatch_after_preparation(self):
+        self.backend.qualified=(digest(self.plan),digest(self.contract))
+        with patch('native_backend.remaining',return_value=1199),patch('native_backend.subprocess.run') as run:
+            with self.assertRaises(ValueError):self.backend.submit(self.plan,self.contract)
+            run.assert_not_called()
+        self.assertTrue((self.store.root/(self.plan['unit']+'.jsonl')).exists())
+
     def test_missing_capture_blocks_recovery_without_submission(self):
         with patch('native_backend.subprocess.run') as run:
             with self.assertRaises(FileNotFoundError): self.backend.recover_invocation(self.plan,self.contract,self.owner)

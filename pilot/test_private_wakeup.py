@@ -41,6 +41,17 @@ class WakeupTests(unittest.TestCase):
         self.assertEqual(self.tick(),'finished_with_verified_progress')
         self.assertEqual(self.tick(),'ready_for_trusted_delivery')
         self.assertEqual(len(self.backend.submissions),1)
+    def test_selected_contract_drift_rejected_before_dispatch(self):
+        self.enable()
+        with self.assertRaises(ValueError):tick(self.store,lambda key:self.controller,expected_contract_digest='a'*64)
+        self.assertEqual(self.backend.submissions,[])
+    def test_short_window_blocks_dispatch_but_preserves_terminal_acceptance(self):
+        self.enable()
+        self.assertEqual(tick(self.store,lambda key:self.controller,active_window_remaining=1199),'stopped_insufficient_execution_window')
+        self.controller.verifier=lambda contract,owner:{'contract_digest':self.journal.contract_digest}
+        self.tick();self.stop();self.tick()
+        self.assertEqual(tick(self.store,lambda key:self.controller,active_window_remaining=1),'ready_for_trusted_delivery')
+
     def test_missing_session_blocks_fresh_replacement(self):
         self.enable()
         self.backend.session_id = None

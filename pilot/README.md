@@ -114,3 +114,31 @@ verified. A literal Python no-model native-unit probe verified adoption of the
 same retained invocation after a lost submit response, without a second dispatch.
 This establishes an existing-unit recovery primitive, not Codex inference,
 boot recovery, an installed scheduler or GitHub delivery.
+
+
+## Bounded private wakeup jobs
+
+`private_worker.py` performs one transition per systemd invocation. Generated
+units pin its immutable bundle, use 45 seconds of runtime plus 5-second startup
+and shutdown limits, disable service restart, and wake every 30 seconds. The
+worker authenticates its native invocation and reads back the typed native
+timeout values before work. It stops its timer on faults and terminal states.
+An abruptly interrupted worker can be inspected by the next wakeup, using the
+same protected owner, journal and session rather than a new enrollment.
+
+`worker_window.py` never creates missing state on recovery. Its explicit
+approve-and-run importer requires the exact approved contract and a separately
+stated `worker_wall_seconds=3600`. This additional conservative lifetime counts
+waits and sleeps; it does not change D013 cumulative reservation accounting.
+Changed boot identity, missing state or backward clock observations block.
+Wakeups with 60 seconds or less remaining stop; new reservations require 1200
+seconds remaining. The native adapter rechecks this after qualification and
+capture preparation, immediately before dispatch, so a separate model cgroup
+cannot outlive the remaining window through a delayed launch.
+
+Host qualification found systemd 255 cannot mutate the runtime limit of an
+already running service. The implementation therefore uses fixed short jobs.
+A no-model native probe verified typed timeout readback and actual static timeout
+termination. These new worker modules and generated service/timer are not yet
+installed. The prior nine-module protected bundle remains in place, with no
+enabled outcome, scheduler or model call.

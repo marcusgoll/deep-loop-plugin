@@ -15,6 +15,7 @@ from admission import digest
 from native_session import MAX_CAPTURE_BYTES, session_from_capture
 from private_launch import ACCOUNT, ROOT
 from systemd_observer import observe_unit
+from worker_window import remaining
 
 
 def permission_digest(plan):
@@ -121,6 +122,11 @@ class NativeBackend:
         # package-resolution changes. No shared app-server daemon is used.
         command = [contract['executor']['path'], '--no-daemon', *plan['command'][1:]]
         command.insert(command.index('exec')+1, '--skip-git-repo-check')
+        # Model units occupy a separate cgroup. Require the entire charged
+        # active allowance still to fit after qualification, journal and capture
+        # writes; startup and shutdown are independently bounded by systemd.
+        if remaining(self.store,self.contract_digest) < plan['charged_active_seconds']:
+            raise ValueError('Insufficient immutable execution window before native dispatch')
         subprocess.run(args + command, capture_output=True, text=True, check=True, timeout=5)
         invocation = subprocess.run(['/usr/bin/systemctl', 'show', unit+'.service', '--property=InvocationID', '--value'],
                                     capture_output=True, text=True, check=True, timeout=5).stdout.strip()

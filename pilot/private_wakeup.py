@@ -8,7 +8,7 @@ from admission import LIMITS, digest
 from private_launch import launch_plan
 
 
-def tick(store, controller_factory):
+def tick(store, controller_factory, *, expected_contract_digest=None, active_window_remaining=None):
     try:
         enabled = store.read('enabled-outcome.json')
     except FileNotFoundError:
@@ -16,6 +16,8 @@ def tick(store, controller_factory):
     if set(enabled) != {'contract_digest'}:
         raise ValueError('Malformed explicit wakeup selection')
     contract_digest = enabled['contract_digest']
+    if expected_contract_digest is not None and contract_digest != expected_contract_digest:
+        raise ValueError('Enabled outcome changed during worker execution')
     approval = store.read(contract_digest + '.approval.json')
     contract = approval['contract']
     if digest(contract) != contract_digest or not approval['approval_ref']:
@@ -71,5 +73,7 @@ def tick(store, controller_factory):
         if session is None:
             # A missing session does not justify silently starting a fresh task.
             return 'blocked_missing_session'
+    if active_window_remaining is not None and active_window_remaining < schedule['active_seconds']:
+        return 'stopped_insufficient_execution_window'
     controller.start(run_id=len(attempts)+1, run_attempt=1, session_id=session, **schedule)
     return 'submitted_once'
