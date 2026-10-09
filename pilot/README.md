@@ -215,8 +215,11 @@ Sandbox and feature inspection reject `--strict-config`. Strict validation now
 uses a separate app-server startup with empty input, restricted networking and
 positive/unknown-field negative controls. Native preflight proved clean success
 and explicit unknown-field rejection. The full producer subsequently passed a disposable no-model fixture on the
-private host. Any successful-command diagnostic also blocks
-qualification.
+private host. Successful-command diagnostics block qualification except the
+exact single timestamped catalog-refresh task cancellation observed during
+no-client startup. That exception still requires native exit zero and empty
+stdout; raw stderr and its classification are retained. Additional lines or
+other errors remain failures, and the unknown-field negative control must pass.
 Probe and wrapper Python use isolated mode (`-I`) to prevent candidate module
 imports before sandboxing. The root producer keeps immutable intent on an
 uncertain submission and requires retained native identity and stopped-process

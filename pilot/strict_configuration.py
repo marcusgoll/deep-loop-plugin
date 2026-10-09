@@ -48,21 +48,39 @@ def validate_strict(store,plan,commands,unit_prefix,raw):
             with os.fdopen(fd,'rb') as stream:data=stream.read(65537)
             if len(data)>65536:raise ValueError('Strict probe diagnostic exceeds bound')
             captures[suffix]=data.decode()
-        validate_result(phase,native['ExecMainStatus'],captures['jsonl'],captures['stderr'])
+        diagnostic=validate_result(phase,native['ExecMainStatus'],captures['jsonl'],captures['stderr'])
         record={'phase':phase,'native':observation,'status':native['ExecMainStatus'],
                 'stdin_bytes':0,'stdout_bytes':len(captures['jsonl'].encode()),
-                'stderr_bytes':len(captures['stderr'].encode()),'network_denied_externally':True}
+                'stderr_bytes':len(captures['stderr'].encode()),'network_denied_externally':True,
+                'diagnostic_class':diagnostic}
         store.create(unit+'.strict-observation.json',record)
         subprocess.run(['/usr/bin/systemctl','stop',unit+'.service'],capture_output=True,text=True,check=True,timeout=5)
         records.append(record)
     return records
 
 
+def catalog_refresh_cancelled(stderr):
+    """Recognize only the pinned native startup cancellation seen on the host.
+
+    No client messages or model turns are sent by this strict probe; network is
+    separately denied. Preserve raw stderr and classify this one metadata-task
+    cancellation. Additional lines or other errors remain qualification failures.
+    """
+    plain=re.sub(r'\x1b\[[0-9;]*m','',stderr)
+    return re.fullmatch(
+        r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z '
+        r'ERROR codex_models_manager::manager: failed to refresh available models: '
+        r'task [1-9][0-9]* was cancelled\n?',plain) is not None
+
+
 def validate_result(phase,status,stdout,stderr):
     if stdout:raise ValueError('Unexpected strict parser output')
     if phase=='positive':
-        if status!='0' or stderr:raise ValueError('Strict positive control failed')
+        if status!='0' or (stderr and not catalog_refresh_cancelled(stderr)):
+            raise ValueError('Strict positive control failed')
+        return 'catalog_refresh_cancelled' if stderr else 'clean'
     elif phase=='unknown_override':
         if status!='1' or UNKNOWN not in stderr or not re.search(r'\b(?:unknown|unrecognized)\b',stderr.lower()):
             raise ValueError('Strict negative control did not reject unknown field')
+        return 'unknown_override_rejected'
     else:raise ValueError('Unknown strict parser phase')
