@@ -139,6 +139,20 @@ cannot outlive the remaining window through a delayed launch.
 Host qualification found systemd 255 cannot mutate the runtime limit of an
 already running service. The implementation therefore uses fixed short jobs.
 A no-model native probe verified typed timeout readback and actual static timeout
-termination. These new worker modules and generated service/timer are not yet
-installed. The prior nine-module protected bundle remains in place, with no
-enabled outcome, scheduler or model call.
+termination. The reviewed twelve-module worker bundle and generated service/timer are now
+installed privately. Native timeout values and immutable file hashes were
+verified. The timer remains disabled and inactive, with no enabled outcome or
+model call. The prior bundle is preserved.
+
+
+An empty-queue timer qualification verified a native trigger followed by failed
+enrollment condition, zero worker processes and no invocation identity. The timer
+was stopped afterward and remains disabled. This proves refusal without an
+enrolled outcome; it does not prove an enrolled execution or interruption run.
+
+`.github/workflows/pilot-verification.yml` provides fresh GitHub-hosted Python
+verification with read-only permissions, pinned actions and no retained checkout
+credentials. It has no private-host command gateway or model authentication.
+Repository settings currently disallow Actions-created PRs; trusted delivery
+must account for this without assuming a write-capable workflow or changing
+that setting. No delivery adapter is yet installed.
