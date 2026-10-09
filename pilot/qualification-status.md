@@ -11,6 +11,7 @@ and tested, but has not replaced the completed pilot's installed runtime.
 |---|---|---|
 | A01/A02 | Revocation source tests; isolated host stops two TERM-resistant Python writers; stale invocation, competing outcome and lock contender rejected; unrelated edits preserved. | Whole-outcome authority and ownership negative cases. |
 | A02/A08/A11 | Real local Git journal rejects stale publication; synchronized distinct and identical-attempt races each retain one winner and one charged reservation. | Remote-storage failure and remaining crash windows. |
+| A04/A08/A11 | Native cleanup controller receives SIGKILL after intent, stop proof and charged finish; fresh processes/workspaces reconcile each retained owner, preserve charges and edits, and produce independently reread ended/empty state. | Remaining acquisition/edit/verifier/provider fault windows. |
 | A04/A08/A10 | Completed bounded pilot preserves deadline/charges/session and delivers one verified draft; source tests cover uncertain submission and provider responses. | Remaining declared edit, verifier and provider fault-injection cases. |
 | A05/A06/A07/A09/A11 | Installed 0.5.11 helper passes 51 focused tests for graph validity, cancelled prerequisites, evidence/endpoint drift, failure propagation, independent checks and guarded completion. | Those helper controls are not yet proved through native host dependency dispatch or unavailable Mac-only branches. |
 | A03 | Successful host continuation after reviewed repairs. | A fully unattended approved outcome with the Mac connection absent. |
