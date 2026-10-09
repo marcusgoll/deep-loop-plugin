@@ -26,7 +26,7 @@ class GitHubAPI:
         if os.geteuid()!=0 or not (method=='GET' and any(re.fullmatch(pattern,route) for pattern in reads) or
                                    method=='POST' and route in writes):
             raise ValueError('Unapproved private publisher operation')
-        args=['sudo','-n','-H','-u','orchestrator','/usr/bin/env',
+        args=['/usr/sbin/runuser','-u','orchestrator','--','/usr/bin/env',
               '-u','GH_TOKEN','-u','GITHUB_TOKEN','-u','GH_ENTERPRISE_TOKEN',
               '-u','GITHUB_ENTERPRISE_TOKEN','-u','GH_HOST','-u','GH_CONFIG_DIR',
               '--chdir=/home/orchestrator','/usr/bin/gh','api','--hostname','github.com',

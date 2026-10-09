@@ -87,4 +87,15 @@ class NativeBackendTests(unittest.TestCase):
         with patch('native_backend.observe_unit',return_value=observation):
             self.assertIsNone(self.backend.observe(self.plan['unit'],'a'*32)[1])
 
+class AuthenticationCommandTests(unittest.TestCase):
+    def test_fixed_account_cwd_and_secret_overrides_cleared_without_sudo(self):
+        from native_backend import authentication_command
+        args=authentication_command('/fixed/candidate','/pinned/native')
+        self.assertEqual(args[:5],['/usr/sbin/runuser','-u','deep-loop-pilot','--','/usr/bin/env'])
+        self.assertEqual(args[-4:],['--chdir=/fixed/candidate','/pinned/native','login','status'])
+        for name in ('OPENAI_API_KEY','CODEX_API_KEY','CODEX_HOME','OPENAI_BASE_URL','NODE_OPTIONS'):
+            self.assertEqual(args[args.index(name)-1],'-u')
+        self.assertFalse(any(value.startswith('HOME=') for value in args))
+
+
 if __name__ == '__main__': unittest.main()

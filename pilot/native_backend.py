@@ -28,6 +28,15 @@ def permission_digest(plan):
                    'ignore_rules': '--ignore-rules' in command})
 
 
+def authentication_command(candidate, binary):
+    # runuser establishes the account's HOME without sudo's writable policy/log
+    # requirements, which fail under the trusted worker's ProtectSystem=strict.
+    return ['/usr/sbin/runuser', '-u', ACCOUNT, '--', '/usr/bin/env',
+            '-u', 'OPENAI_API_KEY', '-u', 'CODEX_API_KEY', '-u', 'CODEX_HOME',
+            '-u', 'OPENAI_BASE_URL', '-u', 'NODE_OPTIONS',
+            '--chdir='+str(candidate), str(binary), 'login', 'status']
+
+
 class NativeBackend:
     def __init__(self, store, contract_digest):
         self.store, self.contract_digest = store, contract_digest
@@ -69,8 +78,7 @@ class NativeBackend:
         processes = subprocess.run(['/usr/bin/pgrep', '-u', str(account.pw_uid)], capture_output=True, text=True, timeout=5)
         if processes.returncode != 1:
             raise ValueError('Private identity has another process or unavailable ownership evidence')
-        authentication = subprocess.run(['sudo', '-n', '-H', '-u', ACCOUNT, '/usr/bin/env',
-                                         '--chdir='+str(candidate), str(binary), 'login', 'status'],
+        authentication = subprocess.run(authentication_command(candidate, binary),
                                         capture_output=True, text=True, timeout=5)
         if authentication.returncode != 0 or 'Logged in using ChatGPT' not in authentication.stdout + authentication.stderr:
             raise ValueError('Private account ChatGPT authentication unavailable')
