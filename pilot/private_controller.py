@@ -207,11 +207,14 @@ class PrivateController:
             if observation.get('invocation_id') != invocation:
                 raise ValueError('Native invocation changed or unavailable')
             proof = {k: observation.get(k) for k in ('unit', 'active_state', 'cgroup_empty', 'ownership_verified')}
+            if 'execution_finished' in observation:
+                proof['execution_finished'] = observation['execution_finished']
             if last['status'] == 'reserved':
                 action = recovery_action(journal, self.contract_digest, proof)
             else:
                 action = ('reconcile_without_refund' if proof['unit'] == owner['unit'] and
-                          proof['active_state'] in {'inactive', 'failed'} and
+                          (proof['active_state'] in {'inactive', 'failed'} or
+                           proof['active_state'] == 'active' and proof.get('execution_finished') is True) and
                           proof['cgroup_empty'] is True and proof['ownership_verified'] is True
                           else 'blocked_missing_ownership_proof')
             if action != 'reconcile_without_refund':

@@ -39,6 +39,11 @@ class PrivateLaunchTests(unittest.TestCase):
         journal = reserve(initialize(D), D, run_id=1, run_attempt=1, model_seconds=15, active_seconds=15)
         with self.assertRaises(ValueError):
             launch_plan(journal, D, run_id=1, run_attempt=1)
+    def test_retained_native_exit_can_reconcile_without_relaunch(self):
+        observation = {'unit':self.plan()['unit'],'active_state':'active','cgroup_empty':True,'ownership_verified':True,'execution_finished':True}
+        self.assertEqual(recovery_action(self.journal,D,observation),'reconcile_without_refund')
+        observation['execution_finished']=False
+        self.assertEqual(recovery_action(self.journal,D,observation),'wait_for_predecessor')
     def test_recovery_requires_inactive_empty_owned_cgroup(self):
         observation = {'unit': self.plan()['unit'], 'active_state': 'failed', 'cgroup_empty': True, 'ownership_verified': True}
         self.assertEqual(recovery_action(self.journal, D, observation), 'reconcile_without_refund')

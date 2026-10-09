@@ -123,7 +123,7 @@ class NativeBackend:
         if owner['contract_digest'] != self.contract_digest or owner['unit'] != unit:
             raise ValueError('Capture has no matching protected ownership')
         observed = observe_unit(unit, invocation)
-        if observed['active_state'] not in {'inactive', 'failed'} or not observed['cgroup_empty']:
+        if observed.get('execution_finished') is not True:
             return observed, None
         fd = self.store._open(unit+'.jsonl', os.O_RDONLY)
         with os.fdopen(fd, 'rb') as stream:

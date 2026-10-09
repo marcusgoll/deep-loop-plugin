@@ -7,7 +7,7 @@ from private_launch import ACCOUNT
 
 UNIT = re.compile(r'deep-loop-pilot-[0-9a-f]{64}-[1-9][0-9]*-[1-9][0-9]*\Z')
 PROPERTIES = ('LoadState', 'ActiveState', 'InvocationID', 'User', 'Group',
-              'KillMode', 'Restart', 'Slice', 'ControlGroup')
+              'KillMode', 'Restart', 'Slice', 'ControlGroup', 'SubState', 'MainPID', 'RemainAfterExit')
 
 
 def observe_unit(unit, invocation_id, *, run=subprocess.run, cgroup_root=Path('/sys/fs/cgroup')):
@@ -36,7 +36,9 @@ def observe_unit(unit, invocation_id, *, run=subprocess.run, cgroup_root=Path('/
             values['Group'] != ACCOUNT or values['KillMode'] != 'control-group' or
             values['Restart'] != 'no' or values['Slice'] != 'system.slice'):
         raise ValueError('Native ownership or invocation unavailable/changed')
-    inactive = values['ActiveState'] in {'inactive', 'failed'}
+    retained_exit = (values['ActiveState'] == 'active' and values['SubState'] == 'exited'
+                     and values['MainPID'] == '0' and values['RemainAfterExit'] == 'yes')
+    inactive = values['ActiveState'] in {'inactive', 'failed'} or retained_exit
     if values['ControlGroup'] != expected_cgroup and not (inactive and values['ControlGroup'] == ''):
         raise ValueError('Unexpected native control group')
     path = cgroup_root / expected_cgroup.lstrip('/')
@@ -52,4 +54,4 @@ def observe_unit(unit, invocation_id, *, run=subprocess.run, cgroup_root=Path('/
             raise ValueError('Missing kernel population evidence')
         empty = True
     return {'unit': unit, 'invocation_id': invocation_id, 'active_state': values['ActiveState'],
-            'cgroup_empty': empty, 'ownership_verified': True}
+            'cgroup_empty': empty, 'ownership_verified': True, 'execution_finished': inactive and empty}

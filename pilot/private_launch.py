@@ -60,7 +60,7 @@ def launch_plan(journal, contract_digest, *, run_id, run_attempt, session_id=Non
                            'WorkingDirectory': candidate, 'SetLoginEnvironment': 'yes',
                            'RuntimeMaxSec': runtime, 'TimeoutStopSec': STOP_SECONDS,
                            'KillMode': 'control-group', 'SendSIGKILL': 'yes',
-                           'Restart': 'no', 'NoNewPrivileges': 'yes', 'UMask': '0077'},
+                           'Restart': 'no', 'RemainAfterExit': 'yes', 'NoNewPrivileges': 'yes', 'UMask': '0077'},
             'charged_model_seconds': item['model_seconds'],
             'charged_active_seconds': item['active_seconds'],
             'controller_overhead_seconds': OVERHEAD_SECONDS,
@@ -78,10 +78,13 @@ def recovery_action(journal, contract_digest, observation):
         return 'no_reserved_attempt'
     item = journal['attempts'][-1]
     plan = launch_plan(journal, contract_digest, run_id=item['run_id'], run_attempt=item['run_attempt'])
-    if not isinstance(observation, dict) or set(observation) != {'unit', 'active_state', 'cgroup_empty', 'ownership_verified'}:
+    fields = {'unit', 'active_state', 'cgroup_empty', 'ownership_verified'}
+    if not isinstance(observation, dict) or set(observation) not in (fields, fields | {'execution_finished'}):
         return 'blocked_missing_ownership_proof'
     if observation['unit'] != plan['unit'] or observation['ownership_verified'] is not True:
         return 'blocked_missing_ownership_proof'
-    if observation['active_state'] not in {'inactive', 'failed'} or observation['cgroup_empty'] is not True:
+    stopped = observation['active_state'] in {'inactive', 'failed'} or (
+        observation['active_state'] == 'active' and observation.get('execution_finished') is True)
+    if not stopped or observation['cgroup_empty'] is not True:
         return 'wait_for_predecessor'
     return 'reconcile_without_refund'

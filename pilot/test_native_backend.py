@@ -28,7 +28,7 @@ class NativeBackendTests(unittest.TestCase):
         self.store.create('active-owner.json', self.owner)
     def native_observation(self):
         return {'unit':self.plan['unit'],'invocation_id':'a'*32,'active_state':'inactive',
-                'cgroup_empty':True,'ownership_verified':True}
+                'cgroup_empty':True,'ownership_verified':True,'execution_finished':True}
     def test_unqualified_submission_creates_no_capture(self):
         with self.assertRaises(ValueError): self.backend.submit(self.plan,self.contract)
         self.assertFalse(list(self.store.root.glob('*.jsonl')))
@@ -61,7 +61,7 @@ class NativeBackendTests(unittest.TestCase):
         self.assertEqual(session,SESSION)
         self.assertTrue(observed['cgroup_empty'])
     def test_active_capture_is_not_finalized(self):
-        observation=dict(self.native_observation(),active_state='active',cgroup_empty=False)
+        observation=dict(self.native_observation(),active_state='active',cgroup_empty=False,execution_finished=False)
         with patch('native_backend.observe_unit',return_value=observation):
             self.assertIsNone(self.backend.observe(self.plan['unit'],'a'*32)[1])
 

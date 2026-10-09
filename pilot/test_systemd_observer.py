@@ -17,7 +17,8 @@ class SystemdObserverTests(unittest.TestCase):
         (self.group/'cgroup.events').write_text('populated 0\nfrozen 0\n')
         self.values = {'LoadState': 'loaded', 'ActiveState': 'inactive', 'InvocationID': INVOCATION,
                        'User': 'deep-loop-pilot', 'Group': 'deep-loop-pilot', 'KillMode': 'control-group',
-                       'Restart': 'no', 'Slice': 'system.slice', 'ControlGroup': ''}
+                       'Restart': 'no', 'Slice': 'system.slice', 'ControlGroup': '',
+                       'SubState': 'dead', 'MainPID': '0', 'RemainAfterExit': 'no'}
     def observe(self):
         def native(args, **kwargs):
             return subprocess.CompletedProcess(args, 0, stdout='\n'.join(k+'='+v for k,v in self.values.items()))
@@ -41,6 +42,14 @@ class SystemdObserverTests(unittest.TestCase):
             self.values[key] = value
             with self.assertRaises(ValueError): self.observe()
             self.values[key] = previous
+    def test_retained_success_requires_exited_main_process_and_empty_cgroup(self):
+        self.values.update(ActiveState='active',SubState='exited',MainPID='0',RemainAfterExit='yes')
+        self.assertTrue(self.observe()['execution_finished'])
+        (self.group/'cgroup.events').write_text('populated 1\n')
+        self.assertFalse(self.observe()['execution_finished'])
+        (self.group/'cgroup.events').write_text('populated 0\n')
+        self.values['MainPID']='123'
+        with self.assertRaises(ValueError): self.observe()
     def test_missing_population_file_is_not_empty(self):
         (self.group/'cgroup.events').unlink()
         with self.assertRaises(ValueError): self.observe()
