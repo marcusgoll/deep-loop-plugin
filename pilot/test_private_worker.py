@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 import test_private_controller as fixtures
 from private_worker import run,qualify_service
+from github_transport import UncertainAPI
 from worker_units import units
 
 class WorkerTests(unittest.TestCase):
@@ -23,6 +24,21 @@ class WorkerTests(unittest.TestCase):
         with patch('private_worker.tick') as tick:
             self.assertEqual(run(self.store,lambda key:self.controller,window=lambda *a:60),'stopped_execution_window')
             tick.assert_not_called()
+    def test_delivery_transition_is_invoked_only_after_acceptance(self):
+        from unittest.mock import Mock
+        adapter=Mock();adapter.step.return_value='wait_for_trusted_delivery'
+        with patch('private_worker.tick',return_value='ready_for_trusted_delivery'):
+            self.assertEqual(run(self.store,lambda key:self.controller,window=lambda *a:2000,
+                                 delivery_factory=lambda key:adapter),'wait_for_trusted_delivery')
+        adapter.step.assert_called_once()
+    def test_uncertain_delivery_waits_without_replaying_inside_job(self):
+        from unittest.mock import Mock
+        adapter=Mock();adapter.step.side_effect=UncertainAPI('Unknown response')
+        with patch('private_worker.tick',return_value='ready_for_trusted_delivery'):
+            self.assertEqual(run(self.store,lambda key:self.controller,window=lambda *a:2000,
+                                 delivery_factory=lambda key:adapter),'wait_for_trusted_delivery')
+        adapter.step.assert_called_once()
+
     def test_requires_native_service_identity(self):
         with patch.dict('os.environ',{},clear=True),patch('private_worker.subprocess.run') as process:
             with self.assertRaises(ValueError):qualify_service()

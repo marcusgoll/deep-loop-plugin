@@ -18,12 +18,15 @@ from private_controller import PrivateController, TrustedStore
 from private_launch import ACCOUNT, ROOT
 from private_wakeup import tick
 from worker_window import remaining
+from trusted_delivery import TrustedDelivery
+from github_transport import GitHubAPI, UncertainAPI
+from delivery_artifact import DeliveryArtifact
 
 TIMER = 'deep-loop-private-worker.timer'
 WORKER_SECONDS = 60
 
 
-def run(store, factory, *, window=remaining):
+def run(store, factory, *, window=remaining, delivery_factory=None):
     enabled = store.read('enabled-outcome.json')
     if set(enabled) != {'contract_digest'}:
         raise ValueError('Malformed approved worker selection')
@@ -33,7 +36,11 @@ def run(store, factory, *, window=remaining):
     # fit before even a reconciliation wakeup starts. No timer resets the window.
     if left <= WORKER_SECONDS:
         return 'stopped_execution_window'
-    return tick(store,factory,expected_contract_digest=key,active_window_remaining=left)
+    result=tick(store,factory,expected_contract_digest=key,active_window_remaining=left)
+    if result=='ready_for_trusted_delivery' and delivery_factory is not None:
+        try:return delivery_factory(key).step()
+        except UncertainAPI:return 'wait_for_trusted_delivery'
+    return result
 
 
 def qualify_service():
@@ -68,9 +75,13 @@ def main():
         backend = NativeBackend(store,key)
         verifier = ArtifactVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid)
         return PrivateController(store,journal,backend,verifier)
+    def delivery_factory(key):
+        journal=GitJournal(control/'journal-work',str(control/'journal.git'),key)
+        reader=DeliveryArtifact(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid)
+        return TrustedDelivery(store,journal,GitHubAPI(),reader)
     try:
         qualify_service()
-        result = run(store,factory)
+        result = run(store,factory,delivery_factory=delivery_factory)
         print(json.dumps({'terminal':result}),flush=True)
     except Exception:
         # Faults require trusted inspection; recurring wakeups cannot conceal a
@@ -78,7 +89,7 @@ def main():
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
         raise
     if result not in {'submitted_once','wait_for_predecessor','finished_without_verified_progress',
-                      'finished_with_verified_progress'}:
+                      'finished_with_verified_progress','wait_for_trusted_delivery'}:
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
 
 

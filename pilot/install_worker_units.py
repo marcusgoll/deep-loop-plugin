@@ -29,7 +29,7 @@ def native(*args):
     return subprocess.run(['/usr/bin/systemctl',*args],capture_output=True,text=True,check=True,timeout=10).stdout.strip()
 
 
-def apply(bundle_digest, expected_digest):
+def apply(bundle_digest, expected_digest, previous_digest=None):
     expected = plan(bundle_digest)
     if os.geteuid()!=0 or sys.platform!='linux' or digest(expected)!=expected_digest:
         raise ValueError('Explicit root Linux exact reviewed unit plan required')
@@ -53,10 +53,33 @@ def apply(bundle_digest, expected_digest):
             info=parent.lstat()
             if parent.resolve()!=parent or not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_mode&0o022:
                 raise ValueError('Untrusted system unit directory')
+        previous=None
+        if previous_digest is not None:
+            previous=store.read(previous_digest+'.units.json')
+            if digest(previous)!=previous_digest or set(previous['units'])!=set(expected['units']):
+                raise ValueError('Previous protected unit authority changed')
         for name in expected['units']:
             path=SYSTEM_UNITS/name
-            if path.exists() or path.is_symlink() or native('show',name,'--property=LoadState','--value')!='not-found':
-                raise ValueError('Existing or partial worker installation requires inspection')
+            if previous is None:
+                if path.exists() or path.is_symlink() or native('show',name,'--property=LoadState','--value')!='not-found':
+                    raise ValueError('Existing or partial worker installation requires inspection')
+            else:
+                info=path.lstat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or stat.S_IMODE(info.st_mode)!=0o644 or info.st_nlink!=1 or
+                        hashlib.sha256(path.read_bytes()).hexdigest()!=previous['sha256'][name] or
+                        native('show',name,'--property=LoadState','--value')!='loaded' or
+                        native('show',name,'--property=ActiveState','--value')!='inactive'):
+                    raise ValueError('Installed units changed or active; upgrade blocked')
+        if previous is not None:
+            timer=subprocess.run(['/usr/bin/systemctl','is-enabled','deep-loop-private-worker.timer'],capture_output=True,text=True,timeout=5)
+            if timer.returncode!=1 or timer.stdout.strip()!='disabled':
+                raise ValueError('Upgrade requires disabled timer')
+            # Preserve exact old configuration before changing either file.
+            backup={'previous_plan_digest':previous_digest,'units':previous['units'],'sha256':previous['sha256']}
+            name=previous_digest+'.units-backup.json'
+            try:store.create(name,backup)
+            except FileExistsError:
+                if store.read(name)!=backup:raise ValueError('Changed protected unit backup')
         # Validate the exact generated unit sources before publishing either.
         staging=CONTROL/('units-staging-'+expected_digest)
         staging.mkdir(mode=0o700);store._sync()
@@ -70,9 +93,18 @@ def apply(bundle_digest, expected_digest):
             try:
                 with os.fdopen(fd,'wb') as stream:
                     stream.write(data.encode());stream.flush();os.fchmod(stream.fileno(),0o644);os.fsync(stream.fileno())
-                os.link(temporary,SYSTEM_UNITS/name,follow_symlinks=False)
+                if previous is None:os.link(temporary,SYSTEM_UNITS/name,follow_symlinks=False)
+                else:
+                    # Trusted root writers must also respect credential-stream.lock;
+                    # rename has no filesystem compare-and-swap primitive.
+                    destination=SYSTEM_UNITS/name;current=destination.lstat()
+                    if (not stat.S_ISREG(current.st_mode) or current.st_uid!=0 or
+                            stat.S_IMODE(current.st_mode)!=0o644 or current.st_nlink!=1 or
+                            hashlib.sha256(destination.read_bytes()).hexdigest()!=previous['sha256'][name]):
+                        raise ValueError('Unit changed before replacement; upgrade blocked')
+                    os.replace(temporary,destination)
             finally:
-                os.unlink(temporary)
+                if os.path.exists(temporary):os.unlink(temporary)
         fd=os.open(SYSTEM_UNITS,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         try:os.fsync(fd)
         finally:os.close(fd)
@@ -95,10 +127,11 @@ if __name__=='__main__':
     parser.add_argument('bundle_digest')
     parser.add_argument('--apply',action='store_true')
     parser.add_argument('--expected-digest')
+    parser.add_argument('--previous-digest')
     args=parser.parse_args()
     if args.apply:
         if not args.expected_digest:parser.error('--apply requires reviewed --expected-digest')
-        result=apply(args.bundle_digest,args.expected_digest)
+        result=apply(args.bundle_digest,args.expected_digest,args.previous_digest)
     else:
         result=plan(args.bundle_digest)
     print(json.dumps({'plan_digest':digest(result),'plan':result},indent=2))

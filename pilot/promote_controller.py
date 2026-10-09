@@ -19,7 +19,8 @@ CONTROL = Path(ROOT)/'control'
 MODULES = ('admission.py', 'git_journal.py', 'private_launch.py',
            'private_controller.py', 'systemd_observer.py', 'native_session.py',
            'native_backend.py', 'artifact_verifier.py', 'private_wakeup.py',
-           'worker_window.py', 'private_worker.py', 'worker_units.py')
+           'worker_window.py', 'private_worker.py', 'worker_units.py',
+           'trusted_delivery.py', 'github_transport.py', 'delivery_artifact.py')
 
 
 def plan():

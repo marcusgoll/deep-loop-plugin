@@ -1,6 +1,6 @@
 # Disposable pilot admission prerequisite
 
-Locally tested prerequisite, not an enrolled unattended runner. Public project: marcusgoll/deep-loop-plugin. Execution is selected for a dedicated trusted private homelab lane using ChatGPT-managed Codex Pro authentication; GitHub Actions handles verification and delivery. The public repository is not a Codex credential host. No workflow, timer, model call, remote journal branch or live enrollment is installed.
+Locally tested prerequisite, not an enrolled unattended runner. Public project: marcusgoll/deep-loop-plugin. Execution is selected for a dedicated trusted private homelab lane using ChatGPT-managed Codex Pro authentication; GitHub Actions handles verification and delivery. The public repository is not a Codex credential host. Read-only hosted verification and disabled private worker units are installed. No model call or live enrollment has occurred.
 
 `admission.py` charges full timeout allowances before launch. Fixed approved limits: 3 attempts, 1800 cumulative model seconds, 3600 cumulative active seconds, stop after 2 consecutive attempts without verified progress. Reservations never refund after interruption; conservative charging may stop earlier than measured usage. Missing journals cannot implicitly reinitialize. Duplicate run/attempt identities and unreconciled predecessors block launch.
 
@@ -156,3 +156,31 @@ credentials. It has no private-host command gateway or model authentication.
 Repository settings currently disallow Actions-created PRs; trusted delivery
 must account for this without assuming a write-capable workflow or changing
 that setting. No delivery adapter is yet installed.
+
+
+## Trusted delivery adapter
+
+`trusted_delivery.py` accepts only independent artifact evidence from a stopped
+writer with released ownership. It exports one bounded artifact, creates
+content-addressed Git objects, and binds the draft PR to the frozen source,
+repository, publisher and exact head. Protected intent records prevent blind
+replay of uncertain branch or PR creation. Exact hosted check and workflow-run
+readback is required before delivery completes. No merge or deployment is
+provided.
+
+`github_transport.py` uses the existing private publisher authentication through
+a finite set of GitHub routes. Private read-only preflight verified the publisher
+and repository identities. It does not establish write authorization or a live
+publication. The final approve-and-run contract must explicitly include this
+private publisher method and the additional 3600-second worker wall limit.
+
+The source has 89 passing local tests, including uncertain-write adoption,
+changed candidate rejection and exact-head delivery checks. Live Pro inference,
+boot recovery and disposable delivery remain unverified.
+
+`install_worker_units.py --previous-digest` permits a disabled, unenrolled
+upgrade only from matching protected unit authority. It preserves the exact old
+configuration, validates the replacement, fsyncs it and checks inactive/disabled
+readback. Partial or changed installations require inspection. It never starts
+or enables the timer. Other trusted root installers must respect the same
+installation lock; filesystem replacement does not provide compare-and-swap.
