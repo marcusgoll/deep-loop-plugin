@@ -1,1 +1,5 @@
 .bak
+
+# Python helper runtime caches are not source artifacts.
+__pycache__/
+*.py[cod]

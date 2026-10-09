@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Design extension of an existing Verification Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "design_id",
+    "status",
+    "approved_by",
+    "approved_at",
+    "approval",
+    "references",
+    "canonical_viewports",
+    "critical_invariants",
+    "required_states",
+    "allowed_interpolation",
+    "requires_design_approval",
+    "verification",
+    "verification_sha256"
+  ],
+  "properties": {
+    "verification_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "design_id": {
+      "$ref": "#/$defs/text"
+    },
+    "status": {
+      "enum": [
+        "specified",
+        "approved"
+      ]
+    },
+    "approved_by": {
+      "$ref": "#/$defs/text"
+    },
+    "approved_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "approval": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/file"
+        },
+        {
+          "properties": {
+            "role": {
+              "const": "owner"
+            }
+          },
+          "required": [
+            "role"
+          ]
+        }
+      ]
+    },
+    "references": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "allOf": [
+          {
+            "$ref": "#/$defs/file"
+          },
+          {
+            "required": [
+              "id",
+              "role",
+              "origin"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/$defs/text"
+              },
+              "role": {
+                "enum": [
+                  "target",
+                  "research"
+                ]
+              },
+              "origin": {
+                "enum": [
+                  "product-design",
+                  "owner-supplied",
+                  "established",
+                  "mobbin"
+                ]
+              },
+              "rationale": {
+                "$ref": "#/$defs/text"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "canonical_viewports": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "width",
+          "height",
+          "device_scale_factor",
+          "conditions"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/$defs/text"
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "device_scale_factor": {
+            "type": "number",
+            "exclusiveMinimum": 0
+          },
+          "conditions": {
+            "type": "object",
+            "minProperties": 1
+          }
+        }
+      }
+    },
+    "critical_invariants": {
+      "$ref": "#/$defs/texts"
+    },
+    "required_states": {
+      "$ref": "#/$defs/texts"
+    },
+    "allowed_interpolation": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/text"
+      }
+    },
+    "requires_design_approval": {
+      "$ref": "#/$defs/texts"
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "visual",
+        "responsive",
+        "behavior",
+        "accessibility"
+      ],
+      "properties": {
+        "visual": {
+          "$ref": "#/$defs/texts"
+        },
+        "responsive": {
+          "$ref": "#/$defs/texts"
+        },
+        "behavior": {
+          "$ref": "#/$defs/texts"
+        },
+        "accessibility": {
+          "$ref": "#/$defs/texts"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "text": {
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "texts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/text"
+      }
+    },
+    "file": {
+      "type": "object",
+      "required": [
+        "path",
+        "sha256"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/text"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    }
+  }
+}
