@@ -6,14 +6,19 @@ import stat
 from admission import digest
 from artifact_verifier import ArtifactVerifier
 from trusted_delivery import ARTIFACT
+from resume_verifier import validate_resume_acceptance
 
 
 class DeliveryArtifact:
-    def __init__(self,candidate,owner_uid):
+    def __init__(self,candidate,owner_uid,store=None):
         self.candidate,self.owner_uid=Path(candidate),owner_uid
+        self.store=store
     def __call__(self,contract,evidence):
         fresh=ArtifactVerifier(self.candidate,self.owner_uid)(contract,{'contract_digest':digest(contract)})
         if fresh!=evidence:raise ValueError('Stopped candidate acceptance changed before export')
+        if 'resume_verification' in contract:
+            if self.store is None:raise ValueError('Protected resume acceptance unavailable')
+            validate_resume_acceptance(contract,evidence,self.store)
         fd=os.open(self.candidate,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
         try:
             for part in ARTIFACT.split('/')[:-1]:

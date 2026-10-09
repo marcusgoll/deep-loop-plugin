@@ -11,7 +11,7 @@ import re
 import subprocess
 
 from admission import digest
-from artifact_verifier import ArtifactVerifier
+from resume_verifier import ResumeVerifier
 from git_journal import GitJournal
 from native_backend import NativeBackend
 from private_controller import PrivateController, TrustedStore
@@ -73,11 +73,11 @@ def main():
             raise ValueError('Worker approval changed')
         journal = GitJournal(control/'journal-work',str(control/'journal.git'),key)
         backend = NativeBackend(store,key)
-        verifier = ArtifactVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid)
+        verifier = ResumeVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store)
         return PrivateController(store,journal,backend,verifier)
     def delivery_factory(key):
         journal=GitJournal(control/'journal-work',str(control/'journal.git'),key)
-        reader=DeliveryArtifact(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid)
+        reader=DeliveryArtifact(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store)
         return TrustedDelivery(store,journal,GitHubAPI(),reader)
     try:
         qualify_service()

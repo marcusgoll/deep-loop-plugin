@@ -66,6 +66,48 @@ class DeliveryTests(unittest.TestCase):
         self.fail('Unexpected endpoint '+route)
     def advance(self,count):
         for _ in range(count):self.assertEqual(self.delivery.step(),'wait_for_trusted_delivery')
+    def configure_resume(self):
+        self.contract['resume_verification']={'checkpoint_path':'checkpoint.txt','checkpoint_sha256':'f'*64}
+        self.key=digest(self.contract)
+        self.evidence['contract_digest']=self.key
+        self.store.create(self.key+'.approval.json',{'contract':self.contract,'approval_ref':'human-fixture'})
+        self.store.create(digest(self.evidence)+'.progress.json',self.evidence)
+        self.journal=Journal(self.contract,self.evidence)
+        sid='11111111-1111-4111-8111-111111111111'
+        sessions=[]
+        for unit,invocation,requested in [('first','1'*32,None),('second','2'*32,sid)]:
+            owner={'contract_digest':self.key,'unit':unit,'session_id':requested}
+            session={'contract_digest':self.key,'unit':unit,'invocation_id':invocation,'session_id':sid}
+            self.store.create(unit+'.invocation.json',{'owner':owner,'invocation_id':invocation})
+            self.store.create(unit+'.session.json',session)
+            sessions.append(session)
+        checkpoint={'session':sessions[0],'checkpoint_sha256':'f'*64}
+        self.proof={'checkpoint':checkpoint,'resumed_session':sessions[1],'evidence':self.evidence}
+        self.store.create(self.key+'.checkpoint.json',checkpoint)
+        self.store.create(self.key+'.resume-acceptance.json',self.proof)
+        self.delivery=TrustedDelivery(self.store,self.journal,self.api,lambda *a:self.data)
+
+    def test_resume_proof_removal_after_blob_blocks_every_provider_operation(self):
+        self.configure_resume();self.advance(2)
+        self.store.remove(self.key+'.resume-acceptance.json')
+        self.calls.clear()
+        with self.assertRaises(FileNotFoundError):self.delivery.step()
+        self.assertEqual(self.calls,[])
+
+    def test_resume_session_corruption_after_blob_blocks_delivery(self):
+        self.configure_resume();self.advance(2)
+        session=self.store.read('second.session.json')
+        session['session_id']='22222222-2222-4222-8222-222222222222'
+        self.store.remove('second.session.json');self.store.create('second.session.json',session)
+        self.calls.clear()
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertEqual(self.calls,[])
+
+    def test_complete_delivery_retains_resume_proof_digest(self):
+        self.configure_resume();self.advance(6)
+        self.assertEqual(self.delivery.step(),'delivered_verified_draft')
+        self.assertEqual(self.delivery._record('complete')['resume_acceptance_digest'],digest(self.proof))
+
     def test_incremental_exact_draft_delivery_and_current_readback(self):
         self.advance(6)
         self.assertEqual(self.delivery.step(),'delivered_verified_draft')

@@ -9,6 +9,7 @@ import hashlib
 import re
 from urllib.parse import urlencode
 
+from resume_verifier import validate_resume_acceptance
 from admission import digest
 
 REPOSITORY = 'marcusgoll/deep-loop-plugin'
@@ -80,6 +81,8 @@ class TrustedDelivery:
                     not re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',delivery['commit_date']) or
                     any(not isinstance(delivery[k],str) or not delivery[k] or len(delivery[k])>4096 for k in ('title','body'))):
                 raise ValueError('Unsupported frozen delivery endpoint')
+            resume_proof = (validate_resume_acceptance(contract,evidence,self.store)
+                            if 'resume_verification' in contract else None)
             base=sha(delivery['source_sha'])
             publisher=self.api('GET','user',None)
             if publisher.get('login')!='marcusgoll' or publisher.get('id')!=delivery['publisher_id']:
@@ -159,6 +162,7 @@ class TrustedDelivery:
             final=self._call('GET','pulls/'+str(number));self._pr(final,head,delivery)
             receipt={'contract_digest':self.key,'progress_receipt':progress,'head_sha':head,
                      'base_sha':base,'pull_request':final['html_url'],'workflow_run':int(qualifying[0])}
+            if resume_proof is not None:receipt['resume_acceptance_digest']=resume_proof
             previous=self._record('complete')
             if previous is None:self._save('complete',receipt)
             elif previous!=receipt:raise ValueError('Delivery completion drift')

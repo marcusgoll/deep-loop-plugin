@@ -233,3 +233,15 @@ occurred. Qualification must be repeated for the final frozen outcome.
 Parent `ENOENT` is accepted only with independently retained target existence
 and a different child PID namespace. Missing paths alone remain insufficient.
 Failed diagnostic fixtures and their native identities were preserved.
+
+
+For an explicitly frozen `resume_verification` contract, the disposable worker
+uses `ResumeVerifier`: the first stopped invocation must produce only the exact
+temporary checkpoint. Its protected observation counts as no progress and keeps
+the charged budget. Final acceptance requires a distinct native invocation,
+explicitly requested and observed with the same canonical session UUID, the
+checkpoint removed, and the exact final artifact. The protected native receipts
+and acceptance are re-read before every delivery transition; completion includes
+the resume-proof digest. Contracts without this field retain artifact-only
+acceptance. These tests use fixture backends and do not establish live inference
+or native recovery. Preparation adds no enrollment or timer activation.
