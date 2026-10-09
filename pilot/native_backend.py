@@ -71,7 +71,7 @@ class NativeBackend:
             info = path.lstat()
             if not stat.S_ISDIR(info.st_mode) or info.st_uid != account.pw_uid or info.st_gid != account.pw_gid or stat.S_IMODE(info.st_mode) != 0o700:
                 raise ValueError('Private account directory ownership drift')
-        inspect_candidate(candidate,account.pw_uid)
+        inspect_candidate(candidate,account.pw_uid,allow_runtime_guards=plan['session_id'] is not None)
         require_absent(configuration_paths(candidate,account.pw_dir))
         # No other process may own this private credential stream outside the
         # controller. The no-model preflight must run before a model unit starts.

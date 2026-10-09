@@ -73,11 +73,11 @@ def main():
             raise ValueError('Worker approval changed')
         journal = GitJournal(control/'journal-work',str(control/'journal.git'),key)
         backend = NativeBackend(store,key)
-        verifier = ResumeVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store)
+        verifier = ResumeVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
         return PrivateController(store,journal,backend,verifier)
     def delivery_factory(key):
         journal=GitJournal(control/'journal-work',str(control/'journal.git'),key)
-        reader=DeliveryArtifact(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store)
+        reader=DeliveryArtifact(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
         return TrustedDelivery(store,journal,GitHubAPI(),reader)
     try:
         qualify_service()

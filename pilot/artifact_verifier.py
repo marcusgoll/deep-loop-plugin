@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 import stat
 
 from admission import digest, initialize
+from qualification_environment import empty_runtime_guard
 
 MAX_BYTES = 16 * 1024 * 1024
 MAX_FILES = 4096
@@ -24,9 +25,10 @@ def _path(value):
 
 
 class ArtifactVerifier:
-    def __init__(self, candidate, owner_uid):
+    def __init__(self, candidate, owner_uid, *, allow_runtime_guards=False):
         self.candidate = Path(candidate)
         self.owner_uid = owner_uid
+        self.allow_runtime_guards = allow_runtime_guards
 
     def __call__(self, contract, owner):
         contract_digest = digest(contract)
@@ -68,6 +70,8 @@ class ArtifactVerifier:
             if info.st_uid != self.owner_uid or not stat.S_ISDIR(info.st_mode):
                 raise ValueError('Foreign candidate directory')
             for name in bounded_names(fd):
+                if self.allow_runtime_guards and not prefix and empty_runtime_guard(fd, name, self.owner_uid):
+                    continue
                 path = _path(prefix + name)
                 before = os.stat(name, dir_fd=fd, follow_symlinks=False)
                 if stat.S_ISDIR(before.st_mode):
