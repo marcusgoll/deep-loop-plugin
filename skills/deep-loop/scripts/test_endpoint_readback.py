@@ -62,6 +62,25 @@ class EndpointReadbackTests(unittest.TestCase):
         moved=self.root/'relocated';shutil.move(archive,moved);deep_loop.verify_archive(moved)
         evidence=self.root/'closeout.txt';evidence.write_text('Selected checkpoint retired')
         self.assertEqual(deep_loop.finalize_archive(argparse.Namespace(root=str(checkout),archive=str(moved),evidence=str(evidence))),0)
+    def test_completion_derivation_preserves_all_but_terminal_fields_and_does_not_write(self):
+        self.run_bound();self.state.update(task='Deliver CSV',active=True,complete=False,phase='SHIP')
+        original=copy.deepcopy(self.state)
+        result=deep_loop.completed_state(self.state)
+        self.assertEqual(result,{**original,'phase':'COMPLETE','active':False,'complete':True})
+        self.assertEqual(self.state,original)
+        result['checks'].clear();self.assertEqual(self.state,original)
+    def test_completion_derivation_rechecks_delivery_and_closeout(self):
+        self.run_bound();self.state.update(task='Deliver CSV',active=True,complete=False,phase='SHIP')
+        original=copy.deepcopy(self.state)
+        for mutation in ('delivered bytes','closeout','pending delivery','phase'):
+            self.state=copy.deepcopy(original)
+            if mutation=='delivered bytes':self.delivered.write_text('changed')
+            elif mutation=='closeout':self.state['checks'].append({'name':'required cleanup','stage':'closeout','status':'pending','evidence':''})
+            elif mutation=='pending delivery':self.state['delivery']['status']='pending'
+            else:self.state['phase']='REVIEW'
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):deep_loop.completed_state(self.state)
+            self.delivered.write_text('id,name\n1,Alpha\n')
+
     def test_manual_and_advisory_structured_readback_rejected(self):
         for mutation in ('manual','advisory'):
             original=copy.deepcopy(self.contract)

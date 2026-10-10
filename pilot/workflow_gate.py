@@ -107,6 +107,8 @@ class WorkflowGate:
         state = json.loads(payload)
         if binding.get('schema') == 4:
             capability = binding['workflow_delivery']
+            if state.get('verificationContract',{}).get('endpoint')!='github_draft_pr':
+                raise ValueError('Workflow contract endpoint differs from explicit delivery authority')
             delivery = state.get('delivery')
             if (not isinstance(delivery,dict) or delivery.get('status') != 'pending' or
                     delivery.get('endpoint') != 'github_draft_pr' or

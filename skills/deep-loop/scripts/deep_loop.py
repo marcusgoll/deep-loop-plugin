@@ -1018,6 +1018,46 @@ def _recovery_report(args):
     return int(bool(blockers))
 
 
+def verified_delivery_state(state, revision, evidence, archive=None):
+    """Derive only an explicitly pending draft endpoint's verified fields.
+
+    Recorded evidence is not authentication. The controller must independently
+    verify the exact provider cut and guard any subsequent publication.
+    """
+    import re
+    if (not isinstance(state,dict) or state.get('phase')!='SHIP' or
+            state.get('active') is not True or state.get('complete') is not False):
+        raise ValueError('Delivery requires an active, incomplete checkpoint in SHIP.')
+    delivery=state.get('delivery')
+    if (not isinstance(delivery,dict) or delivery.get('status')!='pending' or
+            delivery.get('endpoint')!='github_draft_pr' or
+            not isinstance(revision,str) or re.fullmatch(r'[0-9a-f]{40}',revision) is None or
+            revision=='0'*40 or not isinstance(evidence,str) or not evidence.strip()):
+        raise ValueError('Exact pending draft delivery, revision and readback evidence required.')
+    result=copy.deepcopy(state)
+    result['delivery'].update(status='verified',revision=revision,evidence=evidence,
+        branchDisposition={'status':'verified','kind':'pull_request','revision':revision,'evidence':evidence})
+    issues=validation_issues(result,'delivery',archive)
+    if issues:raise ValueError('Verified delivery blocked: '+'; '.join(issues))
+    return result
+
+
+def completed_state(state, archive=None):
+    """Derive the exact terminal image after validating every SHIP obligation.
+
+    This reader grants no endpoint authority and writes no checkpoint. Trusted
+    writers must still bind the unchanged preimage and guard publication.
+    """
+    if (not isinstance(state,dict) or state.get('phase')!='SHIP' or
+            state.get('active') is not True or state.get('complete') is not False):
+        raise ValueError('Completion requires an active, incomplete checkpoint in SHIP.')
+    issues=validation_issues(state,'ship',archive)
+    if issues:raise ValueError('SHIP completion blocked: '+'; '.join(issues))
+    result=copy.deepcopy(state)
+    result.update(active=False,complete=True,phase='COMPLETE')
+    return result
+
+
 def complete_session(args):
     """Validate SHIP against one preimage, then atomically close that checkpoint."""
     root = Path(args.root).resolve()
@@ -1033,13 +1073,15 @@ def complete_session(args):
     if state.get('phase') != 'SHIP' or state.get('active') is not True or state.get('complete') is not False:
         print('- Completion requires an active, incomplete checkpoint in SHIP.', file=sys.stderr)
         return 1
-    if validate(argparse.Namespace(root=str(root), path=str(path), session=None, stage='ship', mode='fail')):
+    try:
+        terminal=completed_state(state,path.parent if 'proofResolution' in state else None)
+    except ValueError as exc:
+        print('- '+str(exc),file=sys.stderr)
         return 1
     with checkpoint_lock(root):
         if state_path.read_bytes() != preimage:
             raise ValueError('Checkpoint changed after SHIP validation; revalidate before completion.')
-        state.update(active=False, complete=True, phase='COMPLETE')
-        write_json(state_path, state)
+        write_json(state_path, terminal)
     closed = read_json(state_path)
     if closed.get('active') is not False or closed.get('complete') is not True or closed.get('phase') != 'COMPLETE':
         raise ValueError('Completed checkpoint readback failed.')

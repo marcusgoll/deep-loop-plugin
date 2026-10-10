@@ -48,6 +48,15 @@ class PinnedHelperTests(unittest.TestCase):
                          [{'schemaVersion':2},'ship',str(self.root)])
         self.assertEqual(self.helper.validation_issues({},'review'),[{},'review',None])
 
+    def test_terminal_derivation_proxy_keeps_archive_paths_and_missing_methods_block(self):
+        for operation in (lambda:self.helper.completed_state({}),lambda:self.helper.verified_delivery_state({},'a'*40,'readback')):
+            with self.assertRaisesRegex(ValueError,'unavailable or failed'):operation()
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("from pathlib import Path\ndef completed_state(state,archive=None):\n assert archive is None or isinstance(archive,Path)\n return [state,str(archive) if archive is not None else None]\ndef verified_delivery_state(state,revision,evidence,archive=None):\n assert archive is None or isinstance(archive,Path)\n return [state,revision,evidence,str(archive) if archive is not None else None]\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        self.assertEqual(self.helper.completed_state({'fixture':True},self.root),[{'fixture':True},str(self.root)])
+        self.assertEqual(self.helper.verified_delivery_state({},'a'*40,'readback',self.root),[{},'a'*40,'readback',str(self.root)])
+
     def test_drift_unpinned_dependency_and_oversize_request_fail_closed(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py';p.write_text('drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.task_queue({})

@@ -18,7 +18,7 @@ import tempfile
 from admission import digest, initialize
 
 METHODS = {'task_records','task_queue','contract_definition_issues','contract_data',
-           'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues'}
+           'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state'}
 DRIVER = '''import json,os,resource,sys
 from pathlib import Path
 resource.setrlimit(resource.RLIMIT_FSIZE,(1048576,1048576))
@@ -31,10 +31,12 @@ sys.path[:0]=[str(root/'skills/deep-loop/scripts')]
 import deep_loop
 request=json.loads(sys.stdin.buffer.read(524289))
 method=request['method']
-assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues'}
+assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state'}
 args=request['args']
 if method=='contract_data':args[0]=Path(args[0])
 if method=='validation_issues' and len(args)>2 and args[2] is not None:args[2]=Path(args[2])
+if method=='completed_state' and len(args)>1 and args[1] is not None:args[1]=Path(args[1])
+if method=='verified_delivery_state' and len(args)>3 and args[3] is not None:args[3]=Path(args[3])
 result=getattr(deep_loop,method)(*args,**request['kwargs'])
 sys.stdout.write(json.dumps(result,allow_nan=False))
 '''
@@ -138,6 +140,10 @@ class PinnedHelper:
 
     def validation_issues(self,state,stage,archive=None):
         return self._call('validation_issues',state,stage,str(archive) if archive is not None else None)
+    def verified_delivery_state(self,state,revision,evidence,archive=None):
+        return self._call('verified_delivery_state',state,revision,evidence,str(archive) if archive is not None else None)
+    def completed_state(self,state,archive=None):
+        return self._call('completed_state',state,str(archive) if archive is not None else None)
     def task_records(self,state):return self._call('task_records',state)
     def task_queue(self,state):return self._call('task_queue',state)
     def contract_definition_issues(self,state):return self._call('contract_definition_issues',state)

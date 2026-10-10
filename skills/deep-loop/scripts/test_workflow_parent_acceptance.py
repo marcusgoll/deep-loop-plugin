@@ -16,7 +16,10 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         g.binding.update(schema=3,parent_acceptance={'kind':'review_to_ship','approval_ref':'explicit model-free fixture'})
         if delivery_capability:
             from test_workflow_delivery_contract import delivery
-            c=delivery(g.key);g.binding.update(schema=4,workflow_delivery=c)
+            c=delivery(g.key)
+            g.f.state['verificationContract']['endpoint']='github_draft_pr'
+            g.binding['verification_contract']=g.f.state['verificationContract']
+            g.binding.update(schema=4,workflow_delivery=c)
             g.f.state['delivery']={'status':'pending','endpoint':'github_draft_pr','repository':c['repository'],
                                   'baseRef':c['base_ref'],'headRef':c['branch'],
                                   'endpointDecision':{'status':'settled','source':'contract','evidence':c['approval_ref']}}
@@ -31,6 +34,14 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
             for check in g.f.state['checks']:check['receipt']={'path':str(p),'sha256':hashlib.sha256(p.read_bytes()).hexdigest()}
             g.select()
         g.outcome_ready=outcome;self.completed_outcome_fixture();return candidate
+    def test_schema_four_requires_contract_endpoint_to_match_delivery_authority(self):
+        self.prepared(delivery_capability=True)
+        state=json.loads(self.graph.checkpoint.read_text())
+        state['verificationContract']['endpoint']='local'
+        self.graph.checkpoint.write_text(json.dumps(state))
+        with self.assertRaisesRegex(ValueError,'contract endpoint'):
+            self.graph.gate._read()
+
     def test_phase_only_acceptance_and_idempotent_delivery_pending(self):
         self.prepared();before=self.journal.read();state=json.loads(self.graph.checkpoint.read_text())
         self.assertEqual(self.controller.advance_workflow_parent_acceptance(),'prepared_workflow_parent_acceptance')
@@ -127,6 +138,26 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         receipt=factory(self.graph.key)._read('complete');parent=self.controller.authenticate_workflow_parent_acceptance()
         self.assertEqual(receipt['parent_receipt_sha256'],parent['parent_receipt_sha256'])
         self.assertTrue(receipt['delivery_verified']);self.assertFalse(receipt['complete'])
+        import deep_loop
+        preimage=json.loads(checkpoint)
+        delivered=deep_loop.verified_delivery_state(preimage,receipt['head_sha'],receipt['pull_request'])
+        expected=copy.deepcopy(preimage)
+        expected['delivery'].update(status='verified',revision=receipt['head_sha'],evidence=receipt['pull_request'],
+            branchDisposition={'status':'verified','kind':'pull_request','revision':receipt['head_sha'],'evidence':receipt['pull_request']})
+        self.assertEqual(delivered,expected)
+        self.assertEqual(deep_loop.completed_state(delivered),{**delivered,'active':False,'complete':True,'phase':'COMPLETE'})
+        for revision,evidence in [('0'*40,receipt['pull_request']),('f'*39,receipt['pull_request']),
+                                  (receipt['head_sha'],'')]:
+            with self.assertRaises(ValueError):deep_loop.verified_delivery_state(preimage,revision,evidence)
+        for mutation in ('failed check','pending ship check','unresolved debt'):
+            changed=copy.deepcopy(preimage)
+            if mutation=='failed check':changed['checks'][0]['status']='failed'
+            elif mutation=='pending ship check':changed['checks'].append({'name':'required ship','stage':'ship','status':'pending','evidence':''})
+            else:changed['debt']=[{'item':'unresolved','status':'pending'}]
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):
+                deep_loop.verified_delivery_state(changed,receipt['head_sha'],receipt['pull_request'])
+        with self.assertRaises(ValueError):
+            deep_loop.verified_delivery_state(delivered,receipt['head_sha'],receipt['pull_request'])
         self.assertEqual(self.journal.read(),before);self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint)
         self.assertEqual(len(self.backend.submissions),3)
     def test_delivery_reader_cannot_finish_pending_parent(self):
