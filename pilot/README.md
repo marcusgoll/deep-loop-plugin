@@ -485,3 +485,15 @@ source drift. The original three-task native fixture failed before receipt
 publication; recovery of its retained invocation later stopped at the original
 immutable deadline with one charged attempt and no task credit. That fixture
 remains failed, and corrected-source end-to-end native qualification is pending.
+
+
+A separate corrected-source fixture completed three literal tasks against actual
+native units and append-only Git, retaining exactly three finished charged
+attempts (1800 model/3600 active seconds), three task credits and the original
+window. Twenty successful fresh worker wakes plus a fresh outcome observer
+validated the histories and current task-specific proof. Two independent host
+readbacks confirmed 93 source pins, all retained native generations ended/empty,
+no owner/verifier fences, and production inactive with its timer disabled.
+A transient observation failure after first verifier submission required exact
+owned-invocation recovery and manual continuation; this is not evidence of an
+intervention-free full workflow. Parent acceptance and delivery remain false.
