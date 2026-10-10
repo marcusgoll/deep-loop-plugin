@@ -799,6 +799,68 @@ def graph(state):
     return 0
 
 
+def validation_issues(state, stage, archive=None):
+    """Read current recorded evidence without selecting or mutating a session."""
+    if not isinstance(state, dict) or type(state.get('schemaVersion')) is not int or state['schemaVersion'] not in (2, 3, 4):
+        raise ValueError('Workflow validation requires session schema 2, 3 or 4')
+    if stage not in ('build', 'review', 'delivery', 'ship'):
+        raise ValueError('Unsupported validation stage')
+    version = state['schemaVersion']
+    issues = contract_issues(state, stage, archive)
+    if version in (3, 4):
+        issues.extend(schema_three_issues(state, stage))
+    if version == 4:
+        issues.extend(schema_four_issues(state))
+    if state.get('issues'):
+        issues.append('Resolve recorded issues before validation.')
+    if state.get('blocker'):
+        issues.append('Required work is blocked; preserve the incomplete checkpoint.')
+    if stage == 'build':
+        return issues
+    checks = state.get('checks')
+    if not isinstance(checks, list) or not checks:
+        issues.append('Record the required acceptance checks before validation.')
+    else:
+        for check in checks:
+            if not isinstance(check, dict) or not present(check, 'name'):
+                issues.append('Check requires a name.')
+            elif check.get('status') not in ('pending', 'failed', 'passed', 'not_applicable'):
+                issues.append('Invalid check status: ' + check['name'])
+            elif not required_at(check, stage):
+                continue
+            elif check.get('status') == 'passed' and present(check, 'evidence'):
+                continue
+            elif check.get('status') == 'not_applicable' and present(check, 'reason'):
+                continue
+            else:
+                issues.append(f"Check lacks passing evidence or a not-applicable reason: {check['name']}")
+        if not any(isinstance(c, dict) and required_at(c, stage) and c.get('status') == 'passed' and present(c, 'evidence') for c in checks):
+            issues.append('At least one acceptance check must have passing evidence.')
+    debt = state.get('debt', [])
+    if not isinstance(debt, list):
+        issues.append('Debt must be a list.')
+    else:
+        for item in debt:
+            if not isinstance(item, dict) or not present(item, 'item'):
+                issues.append('Debt entry requires an item.')
+            elif item.get('status') == 'paid' and present(item, 'evidence'):
+                continue
+            elif item.get('status') == 'accepted' and present(item, 'acceptance', 'owner', 'paydown'):
+                continue
+            else:
+                issues.append(f"Debt is unresolved or acceptance is incomplete: {item['item']}")
+    if stage in ('delivery', 'ship'):
+        delivery = state.get('delivery')
+        if not isinstance(delivery, dict) or delivery.get('status') != 'verified' or not present(delivery, 'endpoint', 'evidence'):
+            issues.append('Delivery requires a named endpoint and independent readback evidence.')
+    elif state.get('complete') is True:
+        issues.append('A completed session must be validated with --stage ship.')
+    tasks, _ = task_records(state)
+    issues.extend(f"Unfinished {t['kind']}: {t['id']} ({t['status']})"
+                  for t in tasks if required_at(t, stage) and t['status'] not in ('done', 'cancelled'))
+    return issues
+
+
 def validate(args):
     path = resolve(args)
     state = read_json(path / 'state.json')
@@ -808,63 +870,15 @@ def validate(args):
         print('Legacy validation checks recorded flags only; it is not evidence validation.')
         if args.stage == 'ship':
             issues.append('Legacy session has no delivery evidence contract. Continue its manual workflow; do not treat this helper as shipment proof.')
-    elif version in (2, 3, 4):
-        issues = contract_issues(state, args.stage, path.parent if 'proofResolution' in state else None)
-        if version in (3, 4):
-            issues.extend(schema_three_issues(state, args.stage))
-        if version == 4:
-            issues.extend(schema_four_issues(state))
-        if state.get('issues'):
-            issues.append('Resolve recorded issues before validation.')
-        if state.get('blocker'):
-            issues.append('Required work is blocked; preserve the incomplete checkpoint.')
-        if args.stage == 'build':
-            print('\n'.join(f'- {issue}' for issue in issues) if issues else '[OK] BUILD prerequisites recorded; verify the cited evidence independently.')
-            return 1 if issues and args.mode == 'fail' else 0
-        checks = state.get('checks')
-        if not isinstance(checks, list) or not checks:
-            issues.append('Record the required acceptance checks before validation.')
-        else:
-            for check in checks:
-                if not isinstance(check, dict) or not present(check, 'name'):
-                    issues.append('Check requires a name.')
-                elif check.get('status') not in ('pending', 'failed', 'passed', 'not_applicable'):
-                    issues.append('Invalid check status: ' + check['name'])
-                elif not required_at(check, args.stage):
-                    continue
-                elif check.get('status') == 'passed' and present(check, 'evidence'):
-                    continue
-                elif check.get('status') == 'not_applicable' and present(check, 'reason'):
-                    continue
-                else:
-                    issues.append(f"Check lacks passing evidence or a not-applicable reason: {check['name']}")
-            if not any(isinstance(c, dict) and required_at(c, args.stage) and c.get('status') == 'passed' and present(c, 'evidence') for c in checks):
-                issues.append('At least one acceptance check must have passing evidence.')
-        debt = state.get('debt', [])
-        if not isinstance(debt, list):
-            issues.append('Debt must be a list.')
-        else:
-            for item in debt:
-                if not isinstance(item, dict) or not present(item, 'item'):
-                    issues.append('Debt entry requires an item.')
-                elif item.get('status') == 'paid' and present(item, 'evidence'):
-                    continue
-                elif item.get('status') == 'accepted' and present(item, 'acceptance', 'owner', 'paydown'):
-                    continue
-                else:
-                    issues.append(f"Debt is unresolved or acceptance is incomplete: {item['item']}")
-        if args.stage in ('delivery', 'ship'):
-            delivery = state.get('delivery')
-            if not isinstance(delivery, dict) or delivery.get('status') != 'verified' or not present(delivery, 'endpoint', 'evidence'):
-                issues.append('Delivery requires a named endpoint and independent readback evidence.')
-        elif state.get('complete') is True:
-            issues.append('A completed session must be validated with --stage ship.')
+        tasks, _ = task_records(state)
+        issues.extend(f"Unfinished {t['kind']}: {t['id']} ({t['status']})"
+                      for t in tasks if required_at(t, args.stage) and t['status'] not in ('done', 'cancelled'))
     else:
-        raise ValueError(f'Unsupported session schema: {version}')
-    tasks, _ = task_records(state)
-    issues.extend(f"Unfinished {t['kind']}: {t['id']} ({t['status']})"
-                  for t in tasks if required_at(t, args.stage) and t['status'] not in ('done', 'cancelled'))
-    print('\n'.join(f'- {issue}' for issue in issues) if issues else '[OK] Recorded requirements satisfied; verify the cited evidence independently.')
+        issues = validation_issues(state, args.stage, path.parent if 'proofResolution' in state else None)
+    success = ('[OK] BUILD prerequisites recorded; verify the cited evidence independently.'
+               if version in (2, 3, 4) and args.stage == 'build' else
+               '[OK] Recorded requirements satisfied; verify the cited evidence independently.')
+    print('\n'.join(f'- {issue}' for issue in issues) if issues else success)
     return 1 if issues and args.mode == 'fail' else 0
 
 

@@ -407,6 +407,32 @@ class WorkflowGateTests(unittest.TestCase):
 
 
 
+    def test_final_review_inspects_full_helper_obligations_without_mutation(self):
+        self.outcome_ready();before=self.checkpoint.read_bytes()
+        proof=self.gate.final_review_proof()
+        self.assertEqual(proof['kind'],'workflow_final_review_proof')
+        self.assertFalse(proof['parent_accepted']);self.assertFalse(proof['delivery_verified'])
+        self.assertEqual(self.checkpoint.read_bytes(),before)
+        for field,value in [('debt',[{'item':'unaccepted debt','status':'accepted'}]),
+                            ('blocker','unavailable required review'),
+                            ('checks',self.f.state['checks']+[{'name':'independent review','status':'pending'}])]:
+            previous=self.f.state.get(field)
+            self.f.state[field]=value;self.select()
+            with self.assertRaisesRegex(ValueError,'Full workflow review blocked'):self.gate.final_review_proof()
+            if previous is None:self.f.state.pop(field)
+            else:self.f.state[field]=previous
+            self.select()
+
+    def test_final_review_rejects_checkpoint_drift_during_full_validation(self):
+        from unittest.mock import patch
+        self.outcome_ready();original=self.gate.helper.validation_issues
+        def changed(*args):
+            issues=original(*args)
+            self.f.state['blocker']='concurrent blocker';self.select()
+            return issues
+        with patch.object(self.gate.helper,'validation_issues',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'cut changed'):self.gate.final_review_proof()
+
     def outcome_ready(self):
         import argparse
         f=self.f

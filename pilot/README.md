@@ -506,3 +506,13 @@ unavailable probes and identity drift reject the observation without changing
 checkpoint or journal. This guard contributes to final quiescence; full helper
 review validation, stale-verifier rerun routing and parent transition remain
 required. It grants no parent acceptance or future process exclusion.
+
+
+`validation_issues` exposes the existing helper's full modern-schema validation
+as a read-only API; the CLI delegates to it while retaining legacy handling.
+The pinned proxy exposes that exact operation. `final_review_proof` requires
+current whole-task proof plus full review validation, then rechecks the complete
+cut. Named checks, debt, blockers, schema/UI obligations and unfinished tasks
+remain gates. Frozen helper snapshots are unchanged; missing API/dependencies
+fail closed. Final verifier rerun routing and durable parent acceptance remain
+unimplemented.

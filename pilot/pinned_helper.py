@@ -18,7 +18,7 @@ import tempfile
 from admission import digest, initialize
 
 METHODS = {'task_records','task_queue','contract_definition_issues','contract_data',
-           'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256'}
+           'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues'}
 DRIVER = '''import json,os,resource,sys
 from pathlib import Path
 resource.setrlimit(resource.RLIMIT_FSIZE,(1048576,1048576))
@@ -31,9 +31,10 @@ sys.path[:0]=[str(root/'skills/deep-loop/scripts')]
 import deep_loop
 request=json.loads(sys.stdin.buffer.read(524289))
 method=request['method']
-assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256'}
+assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues'}
 args=request['args']
 if method=='contract_data':args[0]=Path(args[0])
+if method=='validation_issues' and len(args)>2 and args[2] is not None:args[2]=Path(args[2])
 result=getattr(deep_loop,method)(*args,**request['kwargs'])
 sys.stdout.write(json.dumps(result,allow_nan=False))
 '''
@@ -135,6 +136,8 @@ class PinnedHelper:
         if len(payload)>1048576:raise ValueError('Pinned helper result exceeds bound')
         return json.loads(payload)
 
+    def validation_issues(self,state,stage,archive=None):
+        return self._call('validation_issues',state,stage,str(archive) if archive is not None else None)
     def task_records(self,state):return self._call('task_records',state)
     def task_queue(self,state):return self._call('task_queue',state)
     def contract_definition_issues(self,state):return self._call('contract_definition_issues',state)

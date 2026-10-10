@@ -38,6 +38,16 @@ class PinnedHelperTests(unittest.TestCase):
         self.assertEqual(self.helper.verified_check_state(state,'V1',receipt,'fixture evidence','b'*64),
                          [state,'V1',receipt,'fixture evidence','b'*64])
 
+    def test_full_validation_proxy_preserves_archive_path_and_missing_api_blocks(self):
+        with self.assertRaisesRegex(ValueError,'unavailable or failed'):
+            self.helper.validation_issues({'schemaVersion':2},'review')
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("from pathlib import Path\ndef validation_issues(state,stage,archive=None):\n assert archive is None or isinstance(archive,Path)\n return [state,stage,str(archive) if archive is not None else None]\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        self.assertEqual(self.helper.validation_issues({'schemaVersion':2},'ship',self.root),
+                         [{'schemaVersion':2},'ship',str(self.root)])
+        self.assertEqual(self.helper.validation_issues({},'review'),[{},'review',None])
+
     def test_drift_unpinned_dependency_and_oversize_request_fail_closed(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py';p.write_text('drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.task_queue({})

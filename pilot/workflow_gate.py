@@ -168,6 +168,25 @@ class WorkflowGate:
                 'proof_receipts':{i:checks[i]['receipt'] for i in ids},'tasks':tasks,
                 'parent_accepted':False,'delivery_verified':False}
 
+    def final_review_proof(self):
+        """Inspect full helper review gates, not merely mapped task receipts."""
+        binding,state,_=self._read()
+        outcome=self.outcome_proof()
+        if outcome['checkpoint_sha256']!=digest(state):
+            raise ValueError('Final workflow review checkpoint changed')
+        archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
+        issues=self.helper.validation_issues(state,'review',archive)
+        if not isinstance(issues,list) or any(not isinstance(issue,str) for issue in issues):
+            raise ValueError('Malformed full workflow review validation')
+        if issues:
+            raise ValueError('Full workflow review blocked: '+'; '.join(issues))
+        if self._read()[:2]!=(binding,state) or self.outcome_proof()!=outcome:
+            raise ValueError('Final workflow review cut changed during validation')
+        return {'kind':'workflow_final_review_proof','contract_digest':self.contract_digest,
+                'binding_digest':digest(binding),'checkpoint_sha256':digest(state),
+                'outcome_proof':outcome,'review_issues':[],
+                'parent_accepted':False,'delivery_verified':False}
+
     def task_acceptance(self, selection):
         """Inspect selected task proof; never mutate checkpoint or accept parent.
 
