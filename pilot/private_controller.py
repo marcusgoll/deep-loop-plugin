@@ -1036,6 +1036,50 @@ class PrivateController:
                 raise ValueError('Parent acceptance completion readback differs')
             return 'recovered_workflow_parent_acceptance'
 
+    def authenticate_workflow_parent_acceptance(self):
+        """Read a fresh accepted parent cut for delivery; never publish or recover.
+
+        A retained SHIP phase or receipt alone grants no delivery truth. Callers
+        must invoke this again before each external mutation and compare the cut
+        with their immutable delivery intent. Explicit delivery authority is a
+        separate enrollment obligation.
+        """
+        outcome = self.observe_workflow_outcome()
+        with self.store.lock():
+            self._contract(); self._unowned()
+            self._require_no_pending_task_acceptance(); self._require_no_pending_task_credit()
+            self._workflow_mutation_authority(parent_recovery=True)
+            intent = self.store.read(self.contract_digest + '.parent-acceptance-intent.json')
+            completed = self.store.read(self.contract_digest + '.parent-acceptance.json')
+            if (set(intent) != {'contract_digest','transition','journal_revision','journal','outcome'} or
+                    intent['contract_digest'] != self.contract_digest):
+                raise ValueError('Accepted parent intent identity drift')
+            binding, state, _ = self.workflow_gate._read()
+            transition = intent['transition']
+            if (binding.get('schema') != 3 or state != transition['after'] or
+                    transition['before'].get('phase') not in {'BUILD','REVIEW'} or
+                    transition['after'] != {**transition['before'], 'phase':'SHIP'} or
+                    self.journal.read() != (intent['journal_revision'], intent['journal']) or
+                    outcome != self._parent_outcome_at_checkpoint(intent['outcome'], digest(state)) or
+                    self._workflow_quiescence() != outcome['quiescence']):
+                raise ValueError('Accepted parent current delivery cut changed')
+            proof = self.workflow_gate.final_review_proof()
+            expected = {'contract_digest':self.contract_digest,'intent_digest':digest(intent),
+                        'journal_revision':intent['journal_revision'],'checkpoint_sha256':digest(state),
+                        'postimage_review_proof':proof,'parent_accepted':True,
+                        'delivery_verified':False,'complete':False}
+            if completed != expected:
+                raise ValueError('Accepted parent completion proof changed')
+            self._workflow_source_guard(proof, parent_recovery=True)
+            if (self.workflow_gate._read()[:2] != (binding, state) or
+                    self.journal.read() != (intent['journal_revision'], intent['journal']) or
+                    self._workflow_quiescence() != outcome['quiescence']):
+                raise ValueError('Accepted parent changed during delivery inspection')
+            self._workflow_mutation_authority(parent_recovery=True)
+            return {'contract_digest':self.contract_digest,'binding_sha256':digest(binding),
+                    'parent_receipt_sha256':digest(completed),'parent_receipt':completed,
+                    'outcome':outcome}
+
     def advance_workflow_parent_acceptance(self):
         """Only explicitly enrolled parents may enter integrated review acceptance."""
         with self.store.lock():

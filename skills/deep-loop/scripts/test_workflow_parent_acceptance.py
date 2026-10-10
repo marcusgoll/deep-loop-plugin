@@ -79,6 +79,49 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         before=list(self.graph.store.root.iterdir())
         with self.assertRaisesRegex(ValueError,'Accepted parent'):self.controller.start_native_workflow_verification(owner,0)
         self.assertEqual(list(self.graph.store.root.iterdir()),before);self.assertEqual(len(self.backend.submissions),3)
+    def test_delivery_parent_reader_is_fresh_and_read_only(self):
+        self.prepared();self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        before={p.name:p.read_bytes() for p in self.graph.store.root.iterdir() if p.is_file()}
+        checkpoint=self.graph.checkpoint.read_bytes();journal=self.journal.read()
+        cut=self.controller.authenticate_workflow_parent_acceptance()
+        self.assertEqual(cut['parent_receipt_sha256'],digest(cut['parent_receipt']))
+        self.assertTrue(cut['parent_receipt']['parent_accepted']);self.assertFalse(cut['parent_receipt']['delivery_verified'])
+        self.assertEqual(self.controller.authenticate_workflow_parent_acceptance(),cut)
+        self.assertEqual({p.name:p.read_bytes() for p in self.graph.store.root.iterdir() if p.is_file()},before)
+        self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint);self.assertEqual(self.journal.read(),journal)
+    def test_delivery_reader_cannot_finish_pending_parent(self):
+        self.prepared();self.controller.prepare_workflow_parent_acceptance();before=self.graph.checkpoint.read_bytes()
+        with self.assertRaises(FileNotFoundError):self.controller.authenticate_workflow_parent_acceptance()
+        self.assertEqual(self.graph.checkpoint.read_bytes(),before)
+        self.assertFalse((self.graph.store.root/(self.graph.key+'.parent-acceptance.json')).exists())
+    def test_delivery_reader_rejects_tampered_completion(self):
+        self.prepared();self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        name=self.graph.key+'.parent-acceptance.json';receipt=self.graph.store.read(name)
+        receipt['delivery_verified']=True;self.graph.store.remove(name);self.graph.store.create(name,receipt)
+        with self.assertRaisesRegex(ValueError,'completion proof'):self.controller.authenticate_workflow_parent_acceptance()
+    def test_delivery_reader_requires_original_live_window(self):
+        self.prepared();self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        before=self.graph.checkpoint.read_bytes();self.remaining.return_value=0
+        with self.assertRaisesRegex(ValueError,'window expired'):self.controller.authenticate_workflow_parent_acceptance()
+        self.assertEqual(self.graph.checkpoint.read_bytes(),before)
+    def test_delivery_reader_rejects_source_drift(self):
+        candidate=self.prepared();self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        (candidate/'project.py').write_text('changed after parent acceptance')
+        with self.assertRaises(ValueError):self.controller.authenticate_workflow_parent_acceptance()
+    def test_delivery_reader_rejects_revocation(self):
+        self.prepared();self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        self.graph.store.create(self.graph.key+'.revocation-intent.json',{'fixture':'revoked'})
+        with self.assertRaisesRegex(ValueError,'revoked'):self.controller.authenticate_workflow_parent_acceptance()
+    def test_delivery_reader_rejects_checkpoint_change_at_last_guard(self):
+        self.prepared();self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        original=self.controller._workflow_source_guard
+        def changed(observation,**kwargs):
+            original(observation,**kwargs)
+            state=json.loads(self.graph.checkpoint.read_text());state['blocker']='late delivery obligation'
+            self.graph.checkpoint.write_text(json.dumps(state))
+        with patch.object(self.controller,'_workflow_source_guard',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'during delivery inspection'):
+                self.controller.authenticate_workflow_parent_acceptance()
     def test_worker_advances_parent_without_additional_dispatch(self):
         from private_worker import run
         self.prepared();self.graph.store.create('enabled-outcome.json',{'contract_digest':self.graph.key})
