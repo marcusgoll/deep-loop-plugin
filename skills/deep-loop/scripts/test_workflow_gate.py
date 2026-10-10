@@ -342,4 +342,35 @@ class WorkflowGateTests(unittest.TestCase):
         self.store.remove(self.key+'.workflow.json');self.store.create(self.key+'.workflow.json',self.binding)
         with self.assertRaisesRegex(ValueError,'Unsupported'):self.select()
 
+
+    def verification_transition(self):
+        import json
+        rows=json.loads((self.f.root/'receipt.json').read_text())
+        rows[0]['verifier_id']='V3';rows[0]['name']='V3'
+        path=save(self.f.root/'native-receipt.json',rows).resolve()
+        reference={'path':str(path),'sha256':sha(path)}
+        return self.gate.verified_state('V3',reference,'Native verifier evidence')
+
+    def test_verification_publication_changes_only_selected_check_and_exact_retry(self):
+        before=copy.deepcopy(self.f.state)
+        transition=self.verification_transition()
+        self.assertEqual(transition['before'],before)
+        expected=copy.deepcopy(before);expected['checks'][2]=transition['after']['checks'][2]
+        self.assertEqual(transition['after'],expected)
+        saved=self.gate.publish_verified_state(transition)
+        self.assertEqual(saved,expected)
+        self.assertEqual(self.gate.publish_verified_state(transition),saved)
+        self.assertEqual(saved['tasks'],before['tasks']);self.assertEqual(saved['delivery'],before['delivery'])
+
+    def test_verification_publication_rejects_changed_receipt_or_stale_checkpoint(self):
+        transition=self.verification_transition()
+        path=Path(transition['observation']['receipt']['path']);path.write_text('[]')
+        with self.assertRaises(ValueError):self.gate.publish_verified_state(transition)
+        self.assertEqual(__import__('json').loads(self.checkpoint.read_text()),transition['before'])
+
+    def test_verification_transition_requires_exact_preimage(self):
+        transition=self.verification_transition()
+        with self.assertRaisesRegex(ValueError,'preimage'):
+            deep_loop.verified_check_state(transition['before'],'V3',transition['observation']['receipt'],'Evidence','0'*64)
+
 if __name__=='__main__':unittest.main()

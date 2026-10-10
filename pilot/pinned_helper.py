@@ -18,7 +18,7 @@ import tempfile
 from admission import digest, initialize
 
 METHODS = {'task_records','task_queue','contract_definition_issues','contract_data',
-           'prerequisite_issues','accepted_task_state','verification_definitions'}
+           'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state'}
 DRIVER = '''import json,os,resource,sys
 from pathlib import Path
 resource.setrlimit(resource.RLIMIT_FSIZE,(1048576,1048576))
@@ -31,7 +31,7 @@ sys.path[:0]=[str(root/'skills/deep-loop/scripts')]
 import deep_loop
 request=json.loads(sys.stdin.buffer.read(524289))
 method=request['method']
-assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions'}
+assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state'}
 args=request['args']
 if method=='contract_data':args[0]=Path(args[0])
 result=getattr(deep_loop,method)(*args,**request['kwargs'])
@@ -140,6 +140,8 @@ class PinnedHelper:
     def contract_definition_issues(self,state):return self._call('contract_definition_issues',state)
     def contract_data(self,path,verify_files=True):return self._call('contract_data',str(path),verify_files=verify_files)
     def verification_definitions(self,state,ids):return self._call('verification_definitions',state,ids)
+    def verified_check_state(self,state,verifier_id,receipt,evidence,expected):
+        return self._call('verified_check_state',state,verifier_id,receipt,evidence,expected)
     def prerequisite_issues(self,state,ids):return self._call('prerequisite_issues',state,ids)
     def accepted_task_state(self,state,task_id,ids,evidence,expected):
         return self._call('accepted_task_state',state,task_id,ids,evidence,expected)

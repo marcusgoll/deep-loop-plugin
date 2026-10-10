@@ -28,6 +28,15 @@ class PinnedHelperTests(unittest.TestCase):
     def test_isolated_helper_ignores_inherited_import_and_skill_overrides(self):
         with patch.dict(os.environ,{'PYTHONPATH':'/evil','DEEP_LOOP_SKILLS_ROOT':'/evil','OPENAI_API_KEY':'fixture-never-forward'}):
             self.assertEqual(self.helper.task_records({'fixture':True}),[{'fixture':True},str(self.root/'skills'),False])
+    def test_verification_methods_cross_real_isolated_proxy(self):
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("def verification_definitions(state,ids):return [state,ids]\ndef verified_check_state(state,verifier_id,receipt,evidence,expected):return [state,verifier_id,receipt,evidence,expected]\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        state={'fixture':True};receipt={'path':'fixture.json','sha256':'a'*64}
+        self.assertEqual(self.helper.verification_definitions(state,['V1']),[state,['V1']])
+        self.assertEqual(self.helper.verified_check_state(state,'V1',receipt,'fixture evidence','b'*64),
+                         [state,'V1',receipt,'fixture evidence','b'*64])
+
     def test_drift_unpinned_dependency_and_oversize_request_fail_closed(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py';p.write_text('drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.task_queue({})

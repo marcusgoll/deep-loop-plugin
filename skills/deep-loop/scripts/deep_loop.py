@@ -380,6 +380,22 @@ def verification_definitions(state,verifier_ids):
         return result
 
 
+def verified_check_state(state,verifier_id,receipt,evidence,expected_sha256):
+    """Pure selected-check update; receipt proof must already exist and be current."""
+    if (not isinstance(receipt,dict) or set(receipt)!={'path','sha256'} or
+            not isinstance(evidence,str) or not evidence.strip() or len(evidence)>4096 or
+            hashlib.sha256(json.dumps(state,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()!=expected_sha256):
+        raise ValueError('Exact verification checkpoint preimage and receipt required')
+    verification_definitions(state,[verifier_id])
+    result=copy.deepcopy(state)
+    matches=[c for c in result.get('checks',[]) if c.get('verifierId')==verifier_id]
+    if len(matches)!=1:raise ValueError('Unique selected verification check required')
+    matches[0].update(status='passed',evidence=evidence,receipt=copy.deepcopy(receipt))
+    failures=prerequisite_issues(result,[verifier_id])
+    if failures:raise ValueError('Selected native receipt proof blocked: '+'; '.join(failures))
+    return result
+
+
 def prerequisite_issues(state, verifier_ids):
     """Inspect selected current proof without changing parent acceptance.
 

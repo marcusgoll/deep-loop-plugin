@@ -195,7 +195,36 @@ class WorkflowGate:
                     observation['verifier_ids'], evidence, observation['checkpoint_sha256'])
         return {'before': state, 'after': result, 'observation': observation}
 
-    def publish_accepted_state(self, transition):
+    def verified_state(self,verifier_id,receipt,evidence):
+        binding,state,_=self._read()
+        after=self.helper.verified_check_state(state,verifier_id,receipt,evidence,digest(state))
+        if self._read()[:2]!=(binding,state):raise ValueError('Verification checkpoint changed before transition')
+        return {'before':state,'after':after,'observation':{'kind':'native_verification_check',
+                'binding_digest':digest(binding),'verifier_id':verifier_id,'receipt':receipt,
+                'evidence':evidence,'parent_accepted':False}}
+
+    def _checked_verification_transition(self,transition):
+        observation=transition['observation']
+        if observation.get('kind')!='native_verification_check' or observation.get('parent_accepted') is not False:
+            raise ValueError('Verification check transition required')
+        binding,_,_=self._read()
+        if observation['binding_digest']!=digest(binding):raise ValueError('Verification binding changed')
+        return self.verified_state(observation['verifier_id'],observation['receipt'],observation['evidence'])
+
+    def _checked_acceptance_transition(self,transition):
+        observation=transition['observation'];task_id=observation['selection']['task_id']
+        evidence=next(t['evidence'] for t in transition['after']['tasks'] if t['id']==task_id)
+        return self.accepted_state(observation['selection'],evidence)
+
+    def publish_verified_state(self,transition):
+        return self._publish_checkpoint(transition,self._checked_verification_transition,
+            lambda:self.helper.prerequisite_issues(self._read()[1],[transition['observation']['verifier_id']]))
+
+    def publish_accepted_state(self,transition):
+        return self._publish_checkpoint(transition,self._checked_acceptance_transition,
+            lambda:self.task_acceptance(transition['observation']['selection']))
+
+    def _publish_checkpoint(self, transition,check_transition,postcheck):
         """Publish exactly a proof-checked transition in a protected checkpoint.
 
         Caller holds the credential lock and has persisted its owned-attempt
@@ -235,10 +264,7 @@ class WorkflowGate:
             current = json.loads(payload)
             if current not in (transition['before'], transition['after']):
                 raise ValueError('Stale task acceptance checkpoint preimage')
-            observation = transition['observation']
-            task_id = observation['selection']['task_id']
-            evidence = next(t['evidence'] for t in transition['after']['tasks'] if t['id'] == task_id)
-            checked = self.accepted_state(observation['selection'], evidence)
+            checked = check_transition(transition)
             if checked['before'] != current or checked['after'] != transition['after']:
                 raise ValueError('Task acceptance transition or proof changed')
             if current != transition['after']:
@@ -258,7 +284,8 @@ class WorkflowGate:
             saved = json.loads(checkpoint_bytes(path))
             if saved != transition['after']:
                 raise ValueError('Accepted checkpoint independent readback differs')
-            self.task_acceptance(observation['selection'])
+            proof=postcheck()
+            if isinstance(proof,list) and proof:raise ValueError('Published checkpoint proof changed')
             return saved
         finally:
             try: os.unlink(temporary, dir_fd=directory)
