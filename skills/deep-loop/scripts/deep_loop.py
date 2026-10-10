@@ -331,6 +331,52 @@ def contract_issues(state, stage, archive=None):
         return ['Preserved proof BLOCKED: ' + str(error)]
 
 
+
+def prerequisite_issues(state, verifier_ids):
+    """Inspect selected current proof without changing parent acceptance.
+
+    IDs must come from the coordinator's protected task coverage map. This
+    reader cannot authenticate that mapping or authorize native dispatch.
+    """
+    try:
+        if (not isinstance(verifier_ids, list) or not verifier_ids or
+                any(not isinstance(v, str) or not v for v in verifier_ids) or
+                len(set(verifier_ids)) != len(verifier_ids)):
+            raise ValueError('Explicit unique prerequisite verifier IDs required')
+        if not isinstance(state.get('verificationContract'), dict):
+            raise ValueError('Bound parent verification contract required')
+        with resolution_context(state, None):
+            failures = _contract_issues(state, 'build')
+            if failures:
+                return failures
+            path = Path(state['verificationContract']['path'])
+            contract = contract_data(path)
+            verifiers = {v['id']: v for v in contract['verifiers']}
+            checks = {c.get('verifierId'): c for c in state.get('checks', []) if isinstance(c, dict)}
+            for identifier in verifier_ids:
+                if identifier not in verifiers:
+                    raise ValueError('Unknown prerequisite verifier: ' + identifier)
+                verifier = verifiers[identifier]
+                proof = proof_binding.definition(verifier, proof_binding.logical(path).parent)
+                check = checks.get(identifier)
+                if (verifier['gate'] != 'blocking' or not proof or proof['mode'] != 'bound' or
+                        'readback' in proof or not isinstance(check, dict) or
+                        check.get('stage', 'review') != 'review' or
+                        check.get('status') != 'passed' or not present(check, 'evidence')):
+                    raise ValueError('Current blocking review proof required: ' + identifier)
+            if 'design' in contract:
+                from ui_design import evidence_issues
+                failures.extend(evidence_issues(contract, path, state))
+            failures.extend(proof_binding.issues(contract, path, state, 'review',
+                            contract_semantics_sha256(contract), set(verifier_ids)))
+            # Completion gaps remain parent obligations at prerequisite review.
+            failures.extend('Unresolved contract gap: ' + g['id'] for g in contract['gaps']
+                            if g['blocks'] == 'completion')
+            return failures
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return ['Prerequisite proof BLOCKED: ' + str(error)]
+
+
 def _contract_issues(state, stage):
     binding = state.get('verificationContract')
     try:

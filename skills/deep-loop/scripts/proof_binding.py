@@ -133,12 +133,13 @@ def readback_delivery(observation,state):
     expected={t.get('id'):t.get('revision') for t in subjects}
     if len(expected)!=len(subjects) or expected!={t['id']:t['revision'] for t in observation['targets']}:raise ValueError('Readback exact delivered target/revision mismatch')
 
-def issues(contract,path,state,stage,semantics):
+def issues(contract,path,state,stage,semantics,verifier_ids=None):
     failures=[];base=logical(path).parent
     checks={c.get('verifierId'):c for c in state.get('checks',[]) if isinstance(c,dict)}
     for verifier in contract['verifiers']:
         try:
             proof=definition(verifier,base)
+            if verifier_ids is not None and verifier['id'] not in verifier_ids:continue
             if not proof or proof['mode']=='manual' or stage=='build':continue
             check=checks.get(verifier['id'])
             if verifier.get('gate') == 'advisory' and check is None:
