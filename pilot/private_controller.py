@@ -670,7 +670,7 @@ class PrivateController:
             attempt=self.store.read(unit+'.workflow-attempt.json');owner=attempt['owner']
             gate,selection,_,_,_=self._finished_workflow_context(owner)
             binding,state,_=gate._read()
-            if binding.get('schema') in (2, 3):
+            if binding.get('schema') in (2, 3, 4):
                 plan=gate.verification_plan(selection)
                 identifiers=plan['verifier_ids']
                 unresolved=gate.unresolved_verifiers(binding,state,identifiers)
@@ -1004,7 +1004,7 @@ class PrivateController:
             self._require_no_pending_task_acceptance(); self._require_no_pending_task_credit()
             transition = intent['transition']
             binding, state, _ = self.workflow_gate._read()
-            if (binding.get('schema') != 3 or state not in (transition['before'], transition['after']) or
+            if (binding.get('schema') not in (3, 4) or state not in (transition['before'], transition['after']) or
                     self.journal.read() != (intent['journal_revision'], intent['journal']) or
                     outcome != self._parent_outcome_at_checkpoint(intent['outcome'], digest(state)) or
                     self._workflow_quiescence() != outcome['quiescence']):
@@ -1056,7 +1056,7 @@ class PrivateController:
                 raise ValueError('Accepted parent intent identity drift')
             binding, state, _ = self.workflow_gate._read()
             transition = intent['transition']
-            if (binding.get('schema') != 3 or state != transition['after'] or
+            if (binding.get('schema') not in (3, 4) or state != transition['after'] or
                     transition['before'].get('phase') not in {'BUILD','REVIEW'} or
                     transition['after'] != {**transition['before'], 'phase':'SHIP'} or
                     self.journal.read() != (intent['journal_revision'], intent['journal']) or
@@ -1085,7 +1085,7 @@ class PrivateController:
         with self.store.lock():
             try: binding = self.store.read(self.contract_digest + '.workflow.json')
             except FileNotFoundError: return None
-            if binding.get('schema') != 3: return None
+            if binding.get('schema') not in (3, 4): return None
             try: self.store.read(self.contract_digest + '.parent-acceptance-intent.json')
             except FileNotFoundError:
                 _, _, tasks = self.workflow_gate._read()

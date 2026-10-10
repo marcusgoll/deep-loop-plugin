@@ -11,9 +11,15 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         window=patch("worker_window.remaining",side_effect=lambda *args,**kwargs:self.remaining(*args,**kwargs))
         window.start();self.addCleanup(window.stop)
     completed_outcome_fixture=fixtures.TaskExecutionTests.completed_outcome_fixture
-    def prepared(self):
+    def prepared(self, *, delivery_capability=False):
         g=self.graph;candidate,_=g.modern_binding()
         g.binding.update(schema=3,parent_acceptance={'kind':'review_to_ship','approval_ref':'explicit model-free fixture'})
+        if delivery_capability:
+            from test_workflow_delivery_contract import delivery
+            c=delivery(g.key);g.binding.update(schema=4,workflow_delivery=c)
+            g.f.state['delivery']={'status':'pending','endpoint':'github_draft_pr','repository':c['repository'],
+                                  'baseRef':c['base_ref'],'headRef':c['branch'],
+                                  'endpointDecision':{'status':'settled','source':'contract','evidence':c['approval_ref']}}
         g.store.remove(g.key+'.workflow.json');g.store.create(g.key+'.workflow.json',g.binding)
         g.f.state.update(active=True,complete=False,phase='REVIEW')
         original=g.outcome_ready
@@ -89,6 +95,14 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.controller.authenticate_workflow_parent_acceptance(),cut)
         self.assertEqual({p.name:p.read_bytes() for p in self.graph.store.root.iterdir() if p.is_file()},before)
         self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint);self.assertEqual(self.journal.read(),journal)
+    def test_schema_four_dispatch_acceptance_and_fresh_parent_reader_preserve_delivery(self):
+        self.prepared(delivery_capability=True);before=self.journal.read()
+        self.assertEqual(self.controller.advance_workflow_parent_acceptance(),'prepared_workflow_parent_acceptance')
+        self.assertEqual(self.controller.advance_workflow_parent_acceptance(),'recovered_workflow_parent_acceptance')
+        cut=self.controller.authenticate_workflow_parent_acceptance()
+        self.assertTrue(cut['parent_receipt']['parent_accepted']);self.assertFalse(cut['parent_receipt']['delivery_verified'])
+        self.assertEqual(self.controller.advance_workflow_parent_acceptance(),'workflow_delivery_pending')
+        self.assertEqual(self.journal.read(),before);self.assertEqual(len(self.backend.submissions),3)
     def test_delivery_reader_cannot_finish_pending_parent(self):
         self.prepared();self.controller.prepare_workflow_parent_acceptance();before=self.graph.checkpoint.read_bytes()
         with self.assertRaises(FileNotFoundError):self.controller.authenticate_workflow_parent_acceptance()

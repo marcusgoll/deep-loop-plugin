@@ -76,7 +76,8 @@ class WorkflowGate:
         modern_fields = legacy_fields | {'schema', 'candidate_source_policy', 'artifact_output_root'}
         modern = (isinstance(binding, dict) and type(binding.get('schema')) is int and
                   ((binding['schema'] == 2 and set(binding) == modern_fields) or
-                   (binding['schema'] == 3 and set(binding) == modern_fields | {'parent_acceptance'})))
+                   (binding['schema'] == 3 and set(binding) == modern_fields | {'parent_acceptance'}) or
+                   (binding['schema'] == 4 and set(binding) == modern_fields | {'parent_acceptance','workflow_delivery'})))
         if (not isinstance(binding, dict) or not (set(binding) == legacy_fields or modern) or
                 binding['contract_digest'] != self.contract_digest or
                 not isinstance(binding['session_id'], str) or not binding['session_id'].strip() or
@@ -85,12 +86,15 @@ class WorkflowGate:
             raise ValueError('Unsupported protected workflow binding')
         if modern:
             self.candidate_policy(binding)
-            if binding['schema'] == 3:
+            if binding['schema'] in (3, 4):
                 capability = binding['parent_acceptance']
                 if (not isinstance(capability, dict) or set(capability) != {'kind', 'approval_ref'} or
                         capability['kind'] != 'review_to_ship' or
                         not isinstance(capability['approval_ref'], str) or not capability['approval_ref'].strip()):
                     raise ValueError('Explicit review-to-ship parent authority required')
+        if binding.get('schema') == 4:
+            from workflow_delivery_contract import validate_workflow_delivery
+            validate_workflow_delivery(binding['workflow_delivery'], self.contract_digest)
         approval = self.store.read(self.contract_digest + '.approval.json')
         if (set(approval) != {'contract', 'approval_ref'} or
                 not isinstance(approval['approval_ref'], str) or not approval['approval_ref'].strip() or
@@ -101,6 +105,17 @@ class WorkflowGate:
             raise ValueError('Canonical checkpoint path required')
         payload = checkpoint_bytes(path)
         state = json.loads(payload)
+        if binding.get('schema') == 4:
+            capability = binding['workflow_delivery']
+            delivery = state.get('delivery')
+            if (not isinstance(delivery,dict) or delivery.get('status') != 'pending' or
+                    delivery.get('endpoint') != 'github_draft_pr' or
+                    delivery.get('repository') != capability['repository'] or
+                    delivery.get('baseRef') != capability['base_ref'] or
+                    delivery.get('headRef') != capability['branch'] or
+                    delivery.get('endpointDecision') != {'status':'settled','source':'contract',
+                                                        'evidence':capability['approval_ref']}):
+                raise ValueError('Checkpoint delivery endpoint differs from explicit workflow authority')
         if (state.get('sessionId') != binding['session_id'] or
                 state.get('verificationContract') != binding['verification_contract']):
             raise ValueError('Checkpoint parent identity drift')
@@ -190,7 +205,7 @@ class WorkflowGate:
         return source
 
     def verification_ids(self, binding, by_id, task_id):
-        if binding.get('schema') not in (2, 3):
+        if binding.get('schema') not in (2, 3, 4):
             return sorted(binding['task_verifiers'][task_id])
         covered={task_id}
         def visit(identifier):
@@ -209,7 +224,7 @@ class WorkflowGate:
         for identifier in identifiers:
             if self.helper.prerequisite_issues(state,[identifier]):
                 unresolved.append(identifier);continue
-            if binding.get('schema') in (2, 3):
+            if binding.get('schema') in (2, 3, 4):
                 try:self._candidate_receipts(binding,state,[identifier])
                 except (ValueError,FileNotFoundError):unresolved.append(identifier)
         return unresolved
@@ -302,7 +317,7 @@ class WorkflowGate:
     def parent_accepted_state(self):
         """Explicitly enrolled review acceptance; delivery remains pending."""
         binding, state, _ = self._read()
-        if binding.get('schema') != 3:
+        if binding.get('schema') not in (3, 4):
             raise ValueError('Explicit parent acceptance enrollment required')
         if (state.get('active') is not True or state.get('complete') is not False or
                 state.get('phase') not in {'BUILD', 'REVIEW', 'SHIP'}):
