@@ -24,20 +24,23 @@ def _integer(value, name, minimum=0):
         raise ValueError(f"Invalid {name}")
 
 
-def initialize(contract_digest):
+def initialize(contract_digest, *, workflow=False):
     """Explicit enrollment only; caller must authenticate the frozen contract."""
     if (not isinstance(contract_digest, str) or len(contract_digest) != 64
             or any(c not in "0123456789abcdef" for c in contract_digest)):
         raise ValueError("Invalid contract digest")
-    return {"schema": 1, "contract_digest": contract_digest,
-            "limits": dict(LIMITS), "attempts": []}
+    result = {"schema": 2 if workflow else 1, "contract_digest": contract_digest,
+              "limits": dict(LIMITS), "attempts": []}
+    if workflow: result["task_credits"] = []
+    return result
 
 
 def _validate(journal, contract_digest):
-    if not isinstance(journal, dict) or set(journal) != {
-            "schema", "contract_digest", "limits", "attempts"}:
+    if not isinstance(journal, dict) or set(journal) != ({
+            "schema", "contract_digest", "limits", "attempts"} |
+            ({"task_credits"} if journal.get("schema") == 2 else set())):
         raise ValueError("Missing or incompatible journal")
-    if type(journal["schema"]) is not int or journal["schema"] != 1 or journal["limits"] != LIMITS:
+    if type(journal["schema"]) is not int or journal["schema"] not in (1, 2) or journal["limits"] != LIMITS:
         raise ValueError("Changed schema or approved limits")
     initialize(contract_digest)
     if journal["contract_digest"] != contract_digest:
@@ -45,8 +48,29 @@ def _validate(journal, contract_digest):
     attempts = journal["attempts"]
     if not isinstance(attempts, list) or len(attempts) > LIMITS["attempts"]:
         raise ValueError("Invalid attempt history")
+    credit_map = {}
+    credit_receipts = set()
+    credits = journal.get("task_credits", [])
+    if not isinstance(credits, list) or len(credits) > len(attempts):
+        raise ValueError("Invalid task credit history")
+    previous_index = -1
+    for credit in credits:
+        if not isinstance(credit, dict) or set(credit) != {"run_id", "run_attempt", "progress_receipt"}:
+            raise ValueError("Invalid task credit record")
+        for key in ("run_id", "run_attempt"):_integer(credit[key], key, 1)
+        initialize(credit["progress_receipt"])
+        matches = [i for i,a in enumerate(attempts) if isinstance(a,dict) and
+                   (a.get("run_id"),a.get("run_attempt")) == (credit["run_id"],credit["run_attempt"])]
+        if (len(matches) != 1 or matches[0] <= previous_index or
+                attempts[matches[0]].get("status") != "finished" or
+                attempts[matches[0]].get("progress_receipt") is not None or
+                credit["progress_receipt"] in credit_receipts):
+            raise ValueError("Repeated or unbound task credit")
+        previous_index = matches[0]
+        credit_map[(credit["run_id"],credit["run_attempt"])] = credit["progress_receipt"]
+        credit_receipts.add(credit["progress_receipt"])
     identities = set()
-    receipts = set()
+    receipts = set(credit_receipts)
     streak = 0
     for index, item in enumerate(attempts):
         if streak >= LIMITS["no_progress"]:
@@ -72,7 +96,7 @@ def _validate(journal, contract_digest):
                 raise ValueError("Repeated progress receipt")
             receipts.add(item["progress_receipt"])
         if item["status"] == "finished":
-            streak = 0 if item["progress_receipt"] is not None else streak+1
+            streak = 0 if item["progress_receipt"] is not None or identity in credit_map else streak+1
     for key in ("model_seconds", "active_seconds"):
         if sum(a[key] for a in attempts) > LIMITS[key]:
             raise ValueError("Budget exceeded")
@@ -99,7 +123,9 @@ def reserve(journal, contract_digest, *, run_id, run_attempt,
         raise ValueError("Duplicate launch identity")
     no_progress = 0
     for a in reversed(attempts):
-        if a["progress_receipt"] is not None:
+        if a["progress_receipt"] is not None or any(
+                (c["run_id"],c["run_attempt"]) == (a["run_id"],a["run_attempt"])
+                for c in journal.get("task_credits", [])):
             break
         no_progress += 1
     if len(attempts) >= LIMITS["attempts"] or no_progress >= LIMITS["no_progress"]:
@@ -129,7 +155,8 @@ def finish(journal, contract_digest, *, run_id, run_attempt,
         raise ValueError("No reservation")
     if progress_receipt is not None:
         initialize(progress_receipt)
-        if any(a["progress_receipt"] == progress_receipt for a in journal["attempts"]):
+        if (any(a["progress_receipt"] == progress_receipt for a in journal["attempts"]) or
+                any(c["progress_receipt"] == progress_receipt for c in journal.get("task_credits", []))):
             raise ValueError("Reused progress receipt")
     last = journal["attempts"][-1]
     if (last["run_id"], last["run_attempt"], last["status"]) != (
@@ -137,4 +164,27 @@ def finish(journal, contract_digest, *, run_id, run_attempt,
         raise ValueError("Wrong or already reconciled reservation")
     result = copy.deepcopy(journal)
     result["attempts"][-1].update(status="finished", progress_receipt=progress_receipt)
+    return result
+
+
+def credit_task(journal, contract_digest, *, run_id, run_attempt, progress_receipt):
+    """Append one authenticated task credit; retain all charged attempt bytes.
+
+    Trusted coordinator only, after durable owned task acceptance. Schema 1
+    pilot histories cannot be upgraded implicitly or credited by this function.
+    """
+    _validate(journal, contract_digest)
+    if journal['schema'] != 2 or not journal['attempts']:
+        raise ValueError('Explicit workflow journal required')
+    initialize(progress_receipt)
+    last = journal['attempts'][-1]
+    if (last['run_id'],last['run_attempt'],last['status']) != (run_id,run_attempt,'finished'):
+        raise ValueError('Latest finished attempt required for task credit')
+    if last['progress_receipt'] is not None or any(
+            (c['run_id'],c['run_attempt']) == (run_id,run_attempt) or
+            c['progress_receipt'] == progress_receipt for c in journal['task_credits']):
+        raise ValueError('Repeated task progress credit')
+    result = copy.deepcopy(journal)
+    result['task_credits'].append(dict(run_id=run_id,run_attempt=run_attempt,progress_receipt=progress_receipt))
+    _validate(result, contract_digest)
     return result

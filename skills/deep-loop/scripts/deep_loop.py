@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Manual development checkpoints; validation checks records, not their truth."""
 import argparse
+import copy
 import proof_binding
 from contextlib import contextmanager, redirect_stdout, nullcontext
 import io
@@ -201,7 +202,7 @@ def skill_dependency(relative):
     raise ValueError(f'Missing skill dependency: {relative}; set DEEP_LOOP_SKILLS_ROOT to its installed skills directory.')
 
 
-def contract_data(path):
+def contract_data(path, verify_files=True):
     data = read_json(path)
     validator = skill_dependency('verification-contract/scripts/validate_contract.py')
     spec = importlib.util.spec_from_file_location('contract_validator', validator)
@@ -211,7 +212,7 @@ def contract_data(path):
     if errors:
         raise ValueError('Invalid verification contract: ' + '; '.join(errors))
     for verifier in data['verifiers']:
-        proof_binding.definition(verifier, proof_binding.logical(path).parent)
+        proof_binding.definition(verifier, proof_binding.logical(path).parent, verify_files=verify_files)
     return data
 
 
@@ -331,7 +332,116 @@ def contract_issues(state, stage, archive=None):
         return ['Preserved proof BLOCKED: ' + str(error)]
 
 
-def _contract_issues(state, stage):
+
+
+def contract_definition_issues(state):
+    """Validate parent definitions and coverage, without execution acceptance."""
+    try:
+        if not isinstance(state.get('verificationContract'), dict):
+            raise ValueError('Bound parent verification contract required')
+        with resolution_context(state, None):
+            return _contract_issues(state, 'build', verify_files=False)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return ['Contract definitions BLOCKED: ' + str(error)]
+
+
+def verification_definitions(state,verifier_ids):
+    """Resolve current selected deterministic inputs without executing commands.
+
+    Unrelated branch sources may be unavailable. Only the selected blocking
+    review verifiers grant a runnable plan; manual/readback proof stays explicit.
+    """
+    if (not isinstance(verifier_ids,list) or not verifier_ids or
+            any(not isinstance(i,str) or not i for i in verifier_ids) or
+            len(set(verifier_ids))!=len(verifier_ids)):
+        raise ValueError('Explicit unique verification IDs required')
+    with resolution_context(state,None):
+        failures=_contract_issues(state,'build',verify_files=False)
+        if failures:raise ValueError('Verification definitions blocked: '+'; '.join(failures))
+        path=Path(state['verificationContract']['path'])
+        contract=contract_data(path,verify_files=False)
+        verifiers={v['id']:v for v in contract['verifiers']}
+        checks={c.get('verifierId'):c for c in state.get('checks',[]) if isinstance(c,dict)}
+        result=[]
+        for identifier in verifier_ids:
+            verifier=verifiers.get(identifier)
+            if verifier is None:raise ValueError('Unknown selected verifier: '+identifier)
+            proof=proof_binding.definition(verifier,proof_binding.logical(path).parent)
+            if (verifier['gate']!='blocking' or verifier['class']=='human' or not proof or proof['mode']!='bound' or
+                    'readback' in proof or identifier not in checks or checks[identifier].get('stage','review')!='review'):
+                raise ValueError('Automatic verification requires bound blocking review proof: '+identifier)
+            base=proof_binding.logical(path).parent
+            inputs=[str(proof_binding.bound(proof[k],base)) for k in ('implementation','source_manifest','environment_manifest')]
+            manifest=proof_binding.bound(proof['source_manifest'],base)
+            inputs.extend(str(proof_binding.bound({'path':name,'sha256':value},proof_binding.logical(manifest).parent))
+                          for name,value in proof_binding.read(manifest)['files'].items())
+            result.append({'verifier':copy.deepcopy(verifier),'identity':proof_binding.identity(proof,base),
+                           'input_paths':sorted(set(inputs)),'base':str(base)})
+        return result
+
+
+def verified_check_state(state,verifier_id,receipt,evidence,expected_sha256):
+    """Pure selected-check update; receipt proof must already exist and be current."""
+    if (not isinstance(receipt,dict) or set(receipt)!={'path','sha256'} or
+            not isinstance(evidence,str) or not evidence.strip() or len(evidence)>4096 or
+            hashlib.sha256(json.dumps(state,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()!=expected_sha256):
+        raise ValueError('Exact verification checkpoint preimage and receipt required')
+    verification_definitions(state,[verifier_id])
+    result=copy.deepcopy(state)
+    matches=[c for c in result.get('checks',[]) if c.get('verifierId')==verifier_id]
+    if len(matches)!=1:raise ValueError('Unique selected verification check required')
+    matches[0].update(status='passed',evidence=evidence,receipt=copy.deepcopy(receipt))
+    failures=prerequisite_issues(result,[verifier_id])
+    if failures:raise ValueError('Selected native receipt proof blocked: '+'; '.join(failures))
+    return result
+
+
+def prerequisite_issues(state, verifier_ids):
+    """Inspect selected current proof without changing parent acceptance.
+
+    IDs must come from the coordinator's protected task coverage map. This
+    reader cannot authenticate that mapping or authorize native dispatch.
+    """
+    try:
+        if (not isinstance(verifier_ids, list) or not verifier_ids or
+                any(not isinstance(v, str) or not v for v in verifier_ids) or
+                len(set(verifier_ids)) != len(verifier_ids)):
+            raise ValueError('Explicit unique prerequisite verifier IDs required')
+        if not isinstance(state.get('verificationContract'), dict):
+            raise ValueError('Bound parent verification contract required')
+        with resolution_context(state, None):
+            failures = _contract_issues(state, 'build', verify_files=False)
+            if failures:
+                return failures
+            path = Path(state['verificationContract']['path'])
+            contract = contract_data(path, verify_files=False)
+            verifiers = {v['id']: v for v in contract['verifiers']}
+            checks = {c.get('verifierId'): c for c in state.get('checks', []) if isinstance(c, dict)}
+            for identifier in verifier_ids:
+                if identifier not in verifiers:
+                    raise ValueError('Unknown prerequisite verifier: ' + identifier)
+                verifier = verifiers[identifier]
+                proof = proof_binding.definition(verifier, proof_binding.logical(path).parent)
+                check = checks.get(identifier)
+                if (verifier['gate'] != 'blocking' or not proof or proof['mode'] != 'bound' or
+                        'readback' in proof or not isinstance(check, dict) or
+                        check.get('stage', 'review') != 'review' or
+                        check.get('status') != 'passed' or not present(check, 'evidence')):
+                    raise ValueError('Current blocking review proof required: ' + identifier)
+            if 'design' in contract:
+                from ui_design import evidence_issues
+                failures.extend(evidence_issues(contract, path, state))
+            failures.extend(proof_binding.issues(contract, path, state, 'review',
+                            contract_semantics_sha256(contract), set(verifier_ids)))
+            # Completion gaps remain parent obligations at prerequisite review.
+            failures.extend('Unresolved contract gap: ' + g['id'] for g in contract['gaps']
+                            if g['blocks'] == 'completion')
+            return failures
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return ['Prerequisite proof BLOCKED: ' + str(error)]
+
+
+def _contract_issues(state, stage, verify_files=True):
     binding = state.get('verificationContract')
     try:
         ui_required = ui_binding_required(state)
@@ -344,8 +454,9 @@ def _contract_issues(state, stage):
     source = Path(binding['path'])
     if proof_binding.sha(source) != binding['sha256']:
         return ['Verification contract changed; rebind explicitly and rerun evidence.']
-    contract = contract_data(source)
-    issues = proof_binding.issues(contract, source, state, stage, contract_semantics_sha256(contract))
+    contract = contract_data(source, verify_files=verify_files)
+    issues = (proof_binding.issues(contract, source, state, stage, contract_semantics_sha256(contract))
+              if verify_files else [])
     if ui_required and 'design' not in contract:
         issues.append('Registered substantive UI requires an approved Design Contract.')
     checks = [c for c in state.get('checks', []) if isinstance(c, dict)]
@@ -580,6 +691,45 @@ def task_records(state):
     except graphlib.CycleError as error:
         raise ValueError(f'Dependency cycle: {error.args[1]}') from error
     return tasks, by_id
+
+
+def accepted_task_state(state, task_id, verifier_ids, evidence, expected_state_sha256):
+    """Prepare one proof-checked task transition without writing or authority.
+
+    A trusted coordinator supplies the approved verifier mapping and exact
+    checkpoint preimage, then owns atomic publication and independent readback.
+    This does not complete or deliver the parent and never mutates its input.
+    """
+    identity = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    if identity != expected_state_sha256:
+        raise ValueError('Task acceptance state preimage changed')
+    _, tasks = task_records(state)
+    if task_id not in tasks or tasks[task_id]['status'] not in ('pending', 'running', 'done'):
+        raise ValueError('Task acceptance requires an eligible approved task')
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError('Task acceptance requires durable proof evidence')
+    if any(tasks[i]['status'] != 'done' for i in tasks[task_id].get('dependsOn', [])):
+        raise ValueError('Task acceptance requires completed prerequisites')
+    if tasks[task_id]['status'] != 'done' and (
+            state.get('complete') is True or state.get('active') is False or
+            state.get('blocker') or not required_at(tasks[task_id],
+                'ship' if state.get('phase') == 'SHIP' else 'review')):
+        raise ValueError('Task acceptance session or stage is not eligible')
+    failures = prerequisite_issues(state, verifier_ids)
+    if failures:
+        raise ValueError('Task acceptance proof blocked: ' + '; '.join(failures))
+    result = copy.deepcopy(state)
+    _, changed = task_records(result)
+    task = changed[task_id]
+    if task['status'] == 'done':
+        if task['evidence'] != evidence:
+            raise ValueError('Completed task evidence differs')
+        return result
+    task.update(status='done', evidence=evidence)
+    for field in ('blocker', 'nextAction'):
+        task.pop(field, None)
+    task_records(result)
+    return result
 
 
 def task_queue(state):

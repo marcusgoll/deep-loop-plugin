@@ -28,6 +28,12 @@ def validate_delivery(delivery):
 def validate_frozen(contract):
     if not isinstance(contract, dict):
         raise ValueError('Frozen contract must be an object')
+    # This pilot implements only these frozen obligations. Unknown fields may
+    # contain blocking dependencies or checks; accepting them would silently
+    # discard part of the approved outcome rather than enforce it.
+    if set(contract) != {'worker_wall_seconds','wakeup','prompt','executor',
+                         'runtime','verification','resume_verification','delivery'}:
+        raise ValueError('Unsupported frozen contract fields')
     if (type(contract.get('worker_wall_seconds')) != int or
             contract['worker_wall_seconds'] != LIMITS['active_seconds'] or
             contract.get('wakeup') != {'model_seconds':600,'active_seconds':1200} or

@@ -1,7 +1,7 @@
 name: Pilot verification
 on:
   pull_request:
-    branches: [master, codex/pilot-admission]
+    branches: [master, codex/pilot-admission, codex/pilot-auth-recovery]
   push:
     branches: [codex/pilot-admission]
 permissions:

@@ -4,6 +4,7 @@ The injected API is authenticated private-host infrastructure, never a candidate
 callback. Mutable ref/PR writes have durable intents and are never replayed.
 Immutable Git objects are content-addressed and may be reconciled identically.
 """
+from authority import require_active
 import base64
 import hashlib
 import re
@@ -27,6 +28,7 @@ class TrustedDelivery:
         self.store,self.journal,self.api,self.artifact_reader=store,journal,api,artifact_reader
         self.key=journal.contract_digest
         self.prefix='repos/'+REPOSITORY+'/'
+        self.acceptance=None
 
     def _record(self,suffix):
         try:return self.store.read(self.key+'.delivery-'+suffix+'.json')
@@ -36,8 +38,22 @@ class TrustedDelivery:
         self.store.create(self.key+'.delivery-'+suffix+'.json',value)
         return 'wait_for_trusted_delivery'
 
+    def _authorized_api(self, method, route, data):
+        require_active(self.store, self.key)
+        self._accepted_artifact()
+        return self.api(method, route, data)
+
+    def _accepted_artifact(self):
+        if self.acceptance is None:
+            raise ValueError('Provider operation lacks current accepted candidate')
+        contract,evidence=self.acceptance
+        data=self.artifact_reader(contract,evidence)
+        if not isinstance(data,bytes) or len(data)>65536 or hashlib.sha256(data).hexdigest()!=contract['verification']['artifact_sha256']:
+            raise ValueError('Stopped artifact no longer matches acceptance')
+        return data
+
     def _call(self,method,route,data=None):
-        return self.api(method,self.prefix+route,data)
+        return self._authorized_api(method,self.prefix+route,data)
 
     def _pr(self,record,commit,base):
         number=record.get('number')
@@ -55,6 +71,7 @@ class TrustedDelivery:
 
     def step(self):
         with self.store.lock():
+            require_active(self.store, self.key)
             approval=self.store.read(self.key+'.approval.json');contract=approval['contract']
             if digest(contract)!=self.key or not approval['approval_ref']:
                 raise ValueError('Exact authenticated delivery approval required')
@@ -77,11 +94,15 @@ class TrustedDelivery:
             validate_delivery(delivery)
             resume_proof = (validate_resume_acceptance(contract,evidence,self.store)
                             if 'resume_verification' in contract else None)
+            # Re-read the stopped accepted candidate at every transition, including
+            # terminal readback. A persisted blob is not current candidate proof.
+            self.acceptance=(contract,evidence)
+            data=self._accepted_artifact()
             base=sha(delivery['source_sha'])
-            publisher=self.api('GET','user',None)
+            publisher=self._authorized_api('GET','user',None)
             if publisher.get('login')!='marcusgoll' or publisher.get('id')!=delivery['publisher_id']:
                 raise ValueError('Private publisher identity changed')
-            if self.api('GET','repos/'+REPOSITORY,None).get('id')!=delivery['repository_id']:
+            if self._authorized_api('GET','repos/'+REPOSITORY,None).get('id')!=delivery['repository_id']:
                 raise ValueError('Frozen repository identity changed')
             reference=self._call('GET','git/ref/heads/'+delivery['base_ref'])
             if reference is None or reference.get('object',{}).get('sha')!=base:
@@ -93,9 +114,6 @@ class TrustedDelivery:
             if saved['source_sha']!=base:raise ValueError('Protected source drift')
             blob=self._record('blob')
             if blob is None:
-                data=self.artifact_reader(contract,evidence)
-                if not isinstance(data,bytes) or len(data)>65536 or hashlib.sha256(data).hexdigest()!=verification['artifact_sha256']:
-                    raise ValueError('Stopped artifact no longer matches acceptance')
                 expected=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
                 response=self._call('POST','git/blobs',{'content':base64.b64encode(data).decode(),'encoding':'base64'})
                 if response['sha']!=expected:raise ValueError('Published blob readback changed')
@@ -141,6 +159,13 @@ class TrustedDelivery:
             if len(matches)!=1:raise ValueError('Ambiguous existing pilot PR')
             number=self._pr(matches[0],head,delivery)
             checks=self._call('GET','commits/'+head+'/check-runs?per_page=100')
+            # One page cannot prove required verification when results are
+            # omitted. Refuse incomplete or malformed provider readback rather
+            # than treating the visible success as whole-head acceptance.
+            if (not isinstance(checks,dict) or not isinstance(checks.get('check_runs'),list) or
+                    type(checks.get('total_count')) is not int or
+                    checks['total_count']!=len(checks['check_runs'])):
+                raise ValueError('Hosted verification listing incomplete or malformed')
             qualifying=[]
             for check in checks['check_runs']:
                 if check.get('name')=='verify' and check.get('app',{}).get('slug')=='github-actions' and check.get('head_sha')==head:
@@ -154,6 +179,8 @@ class TrustedDelivery:
                     run.get('status')!='completed' or run.get('conclusion')!='success'):
                 raise ValueError('Hosted verification provenance changed')
             final=self._call('GET','pulls/'+str(number));self._pr(final,head,delivery)
+            require_active(self.store, self.key)
+            self._accepted_artifact()
             receipt={'contract_digest':self.key,'progress_receipt':progress,'head_sha':head,
                      'base_sha':base,'pull_request':final['html_url'],'workflow_run':int(qualifying[0])}
             if resume_proof is not None:receipt['resume_acceptance_digest']=resume_proof

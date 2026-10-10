@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from admission import digest, finish, initialize, reserve
+from admission import credit_task, digest, finish, initialize, reserve
 
 
 CONTRACT = digest({"disposable": True})
@@ -15,6 +15,26 @@ class AdmissionTests(unittest.TestCase):
     def close(self, journal, run=1, progress=None, attempt=1):
         return finish(journal, CONTRACT, run_id=run, run_attempt=attempt,
                       progress_receipt=progress)
+
+    def test_workflow_credit_is_append_only_unique_and_keeps_budget(self):
+        state=self.close(self.launch(initialize(CONTRACT,workflow=True)))
+        credit=digest({'approved_task':'one'})
+        saved=credit_task(state,CONTRACT,run_id=1,run_attempt=1,progress_receipt=credit)
+        self.assertEqual(state['attempts'],saved['attempts'])
+        self.assertEqual(state['task_credits'],[])
+        with self.assertRaises(ValueError):credit_task(saved,CONTRACT,run_id=1,run_attempt=1,progress_receipt=credit)
+        second=self.close(self.launch(saved,2),2)
+        with self.assertRaises(ValueError):credit_task(second,CONTRACT,run_id=2,run_attempt=1,progress_receipt=credit)
+        third=self.launch(second,3)
+        self.assertEqual(sum(a['model_seconds'] for a in third['attempts']),1800)
+        with self.assertRaises(ValueError):self.launch(third,4)
+        with self.assertRaises(ValueError):credit_task(self.close(self.launch(initialize(CONTRACT))),CONTRACT,run_id=1,run_attempt=1,progress_receipt=credit)
+
+    def test_workflow_missing_credit_preserves_no_progress_stop(self):
+        state=initialize(CONTRACT,workflow=True)
+        for run in (1,2):state=self.close(self.launch(state,run),run)
+        with self.assertRaises(ValueError):self.launch(state,3)
+        with self.assertRaises(ValueError):credit_task(state,CONTRACT,run_id=1,run_attempt=1,progress_receipt=digest('old task'))
 
     def test_three_attempts_across_serialized_restarts_then_stop(self):
         state = initialize(CONTRACT)

@@ -10,7 +10,7 @@ import os
 import subprocess
 import uuid
 
-from admission import _validate, finish, initialize, reserve
+from admission import _validate, credit_task, finish, initialize, reserve
 
 
 class GitJournal:
@@ -38,7 +38,24 @@ class GitJournal:
         _validate(state, self.contract_digest)
         return revision, state
 
-    def publish(self, expected_revision, state):
+    def verify_history(self, revision, expected):
+        """Authenticate a saved revision and its retained append-only history."""
+        if (not isinstance(revision,str) or len(revision) not in (40,64) or
+                any(c not in '0123456789abcdef' for c in revision)):
+            raise ValueError('Canonical journal commit revision required')
+        current, state = self.read()
+        saved = json.loads(self._git('show', revision + ':journal.json'))
+        _validate(saved, self.contract_digest)
+        if saved != expected:
+            raise ValueError('Journal historical revision differs')
+        self._git('merge-base', '--is-ancestor', revision, current)
+        if (state['schema'] != saved['schema'] or
+                state['attempts'][:len(saved['attempts'])] != saved['attempts'] or
+                state.get('task_credits', [])[:len(saved.get('task_credits', []))] != saved.get('task_credits', [])):
+            raise ValueError('Journal credited history missing or rewritten')
+        return current, state
+
+    def publish(self, expected_revision, state, *, before_publish=None):
         """Append after exact revision, then verify provider-visible readback.
 
         A competing sibling commit cannot fast-forward the remote. A failed push
@@ -48,7 +65,7 @@ class GitJournal:
         _validate(state, self.contract_digest)
         if expected_revision is None:
             # An orphan commit cannot fast-forward an existing journal ref.
-            if state != initialize(self.contract_digest):
+            if state != initialize(self.contract_digest, workflow=state["schema"] == 2):
                 raise ValueError("Enrollment requires an empty journal")
             parents = []
         else:
@@ -66,10 +83,15 @@ class GitJournal:
                         and new[-1]["status"] == "finished"
                         and all(new[-1][k] == old[-1][k] for k in (
                             "run_id", "run_attempt", "model_seconds", "active_seconds")))
-            if not (appended or finished):
+            credited = (previous["schema"] == state["schema"] == 2 and new == old and
+                        len(state["task_credits"]) == len(previous["task_credits"])+1 and
+                        state["task_credits"][:-1] == previous["task_credits"])
+            if not (appended or finished or credited):
                 raise ValueError("Journal history rewrite")
             last = new[-1]
-            if appended:
+            if credited:
+                allowed = credit_task(previous, self.contract_digest, **state["task_credits"][-1])
+            elif appended:
                 allowed = reserve(previous, self.contract_digest, **{
                     key: last[key] for key in (
                         "run_id", "run_attempt", "model_seconds", "active_seconds")})
@@ -84,6 +106,7 @@ class GitJournal:
         tree = self._git("mktree", data=f"100644 blob {blob}\tjournal.json\n")
         commit = self._git("commit-tree", tree, *parents,
                            data=f"Persist pilot admission {uuid.uuid4()} before execution\n")
+        if before_publish is not None:before_publish()
         self._git("push", "--", self.remote, commit+":"+self.ref)
         observed, saved = self.read()
         if observed != commit or saved != state:

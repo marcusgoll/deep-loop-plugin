@@ -10,8 +10,11 @@ from pathlib import Path
 import pwd
 import stat
 import subprocess
+import time
 
+from authority import require_active
 from admission import digest
+from workflow_gate import native_prompt
 from native_session import MAX_CAPTURE_BYTES, session_from_capture
 from private_launch import ACCOUNT, ROOT
 from systemd_observer import observe_unit
@@ -38,12 +41,36 @@ def authentication_command(candidate, binary):
 
 
 class NativeBackend:
-    def __init__(self, store, contract_digest):
+    def __init__(self, store, contract_digest, workflow_gate=None):
         self.store, self.contract_digest = store, contract_digest
         self.qualified = None
+        self.workflow_gate = workflow_gate
+
+    def _workflow_reader(self):
+        try:
+            self.store.read(self.contract_digest + '.workflow.json')
+        except FileNotFoundError:
+            return False
+        gate = self.workflow_gate
+        if gate is None or gate.store is not self.store or gate.contract_digest != self.contract_digest:
+            raise ValueError('Native workflow requires its trusted proof reader')
+        return True
+
+    def _workflow_proof(self, owner):
+        if not self._workflow_reader():
+            return
+        selected = self.store.read(owner['unit'] + '.workflow-attempt.json')['selection']
+        current = self.workflow_gate.selection()
+        task = selected['task_id']
+        if (task not in current['ready'] or current['binding_digest'] != selected['binding_digest'] or
+                current['session_id'] != selected['session_id'] or
+                current['prompt_sha256'][task] != selected['prompt_sha256']):
+            raise ValueError('Native prerequisite proof or task selection changed')
 
     def qualify(self, plan, contract):
         self.qualified = None
+        require_active(self.store, self.contract_digest)
+        self._workflow_reader()
         if os.geteuid() != 0 or digest(contract) != self.contract_digest or plan['contract_digest'] != self.contract_digest:
             raise ValueError('Trusted root exact-contract execution required')
         approval = self.store.read(self.contract_digest + '.approval.json')
@@ -104,6 +131,7 @@ class NativeBackend:
         return str(self.store._path(name))
 
     def submit(self, plan, contract):
+        require_active(self.store, self.contract_digest)
         if self.qualified != (digest(plan), digest(contract)):
             raise ValueError('Native submission has no matching qualification')
         self.qualified = None
@@ -111,7 +139,9 @@ class NativeBackend:
         if owner['contract_digest'] != self.contract_digest or owner['unit'] != plan['unit'] or owner['plan_digest'] != digest(plan):
             raise ValueError('Native submission has no matching durable intent')
         unit = plan['unit']
-        prompt = self._raw(unit+'.prompt', contract['prompt'].encode())
+        self._workflow_proof(owner)
+        prompt_text = native_prompt(self.store, self.contract_digest, owner, contract)
+        prompt = self._raw(unit+'.prompt', prompt_text.encode())
         capture = self._raw(unit+'.jsonl', b'')
         errors = self._raw(unit+'.stderr', b'')
         properties = dict(plan['properties'], StandardInput='file:'+prompt,
@@ -129,12 +159,53 @@ class NativeBackend:
         # writes; startup and shutdown are independently bounded by systemd.
         if remaining(self.store,self.contract_digest) < plan['charged_active_seconds']:
             raise ValueError('Insufficient immutable execution window before native dispatch')
+        require_active(self.store, self.contract_digest)
+        self._workflow_proof(owner)
+        if native_prompt(self.store, self.contract_digest, owner, contract) != prompt_text:
+            raise ValueError('Approved native prompt changed before submission')
         subprocess.run(args + command, capture_output=True, text=True, check=True, timeout=5)
         invocation = subprocess.run(['/usr/bin/systemctl', 'show', unit+'.service', '--property=InvocationID', '--value'],
                                     capture_output=True, text=True, check=True, timeout=5).stdout.strip()
         # Exact native ownership readback is required before returning identity.
         observe_unit(unit, invocation)
         return invocation
+
+    def observe_owned(self, plan, contract, owner, invocation):
+        """Authenticate historical native identity without session parsing."""
+        if (os.geteuid() != 0 or digest(contract) != self.contract_digest or
+                owner['contract_digest'] != self.contract_digest or
+                owner['unit'] != plan['unit'] or owner['plan_digest'] != digest(plan) or
+                self.store.read(owner['unit']+'.invocation.json') != {'owner':owner,'invocation_id':invocation}):
+            raise ValueError('Revocation native ownership drift')
+        description = subprocess.run(['/usr/bin/systemctl','show',plan['unit']+'.service',
+                                      '--property=Description','--value'],capture_output=True,
+                                     text=True,check=True,timeout=5).stdout.strip()
+        if description != 'Deep Loop plan '+digest(plan):
+            raise ValueError('Revocation native plan drift')
+        return observe_unit(plan['unit'], invocation)
+
+    def stop_owned(self, plan, contract, owner, invocation):
+        """Revoke only an authenticated retained invocation; never unload it.
+
+        RemainAfterExit keeps successful exit observable. Killing the exact
+        control group also retains failed-unit identity for cleanup readback.
+        """
+        if self.store.read('active-owner.json') != owner:
+            raise ValueError('Revocation owner changed before signal')
+        for signal_name in ('SIGTERM', 'SIGKILL'):
+            observation = self.observe_owned(plan, contract, owner, invocation)
+            if observation['execution_finished'] and observation['cgroup_empty']:
+                return observation
+            subprocess.run(['/usr/bin/systemctl','kill','--kill-whom=all',
+                            '--signal='+signal_name,plan['unit']+'.service'],
+                           capture_output=True,text=True,check=True,timeout=5)
+            deadline = time.monotonic()+5
+            while time.monotonic() < deadline:
+                observation = self.observe_owned(plan, contract, owner, invocation)
+                if observation['execution_finished'] and observation['cgroup_empty']:
+                    return observation
+                time.sleep(.1)
+        raise ValueError('Revoked native unit did not become ended and empty')
 
     def recover_invocation(self, plan, contract, owner):
         """Adopt an existing root-submitted native unit; never dispatch/retry.

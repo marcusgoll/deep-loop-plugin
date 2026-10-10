@@ -60,7 +60,7 @@ class DeliveryTests(unittest.TestCase):
             if self.lost=='pr':raise OSError('Lost PR response')
             return self.pr
         if suffix.startswith('commits/'):
-            return {'check_runs':[{'name':'verify','app':{'slug':'github-actions'},'head_sha':'d'*40,'status':'completed','conclusion':'success','details_url':'https://github.com/marcusgoll/deep-loop-plugin/actions/runs/12/job/13'}]}
+            return {'total_count':1,'check_runs':[{'name':'verify','app':{'slug':'github-actions'},'head_sha':'d'*40,'status':'completed','conclusion':'success','details_url':'https://github.com/marcusgoll/deep-loop-plugin/actions/runs/12/job/13'}]}
         if suffix=='actions/runs/12':return {'head_sha':'d'*40,'path':WORKFLOW,'event':'pull_request','status':'completed','conclusion':'success'}
         if suffix=='pulls/17':return self.pr
         self.fail('Unexpected endpoint '+route)
@@ -87,6 +87,71 @@ class DeliveryTests(unittest.TestCase):
         self.store.create(self.key+'.resume-acceptance.json',self.proof)
         self.delivery=TrustedDelivery(self.store,self.journal,self.api,lambda *a:self.data)
 
+    def test_revocation_intent_blocks_all_provider_calls(self):
+        from authority import OutcomeRevoked
+        self.store.create(self.key+'.revocation-intent.json',{})
+        with self.assertRaises(OutcomeRevoked):self.delivery.step()
+        self.assertEqual(self.calls,[])
+
+    def test_revocation_between_provider_reads_blocks_next_call(self):
+        from authority import OutcomeRevoked
+        original=self.api
+        def revoke_after_read(method,route,data):
+            result=original(method,route,data)
+            self.store.create(self.key+'.revocation-intent.json',{})
+            return result
+        self.delivery.api=revoke_after_read
+        with self.assertRaises(OutcomeRevoked):self.delivery.step()
+        self.assertEqual(len(self.calls),1)
+        self.assertFalse(any(method=='POST' for method,route,data in self.calls))
+
+    def test_candidate_drift_during_final_readback_blocks_completion(self):
+        self.advance(6);original=self.api
+        def changed(method,route,data):
+            result=original(method,route,data)
+            if route.endswith('/pulls/17'):
+                self.delivery.artifact_reader=lambda *args:b'changed during final readback'
+            return result
+        self.delivery.api=changed
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertIsNone(self.delivery._record('complete'))
+
+    def test_revocation_during_final_readback_blocks_completion(self):
+        from authority import OutcomeRevoked
+        self.advance(6);original=self.api
+        def revoke(method,route,data):
+            result=original(method,route,data)
+            if route.endswith('/pulls/17'):self.store.create(self.key+'.revocation-intent.json',{})
+            return result
+        self.delivery.api=revoke
+        with self.assertRaises(OutcomeRevoked):self.delivery.step()
+        self.assertIsNone(self.delivery._record('complete'))
+
+    def test_candidate_drift_between_provider_calls_blocks_next_request(self):
+        original=self.api
+        def change_after_read(method,route,data):
+            result=original(method,route,data)
+            self.delivery.artifact_reader=lambda *args:b'changed during provider read'
+            return result
+        self.delivery.api=change_after_read
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertEqual(len(self.calls),1)
+        self.assertFalse(any(method=='POST' for method,route,data in self.calls))
+
+    def test_candidate_drift_after_blob_blocks_provider_operations(self):
+        self.advance(2)
+        self.delivery.artifact_reader=lambda *args:b'changed after verification'
+        self.calls.clear()
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertEqual(self.calls,[])
+
+    def test_candidate_drift_after_completion_invalidates_readback(self):
+        self.advance(6);self.assertEqual(self.delivery.step(),'delivered_verified_draft')
+        self.delivery.artifact_reader=lambda *args:b'changed after delivery'
+        self.calls.clear()
+        with self.assertRaises(ValueError):self.delivery.step()
+        self.assertEqual(self.calls,[])
+
     def test_resume_proof_removal_after_blob_blocks_every_provider_operation(self):
         self.configure_resume();self.advance(2)
         self.store.remove(self.key+'.resume-acceptance.json')
@@ -107,6 +172,40 @@ class DeliveryTests(unittest.TestCase):
         self.configure_resume();self.advance(6)
         self.assertEqual(self.delivery.step(),'delivered_verified_draft')
         self.assertEqual(self.delivery._record('complete')['resume_acceptance_digest'],digest(self.proof))
+
+    def test_incomplete_check_listing_never_completes(self):
+        self.advance(6);original=self.api
+        def truncated(method,route,data):
+            result=original(method,route,data)
+            if 'check-runs?' in route:result['total_count']=2
+            return result
+        self.delivery.api=truncated
+        with self.assertRaisesRegex(ValueError,'verification listing'):
+            self.delivery.step()
+        with self.assertRaises(FileNotFoundError):
+            self.store.read(self.journal.contract_digest+'.delivery-complete.json')
+
+    def test_missing_check_listing_count_never_completes(self):
+        self.advance(6);original=self.api
+        def missing(method,route,data):
+            result=original(method,route,data)
+            if 'check-runs?' in route:result.pop('total_count')
+            return result
+        self.delivery.api=missing
+        with self.assertRaisesRegex(ValueError,'verification listing'):
+            self.delivery.step()
+
+    def test_malformed_check_listing_count_never_completes(self):
+        self.advance(6);original=self.api
+        for count in (True,-1,'1'):
+            with self.subTest(count=count):
+                def malformed(method,route,data):
+                    result=original(method,route,data)
+                    if 'check-runs?' in route:result['total_count']=count
+                    return result
+                self.delivery.api=malformed
+                with self.assertRaisesRegex(ValueError,'verification listing'):
+                    self.delivery.step()
 
     def test_incremental_exact_draft_delivery_and_current_readback(self):
         self.advance(6)

@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 
-from admission import digest, finish, initialize, reserve
+from admission import credit_task, digest, finish, initialize, reserve
 from git_journal import GitJournal
 
 
@@ -27,6 +27,33 @@ class GitJournalTests(unittest.TestCase):
     def reserved(self, state):
         return reserve(state, self.contract, run_id=1, run_attempt=1,
                        model_seconds=600, active_seconds=1200)
+
+    def test_late_authority_expiry_blocks_actual_remote_push(self):
+        first,restarted=self.clients
+        original=initialize(self.contract)
+        revision=first.publish(None,original)
+        def expired():raise ValueError('fixture publication window expired')
+        with self.assertRaisesRegex(ValueError,'window expired'):
+            first.publish(revision,self.reserved(original),before_publish=expired)
+        self.assertEqual(restarted.read(),(revision,original))
+
+    def test_workflow_credit_appends_event_without_attempt_rewrite(self):
+        first,restarted=self.clients
+        revision=first.publish(None,initialize(self.contract,workflow=True))
+        _,state=first.read();state=self.reserved(state);revision=first.publish(revision,state)
+        state=finish(state,self.contract,run_id=1,run_attempt=1);revision=first.publish(revision,state)
+        credited=credit_task(state,self.contract,run_id=1,run_attempt=1,progress_receipt=digest('approved task'))
+        saved_revision=first.publish(revision,credited)
+        self.assertEqual(restarted.read(),(saved_revision,credited))
+        self.assertEqual(credited['attempts'],state['attempts'])
+        self.assertEqual(restarted.verify_history(saved_revision,credited),(saved_revision,credited))
+        with self.assertRaises(ValueError):restarted.verify_history(revision,credited)
+        next_state=reserve(credited,self.contract,run_id=2,run_attempt=1,model_seconds=600,active_seconds=1200)
+        next_revision=first.publish(saved_revision,next_state)
+        self.assertEqual(restarted.verify_history(saved_revision,credited),(next_revision,next_state))
+        with self.assertRaises(ValueError):first.publish(revision,credited)
+        altered={**credited,'task_credits':[]}
+        with self.assertRaises(ValueError):first.publish(saved_revision,altered)
 
     def test_durable_prelaunch_charge_survives_workspace_loss(self):
         first, restarted = self.clients

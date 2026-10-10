@@ -20,12 +20,23 @@ class FixtureJournal:
     def read(self):
         if self.state is None: raise FileNotFoundError('No enrolled journal')
         return self.revision, copy.deepcopy(self.state)
-    def publish(self, expected, state):
+    def publish(self, expected, state, *, before_publish=None):
         if expected != self.revision: raise ValueError('Stale journal')
+        if before_publish is not None:before_publish()
         self.state = copy.deepcopy(state)
         self.revision = digest({'state': state, 'parent': expected})
+        if not hasattr(self,'history'):self.history={}
+        self.history[self.revision]=copy.deepcopy(self.state)
         if self.uncertain: raise OSError('Uncertain publication')
         return self.revision
+
+    def verify_history(self, revision, expected):
+        if getattr(self,'history',{}).get(revision) != expected:
+            raise ValueError('Journal historical revision differs')
+        if (self.state['attempts'][:len(expected['attempts'])] != expected['attempts'] or
+                self.state.get('task_credits',[])[:len(expected.get('task_credits',[]))] != expected.get('task_credits',[])):
+            raise ValueError('Journal credited history missing or rewritten')
+        return self.read()
 
 class FixtureBackend:
     def __init__(self):

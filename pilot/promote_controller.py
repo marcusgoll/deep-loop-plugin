@@ -16,14 +16,14 @@ from private_controller import TrustedStore
 from private_launch import ROOT
 
 CONTROL = Path(ROOT)/'control'
-MODULES = ('admission.py', 'git_journal.py', 'private_launch.py',
+MODULES = ('admission.py', 'authority.py', 'git_journal.py', 'private_launch.py',
            'private_controller.py', 'systemd_observer.py', 'native_session.py',
            'native_backend.py', 'artifact_verifier.py', 'resume_verifier.py', 'private_wakeup.py',
            'worker_window.py', 'private_worker.py', 'worker_units.py',
            'trusted_delivery.py', 'github_transport.py', 'delivery_artifact.py',
            'qualification_environment.py', 'qualification_plan.py',
            'qualification_probe.py', 'qualification_runner.py', 'strict_configuration.py',
-           'enrollment.py', 'enrollment_operator.py', 'frozen_contract.py')
+           'enrollment.py', 'enrollment_operator.py', 'frozen_contract.py', 'workflow_gate.py', 'workflow_enrollment.py', 'pinned_helper.py', 'native_verifier.py','native_result.py','native_publication.py')
 
 
 def plan():

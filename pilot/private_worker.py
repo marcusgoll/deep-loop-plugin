@@ -21,6 +21,9 @@ from worker_window import remaining
 from trusted_delivery import TrustedDelivery
 from github_transport import GitHubAPI, UncertainAPI
 from delivery_artifact import DeliveryArtifact
+from pinned_helper import BoundPinnedHelper
+from workflow_gate import WorkflowGate
+from native_verifier import NativeVerifier
 
 TIMER = 'deep-loop-private-worker.timer'
 WORKER_SECONDS = 60
@@ -43,16 +46,19 @@ def run(store, factory, *, window=remaining, delivery_factory=None):
     return result
 
 
-def qualify_service():
+def qualify_service(service_name='deep-loop-private-worker.service'):
+    # Alternate names are trusted fixture inputs, never environment authority.
+    if not re.fullmatch(r'deep-loop-(?:private-worker|qualification-[a-z0-9-]{1,48})\.service',service_name):
+        raise ValueError('Unsupported trusted worker service identity')
     invocation = os.environ.get('INVOCATION_ID', '')
     if not re.fullmatch(r'[0-9a-f]{32}', invocation):
         raise ValueError('Worker must run in its trusted systemd service')
-    actual = subprocess.run(['/usr/bin/systemctl','show','deep-loop-private-worker.service',
+    actual = subprocess.run(['/usr/bin/systemctl','show',service_name,
                              '--property=InvocationID','--value'],capture_output=True,text=True,
                             check=True,timeout=5).stdout.strip()
     if actual != invocation:
         raise ValueError('Worker native invocation mismatch')
-    path='/org/freedesktop/systemd1/unit/deep_2dloop_2dprivate_2dworker_2eservice'
+    path='/org/freedesktop/systemd1/unit/'+service_name.replace('-', '_2d').replace('.', '_2e')
     for property_name,expected in [('RuntimeMaxUSec',45000000),('TimeoutStopUSec',5000000),
                                    ('TimeoutStartUSec',5000000)]:
         observed=subprocess.run(['/usr/bin/busctl','get-property','org.freedesktop.systemd1',path,
@@ -62,19 +68,29 @@ def qualify_service():
             raise ValueError('Native worker timeout configuration drift')
 
 
+def build_controller(store,key):
+    """Production construction; helper authority is checked at proof use.
+
+    Keep exact-owner reconciliation available when workflow helper files have
+    become unavailable. The gate cannot select/accept work without those files.
+    """
+    approval=store.read(key+'.approval.json')
+    if digest(approval['contract'])!=key:raise ValueError('Worker approval changed')
+    control=store.root
+    journal=GitJournal(control/'journal-work',str(control/'journal.git'),key)
+    gate=WorkflowGate(store,key,BoundPinnedHelper(store,key))
+    backend=NativeBackend(store,key,workflow_gate=gate)
+    verifier=ResumeVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
+    return PrivateController(store,journal,backend,verifier,workflow_gate=gate,native_verifier=NativeVerifier(store,key))
+
+
 def main():
     if os.geteuid() != 0:
         raise ValueError('Private trusted root supervisor required')
     control = Path(ROOT)/'control'
     store = TrustedStore(control)
     def factory(key):
-        approval = store.read(key+'.approval.json')
-        if digest(approval['contract']) != key:
-            raise ValueError('Worker approval changed')
-        journal = GitJournal(control/'journal-work',str(control/'journal.git'),key)
-        backend = NativeBackend(store,key)
-        verifier = ResumeVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
-        return PrivateController(store,journal,backend,verifier)
+        return build_controller(store,key)
     def delivery_factory(key):
         journal=GitJournal(control/'journal-work',str(control/'journal.git'),key)
         reader=DeliveryArtifact(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
@@ -89,7 +105,13 @@ def main():
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
         raise
     if result not in {'submitted_once','wait_for_predecessor','finished_without_verified_progress',
-                      'finished_with_verified_progress','wait_for_trusted_delivery'}:
+                      'finished_with_verified_progress','wait_for_trusted_delivery',
+                      'recovered_workflow_task_acceptance','recovered_workflow_task_credit',
+                      'wait_for_native_verifier','prepared_native_verifier_publication',
+                      'recovered_native_verifier_publication','recovered_native_verifier_cleanup',
+                      'recovered_native_verifier_preparation_cleanup',
+                      'submitted_native_workflow_verifier','recorded_workflow_task_proof',
+                      'accepted_workflow_task'}:
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
 
 
