@@ -46,16 +46,19 @@ def run(store, factory, *, window=remaining, delivery_factory=None):
     return result
 
 
-def qualify_service():
+def qualify_service(service_name='deep-loop-private-worker.service'):
+    # Alternate names are trusted fixture inputs, never environment authority.
+    if not re.fullmatch(r'deep-loop-(?:private-worker|qualification-[a-z0-9-]{1,48})\.service',service_name):
+        raise ValueError('Unsupported trusted worker service identity')
     invocation = os.environ.get('INVOCATION_ID', '')
     if not re.fullmatch(r'[0-9a-f]{32}', invocation):
         raise ValueError('Worker must run in its trusted systemd service')
-    actual = subprocess.run(['/usr/bin/systemctl','show','deep-loop-private-worker.service',
+    actual = subprocess.run(['/usr/bin/systemctl','show',service_name,
                              '--property=InvocationID','--value'],capture_output=True,text=True,
                             check=True,timeout=5).stdout.strip()
     if actual != invocation:
         raise ValueError('Worker native invocation mismatch')
-    path='/org/freedesktop/systemd1/unit/deep_2dloop_2dprivate_2dworker_2eservice'
+    path='/org/freedesktop/systemd1/unit/'+service_name.replace('-', '_2d').replace('.', '_2e')
     for property_name,expected in [('RuntimeMaxUSec',45000000),('TimeoutStopUSec',5000000),
                                    ('TimeoutStartUSec',5000000)]:
         observed=subprocess.run(['/usr/bin/busctl','get-property','org.freedesktop.systemd1',path,

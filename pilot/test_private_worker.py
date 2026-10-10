@@ -43,6 +43,27 @@ class WorkerTests(unittest.TestCase):
         with patch.dict('os.environ',{},clear=True),patch('private_worker.subprocess.run') as process:
             with self.assertRaises(ValueError):qualify_service()
             process.assert_not_called()
+    def test_qualification_service_checks_its_actual_invocation_and_timeouts(self):
+        from types import SimpleNamespace
+        service='deep-loop-qualification-supervisor.service';invocation='a'*32
+        outputs=[invocation,'t 45000000','t 5000000','t 5000000']
+        with patch.dict('os.environ',{'INVOCATION_ID':invocation},clear=True),patch('private_worker.subprocess.run',side_effect=[SimpleNamespace(stdout=x) for x in outputs]) as process:
+            qualify_service(service)
+        self.assertEqual(process.call_args_list[0].args[0][2],service)
+        self.assertEqual(process.call_args_list[1].args[0][3],'/org/freedesktop/systemd1/unit/deep_2dloop_2dqualification_2dsupervisor_2eservice')
+
+    def test_foreign_service_name_cannot_redirect_qualification(self):
+        with patch('private_worker.subprocess.run') as process:
+            with self.assertRaisesRegex(ValueError,'identity'):qualify_service('other.service')
+        process.assert_not_called()
+
+    def test_qualification_service_rejects_invocation_or_native_timeout_drift(self):
+        from types import SimpleNamespace
+        invocation='a'*32
+        for outputs in [['b'*32],[invocation,'t 45000001']]:
+            with self.subTest(outputs=outputs),patch.dict('os.environ',{'INVOCATION_ID':invocation},clear=True),patch('private_worker.subprocess.run',side_effect=[SimpleNamespace(stdout=x) for x in outputs]):
+                with self.assertRaises(ValueError):qualify_service('deep-loop-qualification-supervisor.service')
+
     def test_unit_generation_pins_bundle_and_disables_service_restart(self):
         configuration=units('a'*64)
         service=configuration['deep-loop-private-worker.service']
