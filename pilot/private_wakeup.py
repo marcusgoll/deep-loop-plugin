@@ -53,6 +53,9 @@ def tick(store, controller_factory, *, expected_contract_digest=None, active_win
     recovered = controller.recover_pending_workflow_transition()
     if recovered is not None:
         return recovered
+    advanced = controller.advance_finished_workflow_task()
+    if advanced is not None:
+        return advanced
     workflow_tasks = controller.ready_workflow_tasks()
     task_id = None
     if workflow_tasks is not None:

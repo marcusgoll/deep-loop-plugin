@@ -220,9 +220,9 @@ class WorkflowGate:
         return self._publish_checkpoint(transition,self._checked_verification_transition,
             lambda:self.helper.prerequisite_issues(self._read()[1],[transition['observation']['verifier_id']]),before_write)
 
-    def publish_accepted_state(self,transition):
+    def publish_accepted_state(self,transition,before_write=None):
         return self._publish_checkpoint(transition,self._checked_acceptance_transition,
-            lambda:self.task_acceptance(transition['observation']['selection']))
+            lambda:self.task_acceptance(transition['observation']['selection']),before_write)
 
     def _publish_checkpoint(self, transition,check_transition,postcheck,before_write=None):
         """Publish exactly a proof-checked transition in a protected checkpoint.

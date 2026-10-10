@@ -8,6 +8,9 @@ from private_controller import PrivateController
 
 class WorkflowDispatchTests(unittest.TestCase):
     def setUp(self):
+        from unittest.mock import patch
+        window=patch('private_controller.remaining',return_value=1000)
+        self.remaining=window.start();self.addCleanup(window.stop)
         self.graph=graph_fixtures.WorkflowGateTests()
         self.graph.setUp();self.addCleanup(self.graph.doCleanups)
         g=self.graph
@@ -26,6 +29,33 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.backend.active=False;self.backend.empty=True
         self.controller.reconcile()
         return owner
+
+    def test_expired_window_blocks_durable_proof_record(self):
+        owner=self.finished_proved_task();before=self.journal.read();self.remaining.return_value=0
+        with self.assertRaisesRegex(ValueError,'window expired'):
+            self.controller.record_workflow_task_proof(owner)
+        self.assertFalse((self.graph.store.root/(owner['unit']+'.task-proof.json')).exists())
+        self.assertEqual(self.journal.read(),before)
+
+    def test_late_expiry_blocks_acceptance_checkpoint_replace(self):
+        import json
+        owner=self.finished_proved_task();self.controller.record_workflow_task_proof(owner)
+        before=json.loads(self.graph.checkpoint.read_text());journal=self.journal.read()
+        self.remaining.side_effect=[1000,0]
+        with self.assertRaisesRegex(ValueError,'window expired'):
+            self.controller.accept_workflow_task(owner)
+        self.assertEqual(json.loads(self.graph.checkpoint.read_text()),before)
+        self.assertEqual(self.journal.read(),journal)
+        self.assertTrue((self.graph.store.root/(owner['unit']+'.task-acceptance-intent.json')).exists())
+        self.assertFalse((self.graph.store.root/(owner['unit']+'.task-acceptance.json')).exists())
+
+    def test_late_expiry_blocks_task_credit_git_write(self):
+        owner=self.credited_task_fixture();before=self.journal.read()
+        self.remaining.side_effect=[1000,0]
+        with self.assertRaisesRegex(ValueError,'window expired'):
+            self.controller.credit_workflow_task(owner)
+        self.assertEqual(self.journal.read(),before)
+        self.assertFalse((self.graph.store.root/(owner['unit']+'.task-credit.json')).exists())
 
     def test_verifier_plan_requires_latest_owned_stopped_attempt(self):
         owner=self.start('portable')
@@ -66,8 +96,8 @@ class WorkflowDispatchTests(unittest.TestCase):
                     self.graph.store.create=crash
                 else:
                     publish=self.graph.gate.publish_accepted_state
-                    def crash(transition):
-                        publish(transition);os.kill(os.getpid(),signal.SIGKILL)
+                    def crash(transition,**kwargs):
+                        publish(transition,**kwargs);os.kill(os.getpid(),signal.SIGKILL)
                     self.graph.gate.publish_accepted_state=crash
                 try:self.controller.accept_workflow_task(owner)
                 finally:os._exit(3)

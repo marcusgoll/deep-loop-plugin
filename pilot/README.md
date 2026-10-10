@@ -409,3 +409,14 @@ publication and cleanup of the same verifier stream. Each wake preserved tasks
 and charged history; only the selected check changed. Installed systemd
 supervisor behavior, orphan preparation recovery, new verifier dispatch, task
 acceptance/credit and parent completion remain unqualified. Nothing is promoted or activated by these source changes.
+
+
+After recovery, a wake may advance the latest finished enrolled task attempt.
+It selects the next verifier without current proof, preserving the full plan's
+index. An already-run verifier with stale or failed proof blocks instead of
+replaying. Once proofs pass, separate wakes record task proof, accept the task,
+and recover its credit. Proof, acceptance, checkpoint and credit mutation
+boundaries recheck active authority and the original execution window; remote
+journal push has a final guard after local Git preparation. Routing, actual
+checkpoint and bare-Git expiry tests cover this source path. Native automatic
+initiation/acceptance/credit orchestration remains to be qualified.

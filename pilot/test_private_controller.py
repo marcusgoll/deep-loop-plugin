@@ -20,8 +20,9 @@ class FixtureJournal:
     def read(self):
         if self.state is None: raise FileNotFoundError('No enrolled journal')
         return self.revision, copy.deepcopy(self.state)
-    def publish(self, expected, state):
+    def publish(self, expected, state, *, before_publish=None):
         if expected != self.revision: raise ValueError('Stale journal')
+        if before_publish is not None:before_publish()
         self.state = copy.deepcopy(state)
         self.revision = digest({'state': state, 'parent': expected})
         if not hasattr(self,'history'):self.history={}

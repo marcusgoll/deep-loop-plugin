@@ -28,6 +28,15 @@ class GitJournalTests(unittest.TestCase):
         return reserve(state, self.contract, run_id=1, run_attempt=1,
                        model_seconds=600, active_seconds=1200)
 
+    def test_late_authority_expiry_blocks_actual_remote_push(self):
+        first,restarted=self.clients
+        original=initialize(self.contract)
+        revision=first.publish(None,original)
+        def expired():raise ValueError('fixture publication window expired')
+        with self.assertRaisesRegex(ValueError,'window expired'):
+            first.publish(revision,self.reserved(original),before_publish=expired)
+        self.assertEqual(restarted.read(),(revision,original))
+
     def test_workflow_credit_appends_event_without_attempt_rewrite(self):
         first,restarted=self.clients
         revision=first.publish(None,initialize(self.contract,workflow=True))

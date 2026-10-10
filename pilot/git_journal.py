@@ -55,7 +55,7 @@ class GitJournal:
             raise ValueError('Journal credited history missing or rewritten')
         return current, state
 
-    def publish(self, expected_revision, state):
+    def publish(self, expected_revision, state, *, before_publish=None):
         """Append after exact revision, then verify provider-visible readback.
 
         A competing sibling commit cannot fast-forward the remote. A failed push
@@ -106,6 +106,7 @@ class GitJournal:
         tree = self._git("mktree", data=f"100644 blob {blob}\tjournal.json\n")
         commit = self._git("commit-tree", tree, *parents,
                            data=f"Persist pilot admission {uuid.uuid4()} before execution\n")
+        if before_publish is not None:before_publish()
         self._git("push", "--", self.remote, commit+":"+self.ref)
         observed, saved = self.read()
         if observed != commit or saved != state:
