@@ -372,6 +372,62 @@ class PrivateController:
         if not isinstance(value, str) or len(value) != 32 or any(c not in '0123456789abcdef' for c in value):
             raise ValueError('Invalid native invocation identity')
 
+    def record_workflow_task_proof(self, owner):
+        """Bind current proof to the latest finished exact native attempt.
+
+        This durable observation assigns no budget credit and changes no task
+        status. A later acceptance boundary must revalidate mutable proof.
+        """
+        from workflow_gate import task_progress_identity
+        with self.store.lock():
+            contract = self._contract()
+            self._unowned()
+            selection = self._workflow_receipt(owner)
+            gate = self.workflow_gate
+            if (selection is None or gate is None or gate.store is not self.store or
+                    gate.contract_digest != self.contract_digest):
+                raise ValueError('Trusted enrolled task proof reader required')
+            revision, journal = self.journal.read()
+            if not journal['attempts']:
+                raise ValueError('Finished workflow attempt required')
+            last = journal['attempts'][-1]
+            if (last['status'] != 'finished' or owner['contract_digest'] != self.contract_digest or
+                    (last['run_id'], last['run_attempt']) != (owner['run_id'], owner['run_attempt'])):
+                raise ValueError('Latest finished workflow attempt required')
+            original = {**journal, 'attempts': journal['attempts'][:-1] +
+                        [{**last, 'status': 'reserved', 'progress_receipt': None}]}
+            plan = launch_plan(original, self.contract_digest, run_id=owner['run_id'],
+                               run_attempt=owner['run_attempt'], session_id=owner['session_id'])
+            if plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest']:
+                raise ValueError('Task proof launch ownership drift')
+            invocation = self.store.read(owner['unit'] + '.invocation.json')
+            if invocation['owner'] != owner:
+                raise ValueError('Task proof invocation ownership drift')
+            self._invocation(invocation['invocation_id'])
+            native = self.backend.observe_owned(plan, contract, owner, invocation['invocation_id'])
+            proof = {k: native.get(k) for k in ('unit', 'active_state', 'cgroup_empty', 'ownership_verified')}
+            if 'execution_finished' in native:
+                proof['execution_finished'] = native['execution_finished']
+            if (native.get('invocation_id') != invocation['invocation_id'] or
+                    recovery_action(original, self.contract_digest, proof) != 'reconcile_without_refund'):
+                raise ValueError('Exact stopped task ownership proof required')
+            observation = gate.task_acceptance(selection)
+            if self.journal.read() != (revision, journal):
+                raise ValueError('Task proof journal changed during inspection')
+            record = {'owner': owner, 'invocation_id': invocation['invocation_id'],
+                      'journal_revision': revision, 'observation': observation,
+                      'progress_identity': task_progress_identity(observation),
+                      'progress_credit_assigned': False}
+            name = owner['unit'] + '.task-proof.json'
+            try:
+                self.store.create(name, record)
+            except FileExistsError:
+                if self.store.read(name) != record:
+                    raise ValueError('Changed protected task proof observation')
+            if self.store.read(name) != record:
+                raise ValueError('Task proof observation readback differs')
+            return record
+
     def reconcile(self):
         """Wakeup/restart path: inspect and finish only, never submit or refund."""
         with self.store.lock():

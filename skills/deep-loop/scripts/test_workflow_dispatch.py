@@ -15,9 +15,79 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.journal=controller_fixtures.FixtureJournal(g.contract)
         self.journal.publish(None,initialize(g.key))
         self.backend=controller_fixtures.FixtureBackend()
+        self.backend.observe_owned=lambda plan,contract,owner,invocation:self.backend.observe(owner['unit'],invocation)[0]
         self.controller=PrivateController(g.store,self.journal,self.backend,workflow_gate=g.gate)
     def start(self,task_id='dependent'):
         return self.controller.start(run_id=1,run_attempt=1,model_seconds=600,active_seconds=1200,task_id=task_id)
+    def finished_proved_task(self):
+        self.graph.f.state['tasks'][0].update(status='pending',evidence='')
+        self.graph.select()
+        owner=self.start('prerequisite')
+        self.backend.active=False;self.backend.empty=True
+        self.controller.reconcile()
+        return owner
+
+    def test_task_proof_is_bound_durable_and_assigns_no_credit(self):
+        owner=self.finished_proved_task()
+        before=self.journal.read()
+        record=self.controller.record_workflow_task_proof(owner)
+        self.assertEqual(record['owner'],owner)
+        self.assertFalse(record['progress_credit_assigned'])
+        self.assertEqual(record,self.graph.store.read(owner['unit']+'.task-proof.json'))
+        self.assertEqual(record,self.controller.record_workflow_task_proof(owner))
+        self.assertEqual(before,self.journal.read())
+        self.assertIsNone(self.journal.state['attempts'][-1]['progress_receipt'])
+        self.assertEqual(self.graph.f.state['tasks'][0]['status'],'pending')
+
+    def test_production_historical_observer_works_after_owner_release(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from native_backend import NativeBackend
+        from admission import digest
+        owner=self.finished_proved_task();plan=self.backend.submissions[-1]
+        observation=self.backend.observe(owner['unit'],self.backend.invocation)[0]
+        self.controller.backend=NativeBackend(self.graph.store,self.graph.key)
+        with patch('native_backend.os.geteuid',return_value=0), \
+             patch('native_backend.subprocess.run',return_value=SimpleNamespace(stdout='Deep Loop plan '+digest(plan))) as show, \
+             patch('native_backend.observe_unit',return_value=observation):
+            record=self.controller.record_workflow_task_proof(owner)
+        self.assertEqual(record['owner'],owner)
+        self.assertIn('--property=Description',show.call_args.args[0])
+        with self.assertRaises(FileNotFoundError):self.graph.store.read('active-owner.json')
+
+    def test_task_proof_write_fault_preserves_finished_charge_and_retries_observation(self):
+        owner=self.finished_proved_task();before=self.journal.read()
+        create=self.graph.store.create
+        def fail(name,value):
+            if name.endswith('.task-proof.json'):raise OSError('Fixture observation write fault')
+            return create(name,value)
+        self.graph.store.create=fail
+        with self.assertRaises(OSError):self.controller.record_workflow_task_proof(owner)
+        self.graph.store.create=create
+        self.assertEqual(before,self.journal.read())
+        self.assertFalse(self.controller.record_workflow_task_proof(owner)['progress_credit_assigned'])
+        self.assertEqual(len(self.backend.submissions),1)
+
+    def test_task_proof_rejects_unfinished_or_substituted_owner(self):
+        owner=self.start()
+        with self.assertRaises(ValueError):self.controller.record_workflow_task_proof(owner)
+        self.backend.active=False;self.backend.empty=True;self.controller.reconcile()
+        changed={**owner,'plan_digest':'0'*64}
+        with self.assertRaises(ValueError):self.controller.record_workflow_task_proof(changed)
+
+    def test_task_proof_rejects_native_and_current_proof_drift(self):
+        owner=self.finished_proved_task()
+        self.backend.empty=False
+        with self.assertRaisesRegex(ValueError,'stopped task ownership'):
+            self.controller.record_workflow_task_proof(owner)
+        self.backend.empty=True;self.backend.invocation='b'*32
+        with self.assertRaisesRegex(ValueError,'stopped task ownership'):
+            self.controller.record_workflow_task_proof(owner)
+        self.backend.invocation='a'*32;self.graph.f.source.write_text('drift')
+        with self.assertRaisesRegex(ValueError,'proof blocked'):
+            self.controller.record_workflow_task_proof(owner)
+        with self.assertRaises(FileNotFoundError):self.graph.store.read(owner['unit']+'.task-proof.json')
+
     def test_native_submission_has_protected_task_and_charge(self):
         owner=self.start()
         record=self.graph.store.read(owner['unit']+'.workflow-attempt.json')
