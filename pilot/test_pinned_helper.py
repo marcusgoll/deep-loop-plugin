@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pinned_helper import PinnedHelper
+from pinned_helper import PinnedHelper,BoundPinnedHelper
 
 
 @unittest.skipUnless(sys.platform=='linux','Production helper requires Linux runtime')
@@ -71,3 +71,29 @@ class PinnedHelperTests(unittest.TestCase):
         p.write_text("def task_records(state):return bytearray(1073741824)\n")
         self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
         with self.assertRaisesRegex(ValueError,'unavailable or failed'):self.helper.task_records({})
+
+    def bound(self):
+        from admission import digest
+        from private_controller import TrustedStore
+        control=self.root/'control';control.mkdir(mode=0o700)
+        store=TrustedStore(control,owner_uid=os.getuid())
+        key=digest({'fixture':'bound helper'})
+        binding={'approval_ref':'fixture binding'}
+        store.create(key+'.workflow.json',binding)
+        record={'contract_digest':key,'binding_digest':digest(binding),'approval_ref':binding['approval_ref'],'helper':self.config}
+        return BoundPinnedHelper(store,key),store,key,record
+
+    def test_protected_binding_reloads_authority_and_source_on_each_call(self):
+        helper,store,key,record=self.bound()
+        store.create(key+'.workflow-helper.json',record)
+        self.assertEqual(helper.task_records({})[0],{})
+        store.remove(key+'.workflow-helper.json')
+        store.create(key+'.workflow-helper.json',{**record,'binding_digest':'0'*64})
+        with self.assertRaisesRegex(ValueError,'authority changed'):helper.task_records({})
+        store.remove(key+'.workflow-helper.json');store.create(key+'.workflow-helper.json',record)
+        (self.root/'skills/deep-loop/scripts/deep_loop.py').write_text('drift')
+        with self.assertRaisesRegex(ValueError,'source drift'):helper.task_records({})
+
+    def test_protected_helper_construction_is_lazy_but_use_requires_record(self):
+        helper,store,key,record=self.bound()
+        with self.assertRaises(FileNotFoundError):helper.task_records({})

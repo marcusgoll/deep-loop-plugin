@@ -15,7 +15,7 @@ import subprocess
 import sys
 import tempfile
 
-from admission import initialize
+from admission import digest, initialize
 
 METHODS = {'task_records','task_queue','contract_definition_issues','contract_data',
            'prerequisite_issues','accepted_task_state'}
@@ -142,3 +142,30 @@ class PinnedHelper:
     def prerequisite_issues(self,state,ids):return self._call('prerequisite_issues',state,ids)
     def accepted_task_state(self,state,task_id,ids,evidence,expected):
         return self._call('accepted_task_state',state,task_id,ids,evidence,expected)
+
+
+class BoundPinnedHelper(PinnedHelper):
+    """Resolve protected helper authority only when a proof operation needs it.
+
+    Constructing the controller must remain possible for exact-owner cleanup
+    when a package or its configuration is missing. Dispatch/proof calls still
+    require the complete binding and freshly verified snapshot on every call.
+    """
+    def __init__(self,store,contract_digest):
+        initialize(contract_digest)
+        self.store,self.contract_digest=store,contract_digest
+        self.owner_uid=store.owner_uid
+
+    def _verify(self):
+        record=self.store.read(self.contract_digest+'.workflow-helper.json')
+        binding=self.store.read(self.contract_digest+'.workflow.json')
+        if (not isinstance(record,dict) or
+                set(record)!={'contract_digest','binding_digest','approval_ref','helper'} or
+                record['contract_digest']!=self.contract_digest or
+                record['binding_digest']!=digest(binding) or
+                record['approval_ref']!=binding.get('approval_ref') or
+                not isinstance(record['approval_ref'],str) or not record['approval_ref'].strip()):
+            raise ValueError('Pinned helper workflow authority changed')
+        if sys.platform!='linux':raise ValueError('Pinned helper requires qualified Linux runtime')
+        self.configuration=record['helper']
+        return super()._verify()

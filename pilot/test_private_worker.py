@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 import test_private_controller as fixtures
-from private_worker import run,qualify_service
+from private_worker import run,qualify_service,build_controller
 from github_transport import UncertainAPI
 from worker_units import units
 
@@ -49,5 +49,55 @@ class WorkerTests(unittest.TestCase):
         self.assertIn('bundle-'+('a'*64)+'/private_worker.py',service)
         self.assertIn('RuntimeMaxSec=45',service);self.assertIn('Restart=no',service)
         self.assertIn('ConditionPathExists=',service)
+
+class WorkerConstructionTests(unittest.TestCase):
+    stop=fixtures.PrivateControllerTests.stop
+    def setUp(self):fixtures.PrivateControllerTests.setUp(self)
+    def build(self):
+        from types import SimpleNamespace
+        with patch('private_worker.GitJournal',return_value=self.journal),\
+                patch('private_worker.NativeBackend',return_value=self.backend),\
+                patch('private_worker.ResumeVerifier',return_value=None),\
+                patch('private_worker.pwd.getpwnam',return_value=SimpleNamespace(pw_uid=123)):
+            return build_controller(self.store,self.journal.contract_digest)
+    def test_frozen_construction_needs_no_helper_and_preserves_behavior(self):
+        controller=self.build()
+        self.assertIs(controller.workflow_gate.store,self.store)
+        self.assertIsNone(controller.ready_workflow_tasks())
+    def test_native_and_controller_share_the_same_gate(self):
+        from types import SimpleNamespace
+        with patch('private_worker.GitJournal',return_value=self.journal),\
+                patch('private_worker.ResumeVerifier',return_value=None),\
+                patch('private_worker.pwd.getpwnam',return_value=SimpleNamespace(pw_uid=123)):
+            controller=build_controller(self.store,self.journal.contract_digest)
+        self.assertIs(controller.backend.workflow_gate,controller.workflow_gate)
+        self.assertIs(controller.workflow_gate.helper.store,self.store)
+
+    def test_workflow_cannot_use_missing_helper_configuration(self):
+        controller=self.build()
+        self.store.create(self.journal.contract_digest+'.workflow.json',{})
+        with self.assertRaises((ValueError,FileNotFoundError)):
+            controller.ready_workflow_tasks()
+        self.assertEqual(self.backend.submissions,[])
+    def test_owned_cleanup_does_not_resolve_helper_configuration(self):
+        self.controller.start(run_id=1,run_attempt=1,model_seconds=600,active_seconds=1200)
+        controller=self.build()
+        with patch.object(controller.workflow_gate.helper,'_verify',side_effect=AssertionError('cleanup consulted helper')):
+            self.assertEqual(controller.reconcile(),'wait_for_predecessor')
+            self.stop()
+            self.assertEqual(controller.reconcile(),'finished_without_verified_progress')
+        self.assertEqual(len(self.backend.submissions),1)
+
+    def test_revocation_stops_owned_attempt_without_helper_authority(self):
+        from test_authority import RevocationBackend
+        self.backend=RevocationBackend();self.controller.backend=self.backend
+        self.controller.start(run_id=1,run_attempt=1,model_seconds=600,active_seconds=1200)
+        controller=self.build()
+        with patch.object(controller.workflow_gate.helper,'_verify',side_effect=AssertionError('revocation consulted helper')),\
+                patch('private_controller.os.geteuid',return_value=0):
+            result=controller.revoke(approval_ref='fixture revocation',reason='Stop fixture')
+        self.assertIsInstance(result,dict)
+        self.assertEqual(self.journal.state['attempts'][0]['status'],'finished')
+        self.assertEqual(len(self.backend.submissions),1)
 
 if __name__=='__main__':unittest.main()

@@ -21,6 +21,8 @@ from worker_window import remaining
 from trusted_delivery import TrustedDelivery
 from github_transport import GitHubAPI, UncertainAPI
 from delivery_artifact import DeliveryArtifact
+from pinned_helper import BoundPinnedHelper
+from workflow_gate import WorkflowGate
 
 TIMER = 'deep-loop-private-worker.timer'
 WORKER_SECONDS = 60
@@ -62,19 +64,29 @@ def qualify_service():
             raise ValueError('Native worker timeout configuration drift')
 
 
+def build_controller(store,key):
+    """Production construction; helper authority is checked at proof use.
+
+    Keep exact-owner reconciliation available when workflow helper files have
+    become unavailable. The gate cannot select/accept work without those files.
+    """
+    approval=store.read(key+'.approval.json')
+    if digest(approval['contract'])!=key:raise ValueError('Worker approval changed')
+    control=store.root
+    journal=GitJournal(control/'journal-work',str(control/'journal.git'),key)
+    gate=WorkflowGate(store,key,BoundPinnedHelper(store,key))
+    backend=NativeBackend(store,key,workflow_gate=gate)
+    verifier=ResumeVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
+    return PrivateController(store,journal,backend,verifier,workflow_gate=gate)
+
+
 def main():
     if os.geteuid() != 0:
         raise ValueError('Private trusted root supervisor required')
     control = Path(ROOT)/'control'
     store = TrustedStore(control)
     def factory(key):
-        approval = store.read(key+'.approval.json')
-        if digest(approval['contract']) != key:
-            raise ValueError('Worker approval changed')
-        journal = GitJournal(control/'journal-work',str(control/'journal.git'),key)
-        backend = NativeBackend(store,key)
-        verifier = ResumeVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
-        return PrivateController(store,journal,backend,verifier)
+        return build_controller(store,key)
     def delivery_factory(key):
         journal=GitJournal(control/'journal-work',str(control/'journal.git'),key)
         reader=DeliveryArtifact(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
