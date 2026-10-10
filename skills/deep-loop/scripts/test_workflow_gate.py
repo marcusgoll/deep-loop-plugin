@@ -47,11 +47,128 @@ class WorkflowGateTests(unittest.TestCase):
     def select(self):
         save(self.checkpoint,self.f.state)
         return self.gate.selection()
+    def test_helper_task_transition_preserves_parent_and_requires_proof(self):
+        self.f.state['tasks'][0].update(status='pending',evidence='')
+        before=copy.deepcopy(self.f.state)
+        result=deep_loop.accepted_task_state(before,'prerequisite',['V1'],'protected task receipt',digest(before))
+        self.assertEqual(before,self.f.state)
+        self.assertEqual(result['tasks'][0]['status'],'done')
+        self.assertEqual(result['checks'],before['checks'])
+        self.assertEqual(result.get('complete'),before.get('complete'))
+        self.assertEqual(result.get('delivery'),before.get('delivery'))
+        self.assertEqual(result,deep_loop.accepted_task_state(result,'prerequisite',['V1'],'protected task receipt',digest(result)))
+        with self.assertRaisesRegex(ValueError,'preimage'):
+            deep_loop.accepted_task_state(before,'prerequisite',['V1'],'proof','0'*64)
+        with self.assertRaisesRegex(ValueError,'proof blocked'):
+            deep_loop.accepted_task_state(before,'portable',['V3'],'proof',digest(before))
+        with self.assertRaisesRegex(ValueError,'completed prerequisites'):
+            deep_loop.accepted_task_state(before,'dependent',['V2'],'proof',digest(before))
+
+    def test_helper_transition_rejects_closed_blocked_and_not_due_sessions(self):
+        self.f.state['tasks'][0].update(status='pending',evidence='')
+        for change in ({'active':False},{'complete':True},{'blocker':'External decision'}):
+            state=copy.deepcopy(self.f.state);state.update(change)
+            with self.assertRaisesRegex(ValueError,'session or stage'):
+                deep_loop.accepted_task_state(state,'prerequisite',['V1'],'proof',digest(state))
+        state=copy.deepcopy(self.f.state);state['tasks'][0]['stage']='ship'
+        with self.assertRaisesRegex(ValueError,'session or stage'):
+            deep_loop.accepted_task_state(state,'prerequisite',['V1'],'proof',digest(state))
+
     def accepted_selection(self, task_id='prerequisite'):
         import hashlib
         return dict(task_id=task_id,binding_digest=digest(self.binding),
                     session_id=self.f.state['sessionId'],
                     prompt_sha256=hashlib.sha256(self.binding['task_prompts'][task_id].encode()).hexdigest())
+
+    def transition(self):
+        self.f.state['tasks'][0].update(status='pending',evidence='')
+        self.select()
+        return self.gate.accepted_state(self.accepted_selection(),'protected receipt')
+
+    def test_acceptance_publication_and_after_write_retry(self):
+        transition=self.transition()
+        saved=self.gate.publish_accepted_state(transition)
+        self.assertEqual(saved,transition['after'])
+        from unittest.mock import patch
+        import stat
+        sync=os.fsync;directories=[]
+        def inspected_sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):directories.append(fd)
+            sync(fd)
+        with patch('workflow_gate.os.fsync',side_effect=inspected_sync):
+            self.assertEqual(saved,self.gate.publish_accepted_state(transition))
+        self.assertTrue(directories)
+        self.assertTrue((self.checkpoint.parent/'.deep-task-acceptance.lock').is_file())
+
+    @unittest.skipUnless(hasattr(os,'fork'),'Requires POSIX process interruption')
+    def test_acceptance_sigkill_before_and_after_replace_recovers(self):
+        import signal
+        for after in (False,True):
+            transition=self.transition()
+            child=os.fork()
+            if child==0:
+                replace=os.replace
+                def crash(*args,**kwargs):
+                    if after:replace(*args,**kwargs)
+                    os.kill(os.getpid(),signal.SIGKILL)
+                os.replace=crash
+                try:self.gate.publish_accepted_state(transition)
+                finally:os._exit(3)
+            _,status=os.waitpid(child,0)
+            self.assertTrue(os.WIFSIGNALED(status))
+            self.assertEqual(os.WTERMSIG(status),signal.SIGKILL)
+            self.assertEqual(self.gate.publish_accepted_state(transition),transition['after'])
+
+    def test_acceptance_write_response_fault_recovers_without_repeating_transition(self):
+        from unittest.mock import patch
+        transition=self.transition();replace=os.replace
+        def response_fault(*args,**kwargs):
+            replace(*args,**kwargs)
+            raise OSError('Fixture response lost after atomic replace')
+        with patch('workflow_gate.os.replace',side_effect=response_fault):
+            with self.assertRaises(OSError):self.gate.publish_accepted_state(transition)
+        self.assertEqual(self.gate.publish_accepted_state(transition),transition['after'])
+        self.assertFalse(list(self.checkpoint.parent.glob('.deep-task-acceptance-*.tmp')))
+
+    def test_oversized_acceptance_output_preserves_readable_checkpoint(self):
+        self.f.state['tasks'][0].update(status='pending',evidence='')
+        self.select();before=self.checkpoint.read_bytes()
+        transition=self.gate.accepted_state(self.accepted_selection(),'x'*(1024*1024))
+        with self.assertRaisesRegex(ValueError,'bounded writer limit'):
+            self.gate.publish_accepted_state(transition)
+        self.assertEqual(self.checkpoint.read_bytes(),before)
+
+    def test_acceptance_stale_proof_cannot_publish_done_status(self):
+        transition=self.transition();before=self.checkpoint.read_bytes()
+        self.f.source.write_text('drift')
+        with self.assertRaisesRegex(ValueError,'proof blocked'):
+            self.gate.publish_accepted_state(transition)
+        self.assertEqual(self.checkpoint.read_bytes(),before)
+
+    def test_acceptance_publication_rejects_stale_lock_and_unprotected_file(self):
+        transition=self.transition()
+        self.f.state['tasks'][2]['evidence']='unrelated edit'
+        save(self.checkpoint,self.f.state)
+        with self.assertRaisesRegex(ValueError,'Stale'):
+            self.gate.publish_accepted_state(transition)
+        save(self.checkpoint,transition['before'])
+        import fcntl
+        lock=self.checkpoint.parent/'.deep-task-acceptance.lock'
+        with lock.open('r+') as stream:
+            fcntl.flock(stream.fileno(),fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):self.gate.publish_accepted_state(transition)
+        self.checkpoint.chmod(0o666)
+        with self.assertRaisesRegex(ValueError,'Protected checkpoint file'):
+            self.gate.publish_accepted_state(transition)
+
+    def test_protected_transition_uses_own_mapping_and_does_not_write(self):
+        self.f.state['tasks'][0].update(status='pending',evidence='')
+        self.select();before=self.checkpoint.read_bytes()
+        transition=self.gate.accepted_state(self.accepted_selection(),'protected receipt')
+        self.assertEqual(transition['after']['tasks'][0]['status'],'done')
+        self.assertEqual(self.checkpoint.read_bytes(),before)
+        with self.assertRaisesRegex(ValueError,'proof blocked'):
+            self.gate.accepted_state(self.accepted_selection('portable'),'unrelated passed proof')
 
     def test_task_acceptance_requires_own_current_proof(self):
         before=copy.deepcopy(self.f.state)

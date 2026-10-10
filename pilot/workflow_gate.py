@@ -5,10 +5,12 @@ This module selects tasks; it neither enrolls a live outcome nor dispatches one.
 Mutable task state stays in the existing checkpoint.
 """
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
 import stat
+import uuid
 
 from admission import digest
 from authority import require_active
@@ -140,6 +142,91 @@ class WorkflowGate:
                 'selection': dict(selection), 'verifier_ids': ids,
                 'proof_receipts': {i: checks[i]['receipt'] for i in ids},
                 'checkpoint_sha256': digest(state), 'parent_accepted': False}
+
+    def accepted_state(self, selection, evidence):
+        """Prepare helper-owned transition after protected current proof checks.
+
+        No filesystem write occurs. The coordinator must compare the exact
+        preimage again under its publication lock and read back the saved state.
+        """
+        observation = self.task_acceptance(selection)
+        _, state, _ = self._read()
+        if digest(state) != observation['checkpoint_sha256']:
+            raise ValueError('Task acceptance checkpoint changed before transition')
+        result = self.helper.accepted_task_state(state, selection['task_id'],
+                    observation['verifier_ids'], evidence, observation['checkpoint_sha256'])
+        return {'before': state, 'after': result, 'observation': observation}
+
+    def publish_accepted_state(self, transition):
+        """Publish exactly a proof-checked transition in a protected checkpoint.
+
+        Caller holds the credential lock and has persisted its owned-attempt
+        acceptance intent. This local lock fences participating checkpoint
+        writers; uncoordinated external edits remain a deployment restriction.
+        """
+        binding, _, _ = self._read()
+        path = Path(binding['checkpoint_path'])
+        directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+        lock = '.deep-task-acceptance.lock'
+        temporary = '.deep-task-acceptance-' + uuid.uuid4().hex + '.tmp'
+        lock_fd = None
+        try:
+            for component in path.parts[1:-1]:
+                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                dir_fd=directory)
+                os.close(directory); directory = child
+            info = os.fstat(directory)
+            if info.st_uid != self.store.owner_uid or info.st_mode & 0o022:
+                raise ValueError('Protected checkpoint directory required')
+            lock_fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                              0o600, dir_fd=directory)
+            info = os.fstat(lock_fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.store.owner_uid or
+                    info.st_mode & 0o022 or info.st_nlink != 1):
+                raise ValueError('Protected checkpoint lock required')
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(fd, 'rb') as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != self.store.owner_uid or
+                        info.st_mode & 0o022):
+                    raise ValueError('Protected checkpoint file required')
+                payload = stream.read(1024 * 1024 + 1)
+            if len(payload) > 1024 * 1024:
+                raise ValueError('Checkpoint exceeds bounded writer limit')
+            current = json.loads(payload)
+            if current not in (transition['before'], transition['after']):
+                raise ValueError('Stale task acceptance checkpoint preimage')
+            observation = transition['observation']
+            task_id = observation['selection']['task_id']
+            evidence = next(t['evidence'] for t in transition['after']['tasks'] if t['id'] == task_id)
+            checked = self.accepted_state(observation['selection'], evidence)
+            if checked['before'] != current or checked['after'] != transition['after']:
+                raise ValueError('Task acceptance transition or proof changed')
+            if current != transition['after']:
+                encoded = (json.dumps(transition['after'], indent=2) + '\n').encode()
+                if len(encoded) > 1024 * 1024:
+                    raise ValueError('Accepted checkpoint exceeds bounded writer limit')
+                fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o600, dir_fd=directory)
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(encoded); stream.flush(); os.fsync(stream.fileno())
+                # Recheck immediately before replacement; participating writers
+                # must use this same lock, and candidates cannot write this tree.
+                if checkpoint_bytes(path) != payload:
+                    raise ValueError('Checkpoint changed before acceptance publication')
+                os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+            saved = json.loads(checkpoint_bytes(path))
+            if saved != transition['after']:
+                raise ValueError('Accepted checkpoint independent readback differs')
+            self.task_acceptance(observation['selection'])
+            return saved
+        finally:
+            try: os.unlink(temporary, dir_fd=directory)
+            except FileNotFoundError: pass
+            if lock_fd is not None: os.close(lock_fd)
+            os.close(directory)
 
     def selection(self):
         binding, state, by_id = self._read()

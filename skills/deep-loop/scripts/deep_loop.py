@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Manual development checkpoints; validation checks records, not their truth."""
 import argparse
+import copy
 import proof_binding
 from contextlib import contextmanager, redirect_stdout, nullcontext
 import io
@@ -639,6 +640,45 @@ def task_records(state):
     except graphlib.CycleError as error:
         raise ValueError(f'Dependency cycle: {error.args[1]}') from error
     return tasks, by_id
+
+
+def accepted_task_state(state, task_id, verifier_ids, evidence, expected_state_sha256):
+    """Prepare one proof-checked task transition without writing or authority.
+
+    A trusted coordinator supplies the approved verifier mapping and exact
+    checkpoint preimage, then owns atomic publication and independent readback.
+    This does not complete or deliver the parent and never mutates its input.
+    """
+    identity = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    if identity != expected_state_sha256:
+        raise ValueError('Task acceptance state preimage changed')
+    _, tasks = task_records(state)
+    if task_id not in tasks or tasks[task_id]['status'] not in ('pending', 'running', 'done'):
+        raise ValueError('Task acceptance requires an eligible approved task')
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError('Task acceptance requires durable proof evidence')
+    if any(tasks[i]['status'] != 'done' for i in tasks[task_id].get('dependsOn', [])):
+        raise ValueError('Task acceptance requires completed prerequisites')
+    if tasks[task_id]['status'] != 'done' and (
+            state.get('complete') is True or state.get('active') is False or
+            state.get('blocker') or not required_at(tasks[task_id],
+                'ship' if state.get('phase') == 'SHIP' else 'review')):
+        raise ValueError('Task acceptance session or stage is not eligible')
+    failures = prerequisite_issues(state, verifier_ids)
+    if failures:
+        raise ValueError('Task acceptance proof blocked: ' + '; '.join(failures))
+    result = copy.deepcopy(state)
+    _, changed = task_records(result)
+    task = changed[task_id]
+    if task['status'] == 'done':
+        if task['evidence'] != evidence:
+            raise ValueError('Completed task evidence differs')
+        return result
+    task.update(status='done', evidence=evidence)
+    for field in ('blocker', 'nextAction'):
+        task.pop(field, None)
+    task_records(result)
+    return result
 
 
 def task_queue(state):
