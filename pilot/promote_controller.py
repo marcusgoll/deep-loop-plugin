@@ -23,7 +23,7 @@ MODULES = ('admission.py', 'authority.py', 'git_journal.py', 'private_launch.py'
            'trusted_delivery.py', 'github_transport.py', 'delivery_artifact.py',
            'qualification_environment.py', 'qualification_plan.py',
            'qualification_probe.py', 'qualification_runner.py', 'strict_configuration.py',
-           'enrollment.py', 'enrollment_operator.py', 'frozen_contract.py', 'workflow_gate.py', 'workflow_enrollment.py')
+           'enrollment.py', 'enrollment_operator.py', 'frozen_contract.py', 'workflow_gate.py', 'workflow_enrollment.py', 'pinned_helper.py')
 
 
 def plan():
