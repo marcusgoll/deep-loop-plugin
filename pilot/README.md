@@ -403,6 +403,9 @@ recover an existing verifier stream before task selection, advancing receipt
 preparation, checkpoint publication and cleanup in separate wakes. A running
 verifier waits; a failed verifier is cleaned and stops the loop. Cleanup intent
 has priority, and no recovery wake also dispatches a model attempt. Routing tests
-cover this source integration; native automatic recovery, orphan preparation
-recovery, new verifier dispatch, task acceptance/credit and parent completion
-remain unqualified. Nothing is promoted or activated by these source changes.
+cover this source integration. A disposable native fixture also exercised
+`run`/`tick` in three fresh isolated interpreters, recovering preparation,
+publication and cleanup of the same verifier stream. Each wake preserved tasks
+and charged history; only the selected check changed. Installed systemd
+supervisor behavior, orphan preparation recovery, new verifier dispatch, task
+acceptance/credit and parent completion remain unqualified. Nothing is promoted or activated by these source changes.
