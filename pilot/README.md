@@ -295,3 +295,14 @@ current proof and exact stopped-attempt ownership must be validated, credits
 must be deduplicated across the entire charged history, and provenance must be
 retained separately. Supported enrollment, checkpoint mutation and final parent
 acceptance remain outstanding; these readers are not wired into live execution.
+
+
+`PrivateController.accept_workflow_task` now exposes an explicit source-only
+acceptance transaction. It requires recorded current proof for the latest
+finished owned attempt, persists an immutable transition intent, publishes the
+helper-owned task transition, and independently reads back a complete protected
+receipt. A pending or malformed completion fences subsequent dispatch. Process
+interruption after intent or checkpoint publication can resume the same
+transaction without another submission or charge. Acceptance currently assigns
+no budget progress credit and never accepts the parent; the production worker
+and supported enrollment do not invoke this transaction yet.

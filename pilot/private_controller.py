@@ -270,6 +270,7 @@ class PrivateController:
     def ready_workflow_tasks(self):
         """Worker selection is advisory; start rechecks under the same lock."""
         with self.store.lock():
+            self._require_no_pending_task_acceptance()
             self._contract()
             self._unowned()
             try:
@@ -282,7 +283,23 @@ class PrivateController:
                 raise ValueError('Trusted workflow reader unavailable')
             return gate.selection()['ready']
 
+    def _require_no_pending_task_acceptance(self):
+        for path in self.store.root.glob('deep-loop-pilot-' + self.contract_digest + '-*.task-acceptance-intent.json'):
+            intent = self.store.read(path.name)
+            result_name = path.name.removesuffix('-intent.json') + '.json'
+            try:
+                result = self.store.read(result_name)
+            except FileNotFoundError:
+                raise ValueError('Pending owned task acceptance must reconcile before dispatch')
+            expected = {'owner':intent['owner'], 'intent_digest':digest(intent),
+                        'checkpoint_sha256':digest(intent['transition']['after']),
+                        'progress_identity':intent['progress_identity'],
+                        'progress_credit_assigned':False, 'parent_accepted':False}
+            if result != expected:
+                raise ValueError('Task acceptance completion identity drift')
+
     def _workflow_selection(self, task_id):
+        self._require_no_pending_task_acceptance()
         try:
             self.store.read(self.contract_digest + '.workflow.json')
         except FileNotFoundError:
@@ -372,52 +389,53 @@ class PrivateController:
         if not isinstance(value, str) or len(value) != 32 or any(c not in '0123456789abcdef' for c in value):
             raise ValueError('Invalid native invocation identity')
 
-    def record_workflow_task_proof(self, owner):
-        """Bind current proof to the latest finished exact native attempt.
-
-        This durable observation assigns no budget credit and changes no task
-        status. A later acceptance boundary must revalidate mutable proof.
-        """
+    def _current_workflow_task_proof(self, owner):
+        """Caller holds credential lock; authenticate stopped current proof."""
         from workflow_gate import task_progress_identity
+        contract = self._contract()
+        self._unowned()
+        selection = self._workflow_receipt(owner)
+        gate = self.workflow_gate
+        if (selection is None or gate is None or gate.store is not self.store or
+                gate.contract_digest != self.contract_digest):
+            raise ValueError('Trusted enrolled task proof reader required')
+        revision, journal = self.journal.read()
+        if not journal['attempts']:
+            raise ValueError('Finished workflow attempt required')
+        last = journal['attempts'][-1]
+        if (last['status'] != 'finished' or owner['contract_digest'] != self.contract_digest or
+                (last['run_id'], last['run_attempt']) != (owner['run_id'], owner['run_attempt'])):
+            raise ValueError('Latest finished workflow attempt required')
+        original = {**journal, 'attempts': journal['attempts'][:-1] +
+                    [{**last, 'status': 'reserved', 'progress_receipt': None}]}
+        plan = launch_plan(original, self.contract_digest, run_id=owner['run_id'],
+                           run_attempt=owner['run_attempt'], session_id=owner['session_id'])
+        if plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest']:
+            raise ValueError('Task proof launch ownership drift')
+        invocation = self.store.read(owner['unit'] + '.invocation.json')
+        if invocation['owner'] != owner:
+            raise ValueError('Task proof invocation ownership drift')
+        self._invocation(invocation['invocation_id'])
+        native = self.backend.observe_owned(plan, contract, owner, invocation['invocation_id'])
+        proof = {k: native.get(k) for k in ('unit', 'active_state', 'cgroup_empty', 'ownership_verified')}
+        if 'execution_finished' in native:
+            proof['execution_finished'] = native['execution_finished']
+        if (native.get('invocation_id') != invocation['invocation_id'] or
+                recovery_action(original, self.contract_digest, proof) != 'reconcile_without_refund'):
+            raise ValueError('Exact stopped task ownership proof required')
+        observation = gate.task_acceptance(selection)
+        if self.journal.read() != (revision, journal):
+            raise ValueError('Task proof journal changed during inspection')
+        record = {'owner': owner, 'invocation_id': invocation['invocation_id'],
+                  'journal_revision': revision, 'observation': observation,
+                  'progress_identity': task_progress_identity(observation),
+                  'progress_credit_assigned': False}
+        return record
+
+    def record_workflow_task_proof(self, owner):
+        """Persist exact stopped-attempt proof without credit or task mutation."""
         with self.store.lock():
-            contract = self._contract()
-            self._unowned()
-            selection = self._workflow_receipt(owner)
-            gate = self.workflow_gate
-            if (selection is None or gate is None or gate.store is not self.store or
-                    gate.contract_digest != self.contract_digest):
-                raise ValueError('Trusted enrolled task proof reader required')
-            revision, journal = self.journal.read()
-            if not journal['attempts']:
-                raise ValueError('Finished workflow attempt required')
-            last = journal['attempts'][-1]
-            if (last['status'] != 'finished' or owner['contract_digest'] != self.contract_digest or
-                    (last['run_id'], last['run_attempt']) != (owner['run_id'], owner['run_attempt'])):
-                raise ValueError('Latest finished workflow attempt required')
-            original = {**journal, 'attempts': journal['attempts'][:-1] +
-                        [{**last, 'status': 'reserved', 'progress_receipt': None}]}
-            plan = launch_plan(original, self.contract_digest, run_id=owner['run_id'],
-                               run_attempt=owner['run_attempt'], session_id=owner['session_id'])
-            if plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest']:
-                raise ValueError('Task proof launch ownership drift')
-            invocation = self.store.read(owner['unit'] + '.invocation.json')
-            if invocation['owner'] != owner:
-                raise ValueError('Task proof invocation ownership drift')
-            self._invocation(invocation['invocation_id'])
-            native = self.backend.observe_owned(plan, contract, owner, invocation['invocation_id'])
-            proof = {k: native.get(k) for k in ('unit', 'active_state', 'cgroup_empty', 'ownership_verified')}
-            if 'execution_finished' in native:
-                proof['execution_finished'] = native['execution_finished']
-            if (native.get('invocation_id') != invocation['invocation_id'] or
-                    recovery_action(original, self.contract_digest, proof) != 'reconcile_without_refund'):
-                raise ValueError('Exact stopped task ownership proof required')
-            observation = gate.task_acceptance(selection)
-            if self.journal.read() != (revision, journal):
-                raise ValueError('Task proof journal changed during inspection')
-            record = {'owner': owner, 'invocation_id': invocation['invocation_id'],
-                      'journal_revision': revision, 'observation': observation,
-                      'progress_identity': task_progress_identity(observation),
-                      'progress_credit_assigned': False}
+            record = self._current_workflow_task_proof(owner)
             name = owner['unit'] + '.task-proof.json'
             try:
                 self.store.create(name, record)
@@ -427,6 +445,46 @@ class PrivateController:
             if self.store.read(name) != record:
                 raise ValueError('Task proof observation readback differs')
             return record
+
+    def accept_workflow_task(self, owner):
+        """Recoverable owned-attempt task acceptance; no parent/budget credit."""
+        with self.store.lock():
+            current = self._current_workflow_task_proof(owner)
+            proof = self.store.read(owner['unit'] + '.task-proof.json')
+            if (proof['owner'] != owner or proof['invocation_id'] != current['invocation_id'] or
+                    proof['journal_revision'] != current['journal_revision'] or
+                    proof['progress_identity'] != current['progress_identity'] or
+                    proof['observation']['proof_receipts'] != current['observation']['proof_receipts']):
+                raise ValueError('Task acceptance protected proof drift')
+            name = owner['unit'] + '.task-acceptance-intent.json'
+            try:
+                intent = self.store.read(name)
+            except FileNotFoundError:
+                transition = self.workflow_gate.accepted_state(proof['observation']['selection'],
+                                str(self.store.root / (owner['unit'] + '.task-proof.json')))
+                if transition['observation'] != proof['observation']:
+                    raise ValueError('Task acceptance preimage differs from recorded proof')
+                intent = {'owner': owner, 'proof_digest': digest(proof),
+                          'progress_identity': current['progress_identity'], 'transition': transition}
+                self.store.create(name, intent)
+            if (set(intent) != {'owner','proof_digest','progress_identity','transition'} or
+                    intent['owner'] != owner or intent['proof_digest'] != digest(proof) or
+                    intent['progress_identity'] != current['progress_identity']):
+                raise ValueError('Task acceptance intent identity drift')
+            saved = self.workflow_gate.publish_accepted_state(intent['transition'])
+            completed = {'owner':owner, 'intent_digest':digest(intent),
+                         'checkpoint_sha256':digest(saved),
+                         'progress_identity':current['progress_identity'],
+                         'progress_credit_assigned':False, 'parent_accepted':False}
+            result_name = owner['unit'] + '.task-acceptance.json'
+            try:
+                self.store.create(result_name, completed)
+            except FileExistsError:
+                if self.store.read(result_name) != completed:
+                    raise ValueError('Task acceptance completion drift')
+            if self.store.read(result_name) != completed:
+                raise ValueError('Task acceptance completion readback differs')
+            return completed
 
     def reconcile(self):
         """Wakeup/restart path: inspect and finish only, never submit or refund."""

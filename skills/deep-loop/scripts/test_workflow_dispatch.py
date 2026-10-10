@@ -27,6 +27,75 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.controller.reconcile()
         return owner
 
+    def test_malformed_acceptance_completion_keeps_dispatch_fenced(self):
+        owner=self.finished_proved_task();self.controller.record_workflow_task_proof(owner)
+        complete=self.controller.accept_workflow_task(owner)
+        name=owner['unit']+'.task-acceptance.json'
+        for changed in ({'intent_digest':complete['intent_digest']},
+                        {**complete,'parent_accepted':True},
+                        {**complete,'checkpoint_sha256':'0'*64}):
+            self.graph.store.remove(name);self.graph.store.create(name,changed)
+            with self.assertRaisesRegex(ValueError,'completion identity drift'):
+                self.controller.ready_workflow_tasks()
+
+    def test_acceptance_real_process_crash_reconciles_saved_intent(self):
+        import os,signal
+        if not hasattr(os,'fork'):self.skipTest('Requires POSIX interruption')
+        owner=self.finished_proved_task();self.controller.record_workflow_task_proof(owner)
+        before=self.journal.read()
+        for boundary in ('intent','checkpoint'):
+            child=os.fork()
+            if child==0:
+                if boundary=='intent':
+                    create=self.graph.store.create
+                    def crash(name,value):
+                        create(name,value)
+                        if name.endswith('.task-acceptance-intent.json'):os.kill(os.getpid(),signal.SIGKILL)
+                    self.graph.store.create=crash
+                else:
+                    publish=self.graph.gate.publish_accepted_state
+                    def crash(transition):
+                        publish(transition);os.kill(os.getpid(),signal.SIGKILL)
+                    self.graph.gate.publish_accepted_state=crash
+                try:self.controller.accept_workflow_task(owner)
+                finally:os._exit(3)
+            _,status=os.waitpid(child,0)
+            self.assertTrue(os.WIFSIGNALED(status));self.assertEqual(os.WTERMSIG(status),signal.SIGKILL)
+            with self.assertRaisesRegex(ValueError,'Pending owned task acceptance'):
+                self.controller.ready_workflow_tasks()
+        accepted=self.controller.accept_workflow_task(owner)
+        self.assertFalse(accepted['progress_credit_assigned'])
+        self.assertEqual(before,self.journal.read());self.assertEqual(len(self.backend.submissions),1)
+
+    def test_owned_task_acceptance_updates_only_checkpoint_and_retries(self):
+        owner=self.finished_proved_task();self.controller.record_workflow_task_proof(owner)
+        before=self.journal.read()
+        accepted=self.controller.accept_workflow_task(owner)
+        self.assertFalse(accepted['progress_credit_assigned'])
+        self.assertFalse(accepted['parent_accepted'])
+        self.assertEqual(before,self.journal.read())
+        self.assertEqual(accepted,self.controller.accept_workflow_task(owner))
+        import json
+        self.assertEqual(json.loads(self.graph.checkpoint.read_text())['tasks'][0]['status'],'done')
+        self.assertEqual(len(self.backend.submissions),1)
+
+    def test_acceptance_completion_fault_recovers_without_dispatch_or_charge(self):
+        owner=self.finished_proved_task();self.controller.record_workflow_task_proof(owner)
+        before=self.journal.read();create=self.graph.store.create
+        def fault(name,value):
+            if name.endswith('.task-acceptance.json'):raise OSError('Fixture completion write fault')
+            return create(name,value)
+        self.graph.store.create=fault
+        with self.assertRaises(OSError):self.controller.accept_workflow_task(owner)
+        self.graph.store.create=create
+        with self.assertRaisesRegex(ValueError,'Pending owned task acceptance'):
+            self.controller.start(run_id=2,run_attempt=1,model_seconds=600,active_seconds=1200,task_id='portable')
+        with self.assertRaisesRegex(ValueError,'Pending owned task acceptance'):
+            self.controller.ready_workflow_tasks()
+        self.controller.accept_workflow_task(owner)
+        self.assertEqual(before,self.journal.read())
+        self.assertEqual(len(self.backend.submissions),1)
+
     def test_task_proof_is_bound_durable_and_assigns_no_credit(self):
         owner=self.finished_proved_task()
         before=self.journal.read()
