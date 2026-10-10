@@ -456,3 +456,12 @@ and native manager journal records for both invocation IDs. The fixture uses
 a one-second timer cadence and literal initial execution, blocks model dispatch
 and leaves production inactive. Production installation, reboot, full workflow
 completion and parent acceptance remain unqualified.
+
+The read-only outcome observer requires every approved task done and every
+mapped blocking verifier to have current integrated proof, then inspects each
+task and rejects checkpoint drift. Real-check tests cover missing proof, source
+drift and concurrent checkpoint changes. It grants neither parent acceptance
+nor delivery authority. Raw task evidence remains input for historical stopped
+ownership, durable acceptance and credit authentication, which are not yet
+integrated. Final quiescent proof, parent transition and endpoint readback
+remain required before workflow completion.

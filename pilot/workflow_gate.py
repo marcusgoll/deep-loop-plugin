@@ -136,6 +136,38 @@ class WorkflowGate:
                 'checkpoint_sha256':digest(state),'verifier_ids':ids,'definitions':definitions,
                 'execution_authorized':False,'parent_accepted':False}
 
+    def outcome_proof(self):
+        """Inspect all current integrated proof; never accept or deliver a parent.
+
+        Task status/evidence here is input for the controller's historical
+        ownership and credit authentication, not proof of durable acceptance.
+        """
+        binding,state,by_id=self._read()
+        if any(task['status']!='done' for task in by_id.values()):
+            raise ValueError('Workflow outcome has unfinished tasks')
+        ids=sorted({identifier for mapped in binding['task_verifiers'].values()
+                    for identifier in mapped})
+        failures=self.helper.prerequisite_issues(state,ids)
+        if failures:raise ValueError('Workflow outcome proof blocked: '+'; '.join(failures))
+        tasks={}
+        for task_id in sorted(by_id):
+            selection={'task_id':task_id,'binding_digest':digest(binding),
+                       'session_id':state['sessionId'],
+                       'prompt_sha256':hashlib.sha256(binding['task_prompts'][task_id].encode()).hexdigest()}
+            observation=self.task_acceptance(selection)
+            if observation['checkpoint_sha256']!=digest(state):
+                raise ValueError('Workflow outcome changed during task inspection')
+            tasks[task_id]={'evidence':by_id[task_id].get('evidence'),
+                            'observation':observation}
+        if self._read()[:2]!=(binding,state):
+            raise ValueError('Workflow outcome checkpoint changed during inspection')
+        checks={c.get('verifierId'):c for c in state.get('checks',[])}
+        return {'kind':'workflow_outcome_proof','contract_digest':self.contract_digest,
+                'binding_digest':digest(binding),'session_id':state['sessionId'],
+                'checkpoint_sha256':digest(state),'verifier_ids':ids,
+                'proof_receipts':{i:checks[i]['receipt'] for i in ids},'tasks':tasks,
+                'parent_accepted':False,'delivery_verified':False}
+
     def task_acceptance(self, selection):
         """Inspect selected task proof; never mutate checkpoint or accept parent.
 

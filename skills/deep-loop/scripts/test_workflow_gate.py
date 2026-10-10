@@ -381,4 +381,41 @@ class WorkflowGateTests(unittest.TestCase):
         self.assertEqual(__import__('json').loads(self.checkpoint.read_text()),transition['before'])
         self.assertFalse(list(self.checkpoint.parent.glob('.deep-task-acceptance-*.tmp')))
 
+
+
+    def outcome_ready(self):
+        import argparse
+        f=self.f
+        batch=save(f.root/'outcome-checks.json',[{'name':v['id'],'verifierId':v['id'],'argv':v['proof']['argv']} for v in f.contract['verifiers']])
+        output=f.root/'outcome-receipt.json'
+        args=argparse.Namespace(root=str(f.root),checks=str(batch),output=str(output),contract=str(f.path),goal_id=f.state['sessionId'],ui_request=None,source_manifest=None,environment_manifest=None)
+        self.assertEqual(deep_loop.run_checks(args),0)
+        for check in f.state['checks']:check.update(status='passed',evidence='Actual integrated fixture checks',receipt={'path':str(output),'sha256':sha(output)})
+        for task in f.state['tasks']:task.update(status='done',evidence='Controller must authenticate this claim')
+        self.select()
+
+    def test_outcome_observer_requires_all_tasks_and_current_real_proof(self):
+        with self.assertRaisesRegex(ValueError,'unfinished'):self.gate.outcome_proof()
+        self.outcome_ready();before=self.checkpoint.read_bytes()
+        observed=self.gate.outcome_proof()
+        self.assertEqual(observed['verifier_ids'],['V1','V2','V3'])
+        self.assertEqual(set(observed['tasks']),{'prerequisite','dependent','portable'})
+        self.assertFalse(observed['parent_accepted']);self.assertFalse(observed['delivery_verified'])
+        self.assertEqual(self.checkpoint.read_bytes(),before)
+        self.f.source.write_text('drift')
+        with self.assertRaisesRegex(ValueError,'proof blocked'):self.gate.outcome_proof()
+
+    def test_outcome_done_claim_without_all_verifier_receipts_is_blocked(self):
+        for task in self.f.state['tasks']:task.update(status='done',evidence='Untrusted completion claim')
+        self.select()
+        with self.assertRaisesRegex(ValueError,'proof blocked'):self.gate.outcome_proof()
+
+    def test_outcome_observer_rejects_checkpoint_change_during_task_inspection(self):
+        from unittest.mock import patch
+        self.outcome_ready();original=self.gate.task_acceptance
+        def change(selection):
+            observation=original(selection);self.f.state['tasks'][0]['evidence']='Concurrent drift';self.select();return observation
+        with patch.object(self.gate,'task_acceptance',side_effect=change):
+            with self.assertRaisesRegex(ValueError,'changed'):self.gate.outcome_proof()
+
 if __name__=='__main__':unittest.main()
