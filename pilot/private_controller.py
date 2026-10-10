@@ -105,9 +105,10 @@ class PrivateController:
     observes its exact invocation/cgroup, and authenticates a session observation.
     Journal and backend are trusted implementations, not candidate callbacks.
     """
-    def __init__(self, store, journal, backend, verifier=None):
+    def __init__(self, store, journal, backend, verifier=None, workflow_gate=None):
         self.store, self.journal, self.backend = store, journal, backend
         self.verifier = verifier
+        self.workflow_gate = workflow_gate
         self.contract_digest = journal.contract_digest
 
     def _historical_contract(self):
@@ -266,10 +267,50 @@ class PrivateController:
             return
         raise ValueError('Private credential stream has an unreconciled owner')
 
-    def start(self, *, run_id, run_attempt, model_seconds, active_seconds, session_id=None):
+    def _workflow_selection(self, task_id):
+        try:
+            self.store.read(self.contract_digest + '.workflow.json')
+        except FileNotFoundError:
+            if list(self.store.root.glob('deep-loop-pilot-' + self.contract_digest + '-*.workflow-attempt.json')):
+                raise ValueError('Prior workflow attempt lost its protected enrollment')
+            if task_id is not None:
+                raise ValueError('Task dispatch requires protected workflow enrollment')
+            return None
+        gate = self.workflow_gate
+        if (gate is None or gate.store is not self.store or
+                gate.contract_digest != self.contract_digest or
+                not isinstance(task_id, str) or not task_id):
+            raise ValueError('Trusted workflow gate and explicit task required')
+        selection = gate.selection()
+        if task_id not in selection['ready']:
+            raise ValueError('Task prerequisites unavailable: ' + task_id)
+        return {'task_id': task_id, 'binding_digest': selection['binding_digest'],
+                'session_id': selection['session_id']}
+
+    def _workflow_receipt(self, owner):
+        try:
+            binding = self.store.read(self.contract_digest + '.workflow.json')
+        except FileNotFoundError:
+            try:
+                self.store.read(owner['unit'] + '.workflow-attempt.json')
+            except FileNotFoundError:
+                return None
+            raise ValueError('Workflow attempt lost its protected enrollment')
+        receipt = self.store.read(owner['unit'] + '.workflow-attempt.json')
+        selection = receipt.get('selection', {})
+        if (set(receipt) != {'owner', 'selection'} or receipt['owner'] != owner or
+                set(selection) != {'task_id', 'binding_digest', 'session_id'} or
+                selection['binding_digest'] != digest(binding) or
+                selection['session_id'] != binding['session_id'] or
+                selection['task_id'] not in binding['task_verifiers']):
+            raise ValueError('Protected workflow attempt identity drift')
+        return selection
+
+    def start(self, *, run_id, run_attempt, model_seconds, active_seconds, session_id=None, task_id=None):
         with self.store.lock():
             contract = self._contract()
             self._unowned()
+            selection = self._workflow_selection(task_id)
             revision, journal = self.journal.read()
             reserved = reserve(journal, self.contract_digest, run_id=run_id, run_attempt=run_attempt,
                                model_seconds=model_seconds, active_seconds=active_seconds)
@@ -279,9 +320,16 @@ class PrivateController:
                 binding = self.store.read(session_id + '.session.json')
                 if binding['contract_digest'] != self.contract_digest or binding['session_id'] != session_id:
                     raise ValueError('Session does not belong to approved contract')
+                if selection is not None:
+                    prior = self.store.read(binding['unit'] + '.workflow-attempt.json')
+                    if (prior['owner']['unit'] != binding['unit'] or
+                            self._workflow_receipt(prior['owner']) != selection):
+                        raise ValueError('Session does not belong to selected workflow task')
             # No model work is permitted by qualification. It must also prove no
             # unit for this dedicated identity is active outside the owner record.
             self.backend.qualify(plan, contract)
+            if self._workflow_selection(task_id) != selection:
+                raise ValueError('Workflow selection changed during qualification')
             persisted = self.journal.publish(revision, reserved)
             observed, saved = self.journal.read()
             if observed != persisted or saved != reserved:
@@ -290,6 +338,11 @@ class PrivateController:
                      'plan_digest': digest(plan), 'reservation_revision': persisted,
                      'run_id': run_id, 'run_attempt': run_attempt, 'session_id': session_id}
             self.store.create('active-owner.json', owner)
+            if selection is not None:
+                self.store.create(plan['unit'] + '.workflow-attempt.json',
+                                  {'owner': owner, 'selection': selection})
+            if self._workflow_selection(task_id) != selection:
+                raise ValueError('Workflow selection changed before native submission')
             # The immutable intent precedes submission. Any crash or uncertainty
             # after this point blocks a second launch, including another contract.
             invocation = self.backend.submit(plan, contract)
@@ -310,6 +363,7 @@ class PrivateController:
             owner = self.store.read('active-owner.json')
             if owner['contract_digest'] != self.contract_digest:
                 raise ValueError('Credential stream owned by another contract')
+            workflow = self._workflow_receipt(owner)
             revision, journal = self.journal.read()
             if not journal['attempts']:
                 raise ValueError('Missing reserved ownership history')
@@ -385,7 +439,9 @@ class PrivateController:
                 # A trusted verifier reads the stopped candidate independently.
                 # Semantic receipts omit invocation IDs/time so identical output
                 # cannot repeatedly reset the no-progress counter.
-                evidence = self.verifier(contract, owner) if self.verifier is not None else None
+                # Frozen single-artifact proof cannot accept a graph parent.
+                # Workflow acceptance will use its enrolled task/parent contract.
+                evidence = self.verifier(contract, owner) if self.verifier is not None and workflow is None else None
                 if evidence is not None and (not isinstance(evidence, dict) or
                         evidence.get('contract_digest') != self.contract_digest):
                     raise ValueError('Verification evidence contract drift')
