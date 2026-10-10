@@ -27,6 +27,18 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.controller.reconcile()
         return owner
 
+    def test_verifier_plan_requires_latest_owned_stopped_attempt(self):
+        owner=self.start('portable')
+        with self.assertRaises(ValueError):self.controller.workflow_verification_plan(owner)
+        self.backend.active=False;self.backend.empty=True;self.controller.reconcile()
+        plan=self.controller.workflow_verification_plan(owner)
+        self.assertEqual(plan['owner'],owner)
+        self.assertEqual(plan['plan']['verifier_ids'],['V3'])
+        self.assertFalse(plan['plan']['execution_authorized'])
+        self.assertEqual(len(self.backend.submissions),1)
+        self.backend.invocation='b'*32
+        with self.assertRaises(ValueError):self.controller.workflow_verification_plan(owner)
+
     def test_malformed_acceptance_completion_keeps_dispatch_fenced(self):
         owner=self.finished_proved_task();self.controller.record_workflow_task_proof(owner)
         complete=self.controller.accept_workflow_task(owner)

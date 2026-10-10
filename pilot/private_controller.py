@@ -407,9 +407,8 @@ class PrivateController:
         if not isinstance(value, str) or len(value) != 32 or any(c not in '0123456789abcdef' for c in value):
             raise ValueError('Invalid native invocation identity')
 
-    def _current_workflow_task_proof(self, owner):
-        """Caller holds credential lock; authenticate stopped current proof."""
-        from workflow_gate import task_progress_identity
+    def _finished_workflow_context(self, owner):
+        """Caller holds lock; authenticate exact stopped attempt before proof."""
         contract = self._contract()
         self._unowned()
         selection = self._workflow_receipt(owner)
@@ -444,6 +443,21 @@ class PrivateController:
         if (native.get('invocation_id') != invocation['invocation_id'] or
                 recovery_action(original, self.contract_digest, proof) != 'reconcile_without_refund'):
             raise ValueError('Exact stopped task ownership proof required')
+        return gate,selection,revision,journal,invocation
+
+    def workflow_verification_plan(self,owner):
+        with self.store.lock():
+            self._require_no_pending_task_acceptance()
+            self._require_no_pending_task_credit()
+            gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
+            plan=gate.verification_plan(selection)
+            if self.journal.read()!=(revision,journal):raise ValueError('Verification journal changed')
+            return {'owner':owner,'invocation_id':invocation['invocation_id'],
+                    'journal_revision':revision,'plan':plan}
+
+    def _current_workflow_task_proof(self,owner):
+        from workflow_gate import task_progress_identity
+        gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
         observation = gate.task_acceptance(selection)
         if self.journal.read() != (revision, journal):
             raise ValueError('Task proof journal changed during inspection')

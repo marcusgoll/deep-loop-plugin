@@ -345,6 +345,35 @@ def contract_definition_issues(state):
         return ['Contract definitions BLOCKED: ' + str(error)]
 
 
+def verification_definitions(state,verifier_ids):
+    """Resolve current selected deterministic inputs without executing commands.
+
+    Unrelated branch sources may be unavailable. Only the selected blocking
+    review verifiers grant a runnable plan; manual/readback proof stays explicit.
+    """
+    if (not isinstance(verifier_ids,list) or not verifier_ids or
+            any(not isinstance(i,str) or not i for i in verifier_ids) or
+            len(set(verifier_ids))!=len(verifier_ids)):
+        raise ValueError('Explicit unique verification IDs required')
+    with resolution_context(state,None):
+        failures=_contract_issues(state,'build',verify_files=False)
+        if failures:raise ValueError('Verification definitions blocked: '+'; '.join(failures))
+        path=Path(state['verificationContract']['path'])
+        contract=contract_data(path,verify_files=False)
+        verifiers={v['id']:v for v in contract['verifiers']}
+        checks={c.get('verifierId'):c for c in state.get('checks',[]) if isinstance(c,dict)}
+        result=[]
+        for identifier in verifier_ids:
+            verifier=verifiers.get(identifier)
+            if verifier is None:raise ValueError('Unknown selected verifier: '+identifier)
+            proof=proof_binding.definition(verifier,proof_binding.logical(path).parent)
+            if (verifier['gate']!='blocking' or verifier['class']=='human' or not proof or proof['mode']!='bound' or
+                    'readback' in proof or identifier not in checks or checks[identifier].get('stage','review')!='review'):
+                raise ValueError('Automatic verification requires bound blocking review proof: '+identifier)
+            result.append({'verifier':copy.deepcopy(verifier),'identity':proof_binding.identity(proof,proof_binding.logical(path).parent)})
+        return result
+
+
 def prerequisite_issues(state, verifier_ids):
     """Inspect selected current proof without changing parent acceptance.
 

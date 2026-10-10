@@ -113,6 +113,29 @@ class WorkflowGate:
             raise ValueError('Task mapping must cover every parent blocking verifier exactly by ID')
         return binding, state, by_id
 
+    def verification_plan(self,selection):
+        """Read selected bound inputs; no command execution or acceptance.
+
+        The controller authenticates the stopped owned attempt before use. An
+        executor must run the returned argv without root candidate privileges.
+        """
+        binding,state,_=self._read()
+        current=self.selection()
+        if (not isinstance(selection,dict) or set(selection)!={
+                'task_id','binding_digest','session_id','prompt_sha256'} or
+                selection['task_id'] not in current['ready'] or
+                selection['binding_digest']!=current['binding_digest'] or
+                selection['session_id']!=current['session_id'] or
+                selection['prompt_sha256']!=current['prompt_sha256'][selection['task_id']]):
+            raise ValueError('Verification task selection changed')
+        ids=sorted(binding['task_verifiers'][selection['task_id']])
+        definitions=self.helper.verification_definitions(state,ids)
+        if self._read()[:2]!=(binding,state):
+            raise ValueError('Verification checkpoint changed during inspection')
+        return {'contract_digest':self.contract_digest,'selection':dict(selection),
+                'checkpoint_sha256':digest(state),'verifier_ids':ids,'definitions':definitions,
+                'execution_authorized':False,'parent_accepted':False}
+
     def task_acceptance(self, selection):
         """Inspect selected task proof; never mutate checkpoint or accept parent.
 

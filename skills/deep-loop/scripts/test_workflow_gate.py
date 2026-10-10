@@ -47,6 +47,48 @@ class WorkflowGateTests(unittest.TestCase):
     def select(self):
         save(self.checkpoint,self.f.state)
         return self.gate.selection()
+    def test_verification_plan_resolves_pending_selected_inputs_without_acceptance(self):
+        before=copy.deepcopy(self.f.state)
+        plan=self.gate.verification_plan(self.accepted_selection('portable'))
+        self.assertEqual(plan['verifier_ids'],['V3'])
+        self.assertEqual(plan['definitions'][0]['verifier']['proof']['argv'],self.f.proof['argv'])
+        self.assertFalse(plan['execution_authorized']);self.assertFalse(plan['parent_accepted'])
+        self.assertEqual(self.f.state,before)
+        self.f.source.write_text('drift')
+        with self.assertRaises(ValueError):self.gate.verification_plan(self.accepted_selection('portable'))
+    def replace_contract(self):
+        save(self.f.path,self.f.contract)
+        self.f.state['verificationContract']['sha256']=sha(self.f.path)
+        self.binding['verification_contract']=self.f.state['verificationContract']
+        self.store.remove(self.key+'.workflow.json');self.store.create(self.key+'.workflow.json',self.binding)
+        self.select()
+    def test_verification_plan_ignores_unrelated_missing_source_but_rejects_manual_selected(self):
+        self.f.contract['verifiers'][1]['proof']['implementation']['path']=str(self.f.root/'unavailable-native.py')
+        self.replace_contract()
+        plan=self.gate.verification_plan(self.accepted_selection('portable'))
+        self.assertEqual(plan['verifier_ids'],['V3'])
+        self.f.contract['verifiers'][2]['proof']={'mode':'manual','reason':'Owner inspection required'}
+        self.replace_contract()
+        with self.assertRaisesRegex(ValueError,'requires bound blocking'):
+            self.gate.verification_plan(self.accepted_selection('portable'))
+    def test_verification_plan_preserves_human_judgment_as_unresolved(self):
+        self.f.contract['verifiers'][2]['class']='human'
+        self.replace_contract()
+        with self.assertRaisesRegex(ValueError,'requires bound blocking'):
+            self.gate.verification_plan(self.accepted_selection('portable'))
+
+    def test_verification_plan_rejects_changed_selection_and_checkpoint(self):
+        selection=self.accepted_selection('portable')
+        with self.assertRaisesRegex(ValueError,'selection changed'):
+            self.gate.verification_plan({**selection,'prompt_sha256':'0'*64})
+        from unittest.mock import patch
+        original=self.gate.helper.verification_definitions
+        def change(state,ids):
+            result=original(state,ids);self.f.state['task']='changed';save(self.checkpoint,self.f.state);return result
+        with patch.object(self.gate.helper,'verification_definitions',side_effect=change):
+            with self.assertRaisesRegex(ValueError,'checkpoint changed'):
+                self.gate.verification_plan(selection)
+
     def test_helper_task_transition_preserves_parent_and_requires_proof(self):
         self.f.state['tasks'][0].update(status='pending',evidence='')
         before=copy.deepcopy(self.f.state)
