@@ -389,6 +389,10 @@ remains separate and task acceptance/credit are not implied.
 A model-free Linux fixture exercised the actual native backend, isolated pinned
 helper and atomic checkpoint writer. An injected completion-persistence error
 after the checkpoint write recovered without another execution. Only the selected
-check changed; tasks and charged history stayed unchanged. This is persistence
-error recovery evidence, not process-kill recovery. Automatic worker integration
-and parent acceptance remain outstanding.
+check changed; tasks and charged history stayed unchanged. A second fixture
+terminated the publication child with SIGKILL after checkpoint publication and
+recovered through reconstructed adapters in the surviving process, using the
+same native invocation and original execution window. An initial native
+observation race was recovered without redispatch before reaching the fault.
+Fresh-interpreter, host-reboot and automatic worker recovery, and parent
+acceptance remain outstanding.
