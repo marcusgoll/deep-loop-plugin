@@ -100,6 +100,26 @@ class WorkflowDispatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'credited history'):
             self.controller.ready_workflow_tasks()
 
+    def test_worker_recovers_acceptance_then_credit_without_dispatch(self):
+        from private_worker import run
+        self.journal.state=initialize(self.graph.key,workflow=True)
+        owner=self.finished_proved_task();self.controller.record_workflow_task_proof(owner)
+        self.graph.store.create('enabled-outcome.json',{'contract_digest':self.graph.key})
+        create=self.graph.store.create
+        def fault(name,value):
+            if name.endswith('.task-acceptance.json'):raise OSError('Fixture completion fault')
+            return create(name,value)
+        self.graph.store.create=fault
+        with self.assertRaises(OSError):self.controller.accept_workflow_task(owner)
+        self.graph.store.create=create
+        wake=lambda:run(self.graph.store,lambda key:self.controller,window=lambda *args:3600)
+        self.assertEqual(wake(),'recovered_workflow_task_acceptance')
+        self.assertEqual(wake(),'recovered_workflow_task_credit')
+        self.assertEqual(len(self.backend.submissions),1)
+        self.assertEqual(wake(),'submitted_once')
+        self.assertEqual(len(self.backend.submissions),2)
+        self.assertEqual(sum(a['model_seconds'] for a in self.journal.state['attempts']),1200)
+
     def test_task_credit_rejects_rolled_back_checkpoint_acceptance(self):
         owner=self.credited_task_fixture();before=self.journal.read()
         from test_ui_design import save

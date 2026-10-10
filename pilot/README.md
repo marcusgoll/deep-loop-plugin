@@ -324,3 +324,11 @@ exact-after recovery when Git publication is uncertain. Pending credit blocks
 new dispatch. Completed credit also requires an exact historical Git revision,
 ancestry and preserved attempt/credit prefixes; a substituted revision or journal
 rollback cannot clear the fence. Worker wakeup integration remains outstanding.
+
+
+Schema-2 wakeups now recover one pending acceptance transition or derive one
+credit transaction from durable task acceptance, then return without dispatch.
+Credit-aware retry accounting preserves cumulative limits. The source worker
+recognizes both recovery results as continuing states. Fresh task acceptance
+still requires a trusted explicit call; production graph construction, supported
+enrollment and native end-to-end qualification remain outstanding.

@@ -47,6 +47,9 @@ def tick(store, controller_factory, *, expected_contract_digest=None, active_win
     attempts = journal['attempts']
     if attempts and attempts[-1]['status'] == 'reserved':
         return 'blocked_missing_owner'
+    recovered = controller.recover_pending_workflow_transition()
+    if recovered is not None:
+        return recovered
     workflow_tasks = controller.ready_workflow_tasks()
     task_id = None
     if workflow_tasks is not None:
@@ -62,7 +65,9 @@ def tick(store, controller_factory, *, expected_contract_digest=None, active_win
         return 'ready_for_trusted_delivery'
     no_progress = 0
     for attempt in reversed(attempts):
-        if attempt['progress_receipt'] is not None:
+        if attempt['progress_receipt'] is not None or any(
+                (c['run_id'],c['run_attempt']) == (attempt['run_id'],attempt['run_attempt'])
+                for c in journal.get('task_credits', [])):
             break
         no_progress += 1
     if len(attempts) >= LIMITS['attempts'] or no_progress >= LIMITS['no_progress']:
@@ -72,6 +77,9 @@ def tick(store, controller_factory, *, expected_contract_digest=None, active_win
         last = attempts[-1]
         original = {**journal, 'attempts': attempts[:-1] +
                     [{**last, 'status': 'reserved', 'progress_receipt': None}]}
+        if original.get('schema') == 2:
+            original = {**original,'task_credits':[c for c in original['task_credits']
+                        if (c['run_id'],c['run_attempt']) != (last['run_id'],last['run_attempt'])]}
         plan = launch_plan(original, contract_digest, run_id=last['run_id'], run_attempt=last['run_attempt'])
         receipt = store.read(plan['unit']+'.session.json')
         invocation = store.read(plan['unit']+'.invocation.json')

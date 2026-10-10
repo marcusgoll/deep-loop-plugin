@@ -89,7 +89,8 @@ def main():
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
         raise
     if result not in {'submitted_once','wait_for_predecessor','finished_without_verified_progress',
-                      'finished_with_verified_progress','wait_for_trusted_delivery'}:
+                      'finished_with_verified_progress','wait_for_trusted_delivery',
+                      'recovered_workflow_task_acceptance','recovered_workflow_task_credit'}:
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
 
 

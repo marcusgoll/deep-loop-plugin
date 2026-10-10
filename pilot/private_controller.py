@@ -507,6 +507,39 @@ class PrivateController:
                 raise ValueError('Task acceptance completion readback differs')
             return completed
 
+    def recover_pending_workflow_transition(self):
+        """Recover one already-authorized durable intent, never dispatch.
+
+        Fresh task acceptance still requires an explicit trusted acceptance call.
+        This wakeup seam resumes saved acceptance and derives credit authority
+        from durable accepted intent; it never chooses a fresh task acceptance.
+        """
+        with self.store.lock():
+            self._contract(); self._unowned()
+            _, journal = self.journal.read()
+            if journal['schema'] != 2:
+                return None
+            pending = []
+            for path in self.store.root.glob('deep-loop-pilot-' + self.contract_digest + '-*.task-acceptance-intent.json'):
+                intent = self.store.read(path.name)
+                owner = intent['owner']
+                try:self.store.read(owner['unit'] + '.task-acceptance.json')
+                except FileNotFoundError:
+                    pending.append(('accept',owner));continue
+                try:self.store.read(owner['unit'] + '.task-credit.json')
+                except FileNotFoundError:pending.append(('credit',owner))
+            if not pending:return None
+            if len(pending) != 1:
+                raise ValueError('Ambiguous pending workflow transition ownership')
+            action,owner = pending[0]
+        # Each operation reacquires the credential lock and revalidates current
+        # exact ownership/proof. No stale unlocked snapshot grants authority.
+        if action == 'accept':
+            self.accept_workflow_task(owner)
+            return 'recovered_workflow_task_acceptance'
+        self.credit_workflow_task(owner)
+        return 'recovered_workflow_task_credit'
+
     def credit_workflow_task(self, owner):
         """Append one credit for durable acceptance; recover uncertain Git write."""
         with self.store.lock():
