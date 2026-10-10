@@ -54,4 +54,42 @@ class SystemdObserverTests(unittest.TestCase):
         (self.group/'cgroup.events').unlink()
         with self.assertRaises(ValueError): self.observe()
 
+    def test_running_to_retained_exit_rereads_same_invocation_without_dispatch(self):
+        (self.group/'cgroup.events').unlink();self.group.rmdir()
+        running={**self.values,'ActiveState':'active','SubState':'running','MainPID':'123',
+                 'ControlGroup':'/system.slice/'+UNIT+'.service','RemainAfterExit':'yes'}
+        terminal={**running,'SubState':'exited','MainPID':'0','ControlGroup':''}
+        snapshots=iter((running,terminal));calls=[]
+        def native(args,**kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args,0,stdout='\n'.join(k+'='+v for k,v in next(snapshots).items()))
+        observed=observe_unit(UNIT,INVOCATION,run=native,cgroup_root=self.root)
+        self.assertTrue(observed['execution_finished']);self.assertTrue(observed['cgroup_empty'])
+        self.assertEqual(len(calls),2)
+        self.assertTrue(all(call[:2]==['/usr/bin/systemctl','show'] for call in calls))
+
+    def test_missing_group_reread_rejects_foreign_or_still_running_native_state(self):
+        (self.group/'cgroup.events').unlink();self.group.rmdir()
+        running={**self.values,'ActiveState':'active','SubState':'running','MainPID':'123',
+                 'ControlGroup':'/system.slice/'+UNIT+'.service','RemainAfterExit':'yes'}
+        terminal={**running,'SubState':'exited','MainPID':'0','ControlGroup':''}
+        for changes in ({'InvocationID':'c'*32},{'User':'root'},{'LoadState':'not-found'},running):
+            snapshots=iter((running,{**terminal,**changes}))
+            def native(args,**kwargs):
+                return subprocess.CompletedProcess(args,0,stdout='\n'.join(k+'='+v for k,v in next(snapshots).items()))
+            with self.assertRaises(ValueError):
+                observe_unit(UNIT,INVOCATION,run=native,cgroup_root=self.root)
+
+    def test_reappeared_cgroup_during_manager_reread_is_not_empty_proof(self):
+        (self.group/'cgroup.events').unlink();self.group.rmdir()
+        calls=0
+        def native(args,**kwargs):
+            nonlocal calls
+            calls+=1
+            if calls==2:
+                self.group.mkdir();(self.group/'cgroup.events').write_text('populated 1\n')
+            return subprocess.CompletedProcess(args,0,stdout='\n'.join(k+'='+v for k,v in self.values.items()))
+        with self.assertRaisesRegex(ValueError,'Missing kernel'):
+            observe_unit(UNIT,INVOCATION,run=native,cgroup_root=self.root)
+
 if __name__ == '__main__': unittest.main()
