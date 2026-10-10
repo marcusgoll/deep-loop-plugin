@@ -18,6 +18,7 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.journal=controller_fixtures.FixtureJournal(g.contract)
         self.journal.publish(None,initialize(g.key))
         self.backend=controller_fixtures.FixtureBackend()
+        self.backend.observe_quiescence=lambda:{'account':'deep-loop-pilot','uid':978,'empty':True}
         self.backend.observe_owned=lambda plan,contract,owner,invocation:self.backend.observe(owner['unit'],invocation)[0]
         self.controller=PrivateController(g.store,self.journal,self.backend,workflow_gate=g.gate)
     def start(self,task_id='dependent'):
@@ -465,7 +466,7 @@ class TaskExecutionTests(WorkflowDispatchTests):
 
 
 
-    def test_outcome_authenticates_all_three_actual_task_acceptance_chains(self):
+    def completed_outcome_fixture(self):
         self.graph.outcome_ready()
         for task in self.graph.f.state['tasks']:task.update(status='pending',evidence='')
         self.graph.select();self.journal.state=initialize(self.graph.key,workflow=True)
@@ -474,11 +475,24 @@ class TaskExecutionTests(WorkflowDispatchTests):
             owner=self.controller.start(run_id=run_id,run_attempt=1,model_seconds=600,active_seconds=1200,task_id=task_id)
             self.backend.active=False;self.backend.empty=True;self.controller.reconcile()
             self.controller.record_workflow_task_proof(owner);self.controller.accept_workflow_task(owner);self.controller.credit_workflow_task(owner)
+    def test_outcome_authenticates_all_three_actual_task_acceptance_chains(self):
+        self.completed_outcome_fixture()
         before=self.journal.read();checkpoint=self.graph.checkpoint.read_bytes()
         observed=self.controller.observe_workflow_outcome()
         self.assertEqual(set(observed['task_histories']),{'prerequisite','dependent','portable'})
         self.assertFalse(observed['parent_accepted']);self.assertFalse(observed['delivery_verified'])
         self.assertEqual(self.journal.read(),before);self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint)
+
+    def test_outcome_rejects_account_population_at_initial_and_final_cut(self):
+        from unittest.mock import Mock
+        self.completed_outcome_fixture();before=self.journal.read();state=self.graph.checkpoint.read_bytes()
+        good={'account':'deep-loop-pilot','uid':978,'empty':True}
+        for observations in ([{**good,'empty':False}], [good,{**good,'empty':False}], [good,{**good,'uid':979}]):
+            self.backend.observe_quiescence=Mock(side_effect=observations)
+            with self.assertRaisesRegex(ValueError,'quiescence|identity changed'):
+                self.controller.observe_workflow_outcome()
+            self.assertEqual(self.journal.read(),before)
+            self.assertEqual(self.graph.checkpoint.read_bytes(),state)
 
     def test_done_graph_without_credited_task_attribution_cannot_accept_outcome(self):
         self.graph.outcome_ready();self.journal.state=initialize(self.graph.key,workflow=True)

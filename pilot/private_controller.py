@@ -913,6 +913,15 @@ class PrivateController:
                 raise ValueError('Task credit independent readback differs')
             return completed
 
+    def _workflow_quiescence(self):
+        from private_launch import ACCOUNT
+        observation=self.backend.observe_quiescence()
+        if (not isinstance(observation,dict) or set(observation)!={'account','uid','empty'} or
+                observation['account']!=ACCOUNT or type(observation['uid']) is not int or
+                observation['uid']<=0 or observation['empty'] is not True):
+            raise ValueError('Trusted account-wide workflow quiescence required')
+        return observation
+
     def observe_workflow_outcome(self):
         """Authenticate every task's current proof and historical credit; read only."""
         with self.store.lock():
@@ -921,6 +930,7 @@ class PrivateController:
             gate=self.workflow_gate
             if gate is None or gate.store is not self.store or gate.contract_digest!=self.contract_digest:
                 raise ValueError('Trusted workflow outcome reader required')
+            quiescence=self._workflow_quiescence()
             outcome=gate.outcome_proof();snapshot=self.journal.read()
             journal=snapshot[1]
             if journal['schema']!=2 or not journal['attempts'] or any(a['status']!='finished' for a in journal['attempts']):
@@ -952,9 +962,11 @@ class PrivateController:
                         h['current_observation']!=outcome['tasks'][task_id]['observation']
                         for task_id,h in histories.items())):
                 raise ValueError('Workflow outcome acceptance cut changed during inspection')
+            if self._workflow_quiescence()!=quiescence:
+                raise ValueError('Workflow account identity changed during outcome inspection')
             return {'kind':'authenticated_workflow_outcome_observation',
                     'outcome_proof':outcome,'task_histories':histories,
-                    'journal_revision':snapshot[0],'parent_accepted':False,'delivery_verified':False}
+                    'journal_revision':snapshot[0],'quiescence':quiescence,'parent_accepted':False,'delivery_verified':False}
 
     def authenticate_workflow_task_history(self,owner):
         """Read one accepted historical task chain; never accept the parent.

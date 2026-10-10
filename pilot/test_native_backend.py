@@ -30,6 +30,18 @@ class NativeBackendTests(unittest.TestCase):
     def native_observation(self):
         return {'unit':self.plan['unit'],'invocation_id':'a'*32,'active_state':'inactive',
                 'cgroup_empty':True,'ownership_verified':True,'execution_finished':True}
+    def test_account_quiescence_requires_root_and_exact_empty_probe(self):
+        from types import SimpleNamespace
+        with patch('native_backend.os.geteuid',return_value=0),patch('native_backend.pwd.getpwnam',return_value=SimpleNamespace(pw_uid=978)),patch('native_backend.subprocess.run') as run:
+            run.return_value.returncode=1
+            self.assertEqual(self.backend.observe_quiescence(),{'account':'deep-loop-pilot','uid':978,'empty':True})
+            run.assert_called_once_with(['/usr/bin/pgrep','-u','978'],capture_output=True,text=True,timeout=5)
+            for code in (0,2):
+                run.return_value.returncode=code
+                with self.assertRaisesRegex(ValueError,'populated or quiescence'):self.backend.observe_quiescence()
+        with patch('native_backend.os.geteuid',return_value=1):
+            with self.assertRaisesRegex(ValueError,'Protected native'):self.backend.observe_quiescence()
+
     def test_revoked_qualification_cannot_submit(self):
         from authority import OutcomeRevoked
         self.backend.qualified=(digest(self.plan),digest(self.contract))

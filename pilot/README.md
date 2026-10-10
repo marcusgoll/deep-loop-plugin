@@ -497,3 +497,12 @@ no owner/verifier fences, and production inactive with its timer disabled.
 A transient observation failure after first verifier submission required exact
 owned-invocation recovery and manual continuation; this is not evidence of an
 intervention-free full workflow. Parent acceptance and delivery remain false.
+
+
+The aggregate workflow observer now requires a fresh root-observed empty private
+account before inspecting final proof and again at the final cut, with the same
+nonroot UID. Stopped named units alone are insufficient. Populated accounts,
+unavailable probes and identity drift reject the observation without changing
+checkpoint or journal. This guard contributes to final quiescence; full helper
+review validation, stale-verifier rerun routing and parent transition remain
+required. It grants no parent acceptance or future process exclusion.

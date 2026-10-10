@@ -170,6 +170,19 @@ class NativeBackend:
         observe_unit(unit, invocation)
         return invocation
 
+    def observe_quiescence(self):
+        """Fresh account-wide absence proof; stopped named units alone are insufficient."""
+        if os.geteuid()!=0:
+            raise ValueError('Protected native quiescence observer required')
+        account=pwd.getpwnam(ACCOUNT)
+        if type(account.pw_uid) is not int or account.pw_uid<=0:
+            raise ValueError('Dedicated private account identity unavailable')
+        result=subprocess.run(['/usr/bin/pgrep','-u',str(account.pw_uid)],
+                              capture_output=True,text=True,timeout=5)
+        if result.returncode!=1:
+            raise ValueError('Private account is populated or quiescence evidence unavailable')
+        return {'account':ACCOUNT,'uid':account.pw_uid,'empty':True}
+
     def observe_owned(self, plan, contract, owner, invocation):
         """Authenticate historical native identity without session parsing."""
         if (os.geteuid() != 0 or digest(contract) != self.contract_digest or
