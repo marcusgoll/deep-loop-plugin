@@ -103,6 +103,26 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         self.assertTrue(cut['parent_receipt']['parent_accepted']);self.assertFalse(cut['parent_receipt']['delivery_verified'])
         self.assertEqual(self.controller.advance_workflow_parent_acceptance(),'workflow_delivery_pending')
         self.assertEqual(self.journal.read(),before);self.assertEqual(len(self.backend.submissions),3)
+    def test_model_free_provider_adapter_uses_actual_parent_authentication(self):
+        import sys
+        from workflow_delivery import WorkflowDelivery,WAIT
+        from test_workflow_delivery import Provider
+        if sys.platform!='linux':
+            mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        before=self.journal.read();checkpoint=self.graph.checkpoint.read_bytes()
+        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        for _ in range(20):
+            result=adapter.step()
+            if result=='workflow_delivery_verified':break
+            self.assertEqual(result,WAIT)
+        else:self.fail('Model-free provider adapter did not converge')
+        receipt=adapter._read('complete');parent=self.controller.authenticate_workflow_parent_acceptance()
+        self.assertEqual(receipt['parent_receipt_sha256'],parent['parent_receipt_sha256'])
+        self.assertTrue(receipt['delivery_verified']);self.assertFalse(receipt['complete'])
+        self.assertEqual(self.journal.read(),before);self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint)
+        self.assertEqual(len(self.backend.submissions),3)
     def test_delivery_reader_cannot_finish_pending_parent(self):
         self.prepared();self.controller.prepare_workflow_parent_acceptance();before=self.graph.checkpoint.read_bytes()
         with self.assertRaises(FileNotFoundError):self.controller.authenticate_workflow_parent_acceptance()

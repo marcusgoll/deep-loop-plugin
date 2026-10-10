@@ -24,7 +24,7 @@ MODULES = ('admission.py', 'authority.py', 'git_journal.py', 'private_launch.py'
            'qualification_environment.py', 'qualification_plan.py',
            'qualification_probe.py', 'qualification_runner.py', 'strict_configuration.py',
            'enrollment.py', 'enrollment_operator.py', 'frozen_contract.py', 'workflow_gate.py', 'workflow_enrollment.py', 'pinned_helper.py', 'native_verifier.py','native_result.py','native_publication.py',
-           'candidate_snapshot.py', 'git_candidate_export.py', 'workflow_delivery_contract.py')
+           'candidate_snapshot.py', 'git_candidate_export.py', 'workflow_delivery_contract.py', 'workflow_delivery.py')
 
 
 def plan():
