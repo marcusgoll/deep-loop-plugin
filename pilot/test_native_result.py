@@ -102,6 +102,7 @@ class NativeResultTests(unittest.TestCase):
         self.gate._read.return_value=({'fixture':'binding'},state,{})
         with patch.object(self.sealer,'seal',return_value=result):
             row=self.sealer.receipt_row(self.prefix)
+        self.gate.helper.contract_data.assert_called_once_with('/fixture-contract.json',verify_files=False)
         self.assertEqual(row['goal_id'],'fixture-session')
         self.assertEqual(row['native_provenance']['invocation_id'],'e'*32)
         self.assertEqual(row['startedAt'],result['startedAt'])

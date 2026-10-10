@@ -475,3 +475,13 @@ whole proof/journal cut after inspection. Tests exercise earlier histories after
 later attempts and all three task acceptance chains. Both source reviews passed;
 actual native/Git multi-task qualification remains pending. These read-only
 observations do not grant parent acceptance or delivery.
+
+
+Native receipt construction reads the complete contract structurally to derive
+its semantic hash, while sealing independently authenticates the selected
+verifier inputs and artifacts. Future task outputs may be absent until their
+own task runs. A real-helper regression covers that case and rejects selected
+source drift. The original three-task native fixture failed before receipt
+publication; recovery of its retained invocation later stopped at the original
+immutable deadline with one charged attempt and no task credit. That fixture
+remains failed, and corrected-source end-to-end native qualification is pending.

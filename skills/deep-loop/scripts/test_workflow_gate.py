@@ -71,6 +71,30 @@ class WorkflowGateTests(unittest.TestCase):
         self.replace_contract()
         with self.assertRaisesRegex(ValueError,'requires bound blocking'):
             self.gate.verification_plan(self.accepted_selection('portable'))
+    def test_native_receipt_semantics_ignore_future_input_with_real_helper(self):
+        from unittest.mock import Mock,patch
+        from native_result import NativeResult
+        self.f.contract['verifiers'][1]['proof']['implementation']['path']=str(self.f.root/'absent-future.py')
+        self.f.state['verificationContract']['semanticsSha256']=deep_loop.contract_semantics_sha256(self.f.contract)
+        self.replace_contract()
+        selection=self.accepted_selection('portable')
+        plan=self.gate.verification_plan(selection)
+        owned={'plan':plan}
+        prefix='fixture-verifier'
+        self.store.create(prefix+'.intent.json',{'owned_plan':owned})
+        result={'owned_plan_digest':digest(owned),'verifier_id':'V3','argv':[],
+                'cwd':str(self.f.root),'identity':{},'artifacts':[], 'exitCode':0,
+                'startedAt':'fixture','finishedAt':'fixture','runtime':{},
+                'unit':'fixture','invocation_id':'fixture','plan_digest':'fixture',
+                'execution_interval':{},'unit_result':'success','captures':{}}
+        sealer=NativeResult(self.store,Mock(),Mock(),self.gate)
+        with patch.object(sealer,'seal',return_value=result):
+            row=sealer.receipt_row(prefix)
+        self.assertEqual(row['contract_semantics'],self.f.state['verificationContract']['semanticsSha256'])
+        self.f.source.write_text('selected source drift')
+        with patch.object(sealer,'seal',return_value=result):
+            with self.assertRaises(ValueError):sealer.receipt_row(prefix)
+
     def test_verification_plan_preserves_human_judgment_as_unresolved(self):
         self.f.contract['verifiers'][2]['class']='human'
         self.replace_contract()

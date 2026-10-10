@@ -174,7 +174,9 @@ class NativeResult:
                 digest(state)!=owned['plan']['checkpoint_sha256'] and
                 state!=published_after):
             raise ValueError('Native receipt checkpoint changed after sealing')
-        contract=self.gate.helper.contract_data(state['verificationContract']['path'])
+        # Future task outputs may not exist yet. seal() authenticates the
+        # selected verifier inputs/artifacts; this read binds contract semantics.
+        contract=self.gate.helper.contract_data(state['verificationContract']['path'],verify_files=False)
         semantics=self.gate.helper.contract_semantics_sha256(contract)
         if state['verificationContract'].get('semanticsSha256')!=semantics:
             raise ValueError('Bound receipt contract semantics changed')
