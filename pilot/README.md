@@ -549,3 +549,35 @@ Old task credits remain immutable, and an already-run verifier prefix never
 replays. Candidate-aware proof is supplementary: generic bound verification and
 legacy bindings retain their exact semantics. Source review and local tests do
 not establish enrollment, actual native version-two integration or parent acceptance.
+
+### Explicit parent review acceptance
+
+A new exact workflow binding version adds `schema: 3` and
+`parent_acceptance: {"kind": "review_to_ship", "approval_ref": "<attributable approval>"}`
+to the complete version-two candidate binding. Enrollment still requires its
+exact authenticated digest and an empty inactive journal. Existing bindings and
+frozen helper snapshots never acquire this capability through recovery.
+
+The worker prepares parent acceptance only after every approved task is done.
+It authenticates each stopped attempt and durable credit, all current candidate
+receipts, full helper review obligations, the exact journal cut and account-wide
+quiescence. A protected immutable intent records the checkpoint preimage and a
+postimage changing only `phase` to `SHIP`. A later wake recognizes only those two
+images and recomputes current review proof. The changed checkpoint hashes are
+translated only in current-proof fields; historical provenance remains exact.
+Authority, the original execution window, candidate identity, journal and
+quiescence are rechecked before checkpoint and completion publication.
+
+Pending parent acceptance fences task/model/verifier mutation. After acceptance,
+the worker returns `workflow_delivery_pending`; it neither dispatches another
+attempt nor uses frozen literal-artifact delivery for the parent. Acceptance here
+means integrated review acceptance: `active` stays true, `complete` stays false,
+and delivery is unchanged. General workflow delivery and final SHIP completion
+remain required. Source and deterministic interruption tests do not establish
+native parent qualification or authorize live enrollment.
+
+The earlier 95-pin candidate fixture now has three literal native tasks, refreshed
+ancestor/final verifier receipts and three historical credits, independently read
+back. Its full-helper audit correctly rejects missing schema-three delivery and
+schema-four UI classification metadata. That frozen fixture is retained as-is;
+its mapped-check success is not full parent review proof.

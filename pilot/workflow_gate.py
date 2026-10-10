@@ -5,6 +5,7 @@ This module selects tasks; it neither enrolls a live outcome nor dispatches one.
 Mutable task state stays in the existing checkpoint.
 """
 import hashlib
+import copy
 import fcntl
 import json
 import os
@@ -72,9 +73,10 @@ class WorkflowGate:
         legacy_fields = {
                 'contract_digest', 'approval_ref', 'checkpoint_path', 'session_id',
                 'verification_contract', 'graph', 'task_verifiers', 'task_prompts', 'boundary'}
+        modern_fields = legacy_fields | {'schema', 'candidate_source_policy', 'artifact_output_root'}
         modern = (isinstance(binding, dict) and type(binding.get('schema')) is int and
-                  binding['schema'] == 2 and set(binding) == legacy_fields |
-                  {'schema', 'candidate_source_policy', 'artifact_output_root'})
+                  ((binding['schema'] == 2 and set(binding) == modern_fields) or
+                   (binding['schema'] == 3 and set(binding) == modern_fields | {'parent_acceptance'})))
         if (not isinstance(binding, dict) or not (set(binding) == legacy_fields or modern) or
                 binding['contract_digest'] != self.contract_digest or
                 not isinstance(binding['session_id'], str) or not binding['session_id'].strip() or
@@ -83,6 +85,12 @@ class WorkflowGate:
             raise ValueError('Unsupported protected workflow binding')
         if modern:
             self.candidate_policy(binding)
+            if binding['schema'] == 3:
+                capability = binding['parent_acceptance']
+                if (not isinstance(capability, dict) or set(capability) != {'kind', 'approval_ref'} or
+                        capability['kind'] != 'review_to_ship' or
+                        not isinstance(capability['approval_ref'], str) or not capability['approval_ref'].strip()):
+                    raise ValueError('Explicit review-to-ship parent authority required')
         approval = self.store.read(self.contract_digest + '.approval.json')
         if (set(approval) != {'contract', 'approval_ref'} or
                 not isinstance(approval['approval_ref'], str) or not approval['approval_ref'].strip() or
@@ -182,7 +190,7 @@ class WorkflowGate:
         return source
 
     def verification_ids(self, binding, by_id, task_id):
-        if binding.get('schema') != 2:
+        if binding.get('schema') not in (2, 3):
             return sorted(binding['task_verifiers'][task_id])
         covered={task_id}
         def visit(identifier):
@@ -201,7 +209,7 @@ class WorkflowGate:
         for identifier in identifiers:
             if self.helper.prerequisite_issues(state,[identifier]):
                 unresolved.append(identifier);continue
-            if binding.get('schema')==2:
+            if binding.get('schema') in (2, 3):
                 try:self._candidate_receipts(binding,state,[identifier])
                 except (ValueError,FileNotFoundError):unresolved.append(identifier)
         return unresolved
@@ -271,6 +279,7 @@ class WorkflowGate:
     def final_review_proof(self):
         """Inspect full helper review gates, not merely mapped task receipts."""
         binding,state,_=self._read()
+        source = self.candidate_snapshot(binding)
         outcome=self.outcome_proof()
         if outcome['checkpoint_sha256']!=digest(state):
             raise ValueError('Final workflow review checkpoint changed')
@@ -280,12 +289,53 @@ class WorkflowGate:
             raise ValueError('Malformed full workflow review validation')
         if issues:
             raise ValueError('Full workflow review blocked: '+'; '.join(issues))
-        if self._read()[:2]!=(binding,state) or self.outcome_proof()!=outcome:
+        if (self._read()[:2]!=(binding,state) or self.outcome_proof()!=outcome or
+                self.candidate_snapshot(binding) != source):
             raise ValueError('Final workflow review cut changed during validation')
-        return {'kind':'workflow_final_review_proof','contract_digest':self.contract_digest,
+        proof = {'kind':'workflow_final_review_proof','contract_digest':self.contract_digest,
                 'binding_digest':digest(binding),'checkpoint_sha256':digest(state),
                 'outcome_proof':outcome,'review_issues':[],
                 'parent_accepted':False,'delivery_verified':False}
+        if source is not None: proof['candidate_source'] = source
+        return proof
+
+    def parent_accepted_state(self):
+        """Explicitly enrolled review acceptance; delivery remains pending."""
+        binding, state, _ = self._read()
+        if binding.get('schema') != 3:
+            raise ValueError('Explicit parent acceptance enrollment required')
+        if (state.get('active') is not True or state.get('complete') is not False or
+                state.get('phase') not in {'BUILD', 'REVIEW', 'SHIP'}):
+            raise ValueError('Active incomplete parent checkpoint required')
+        proof = self.final_review_proof()
+        if proof['checkpoint_sha256'] != digest(state):
+            raise ValueError('Parent review preimage changed')
+        after = copy.deepcopy(state)
+        after['phase'] = 'SHIP'
+        return {'before': state, 'after': after, 'observation': proof}
+
+    def publish_parent_accepted_state(self, transition, before_write):
+        """Recognize only the original preimage or its phase-only postimage.
+
+        Fresh review proof is recomputed for the actual image. Its checkpoint
+        hashes necessarily change with phase; all other evidence stays exact.
+        """
+        def checked(saved):
+            before = saved['before']; after = copy.deepcopy(before); after['phase'] = 'SHIP'
+            if (before.get('phase') not in {'BUILD', 'REVIEW'} or
+                    saved['observation']['checkpoint_sha256'] != digest(before) or after != saved['after']):
+                raise ValueError('Substituted parent acceptance postimage')
+            current = self.parent_accepted_state()
+            expected = copy.deepcopy(saved['observation'])
+            image_digest = digest(current['before'])
+            expected['checkpoint_sha256'] = image_digest
+            expected['outcome_proof']['checkpoint_sha256'] = image_digest
+            for row in expected['outcome_proof']['tasks'].values():
+                row['observation']['checkpoint_sha256'] = image_digest
+            if current['observation'] != expected:
+                raise ValueError('Parent acceptance evidence changed')
+            return current
+        return self._publish_checkpoint(transition, checked, self.final_review_proof, before_write)
 
     def task_acceptance(self, selection):
         """Inspect selected task proof; never mutate checkpoint or accept parent.

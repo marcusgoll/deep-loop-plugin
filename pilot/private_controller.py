@@ -5,6 +5,7 @@ state must be root-owned and outside the candidate. Do not import this module
 from model-controlled code or accept its calls through a public workflow.
 """
 import contextlib
+import copy
 import fcntl
 import json
 import os
@@ -289,6 +290,7 @@ class PrivateController:
     def ready_workflow_tasks(self):
         """Worker selection is advisory; start rechecks under the same lock."""
         with self.store.lock():
+            self._require_no_pending_parent_acceptance()
             self._require_no_pending_task_acceptance()
             self._require_no_pending_task_credit()
             self._contract()
@@ -335,6 +337,7 @@ class PrivateController:
             self.journal.verify_history(result['journal_revision'], intent['after'])
 
     def _workflow_selection(self, task_id):
+        self._require_no_pending_parent_acceptance()
         self._require_no_pending_task_credit()
         self._require_no_pending_task_acceptance()
         try:
@@ -466,6 +469,7 @@ class PrivateController:
 
     def workflow_verification_plan(self,owner):
         with self.store.lock():
+            self._require_no_pending_parent_acceptance()
             self._require_no_pending_task_acceptance()
             self._require_no_pending_task_credit()
             gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
@@ -479,6 +483,7 @@ class PrivateController:
         from native_verifier import launch_plan as verifier_plan
         from private_launch import ROOT
         with self.store.lock():
+            self._require_no_pending_parent_acceptance()
             self._verifier_unowned()
             self._require_no_pending_task_acceptance()
             self._require_no_pending_task_credit()
@@ -665,7 +670,7 @@ class PrivateController:
             attempt=self.store.read(unit+'.workflow-attempt.json');owner=attempt['owner']
             gate,selection,_,_,_=self._finished_workflow_context(owner)
             binding,state,_=gate._read()
-            if binding.get('schema')==2:
+            if binding.get('schema') in (2, 3):
                 plan=gate.verification_plan(selection)
                 identifiers=plan['verifier_ids']
                 unresolved=gate.unresolved_verifiers(binding,state,identifiers)
@@ -750,6 +755,7 @@ class PrivateController:
         return 'recovered_native_verifier_publication'
 
     def _current_workflow_task_proof(self,owner):
+        self._require_no_pending_parent_acceptance()
         from workflow_gate import task_progress_identity
         gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
         observation = gate.task_acceptance(selection)
@@ -761,18 +767,19 @@ class PrivateController:
                   'progress_credit_assigned': False}
         return record
 
-    def _workflow_mutation_authority(self):
+    def _workflow_mutation_authority(self, *, parent_recovery=False):
+        if not parent_recovery:self._require_no_pending_parent_acceptance()
         require_active(self.store,self.contract_digest)
         if remaining(self.store,self.contract_digest)<=0:
             raise ValueError('Immutable workflow mutation window expired')
 
-    def _workflow_source_guard(self, observation):
-        self._workflow_mutation_authority()
+    def _workflow_source_guard(self, observation, *, parent_recovery=False):
+        self._workflow_mutation_authority(parent_recovery=parent_recovery)
         source=observation.get('candidate_source')
         if source is not None:
             from candidate_snapshot import require_candidate_snapshot
             require_candidate_snapshot(source['policy'],source['snapshot'])
-            self._workflow_mutation_authority()
+            self._workflow_mutation_authority(parent_recovery=parent_recovery)
 
     def record_workflow_task_proof(self, owner):
         """Persist exact stopped-attempt proof without credit or task mutation."""
@@ -934,6 +941,119 @@ class PrivateController:
                 observation['uid']<=0 or observation['empty'] is not True):
             raise ValueError('Trusted account-wide workflow quiescence required')
         return observation
+
+    def _require_no_pending_parent_acceptance(self):
+        name = self.contract_digest + '.parent-acceptance-intent.json'
+        try: intent = self.store.read(name)
+        except FileNotFoundError: return
+        try: completed = self.store.read(self.contract_digest + '.parent-acceptance.json')
+        except FileNotFoundError:
+            raise ValueError('Pending parent acceptance requires exact recovery')
+        if completed.get('intent_digest') != digest(intent) or completed.get('parent_accepted') is not True:
+            raise ValueError('Parent acceptance completion identity drift')
+        # Accepted parents cannot reenter task/model/verifier mutation.
+        raise ValueError('Accepted parent requires workflow delivery')
+
+    @staticmethod
+    def _parent_outcome_at_checkpoint(outcome, checkpoint_digest):
+        """Translate only current checkpoint references after phase-only write."""
+        result = copy.deepcopy(outcome)
+        proof = result['outcome_proof']; proof['checkpoint_sha256'] = checkpoint_digest
+        for row in proof['tasks'].values():
+            row['observation']['checkpoint_sha256'] = checkpoint_digest
+        for history in result['task_histories'].values():
+            history['checkpoint_sha256'] = checkpoint_digest
+            history['current_observation']['checkpoint_sha256'] = checkpoint_digest
+        return result
+
+    def prepare_workflow_parent_acceptance(self):
+        """Save explicit integrated review authority; never deliver or complete."""
+        outcome = self.observe_workflow_outcome()
+        with self.store.lock():
+            self._contract(); self._unowned()
+            self._require_no_pending_task_acceptance(); self._require_no_pending_task_credit()
+            self._require_no_pending_parent_acceptance()
+            transition = self.workflow_gate.parent_accepted_state()
+            if transition['before']['phase'] not in {'BUILD', 'REVIEW'}:
+                raise ValueError('Parent acceptance requires its original review preimage')
+            journal = self.journal.read()
+            if (transition['observation']['outcome_proof'] != outcome['outcome_proof'] or
+                    journal[0] != outcome['journal_revision'] or
+                    self._workflow_quiescence() != outcome['quiescence']):
+                raise ValueError('Parent review acceptance cut changed')
+            intent = {'contract_digest': self.contract_digest, 'transition': transition,
+                      'journal_revision': journal[0], 'journal': journal[1], 'outcome': outcome}
+            self._workflow_source_guard(transition['observation'])
+            self.store.create(self.contract_digest + '.parent-acceptance-intent.json', intent)
+            if self.store.read(self.contract_digest + '.parent-acceptance-intent.json') != intent:
+                raise ValueError('Parent acceptance intent readback differs')
+            return intent
+
+    def recover_workflow_parent_acceptance(self):
+        """Recover only a saved phase transition within its original authority."""
+        try: intent = self.store.read(self.contract_digest + '.parent-acceptance-intent.json')
+        except FileNotFoundError: return None
+        if (set(intent) != {'contract_digest','transition','journal_revision','journal','outcome'} or
+                intent['contract_digest'] != self.contract_digest):
+            raise ValueError('Parent acceptance intent identity drift')
+        # The aggregate reader independently validates historical credits and
+        # current source. It grants no dispatch or parent mutation authority.
+        outcome = self.observe_workflow_outcome()
+        with self.store.lock():
+            self._contract(); self._unowned()
+            self._require_no_pending_task_acceptance(); self._require_no_pending_task_credit()
+            transition = intent['transition']
+            binding, state, _ = self.workflow_gate._read()
+            if (binding.get('schema') != 3 or state not in (transition['before'], transition['after']) or
+                    self.journal.read() != (intent['journal_revision'], intent['journal']) or
+                    outcome != self._parent_outcome_at_checkpoint(intent['outcome'], digest(state)) or
+                    self._workflow_quiescence() != outcome['quiescence']):
+                raise ValueError('Parent acceptance exact recovery cut changed')
+            def guard():
+                self._workflow_source_guard(transition['observation'], parent_recovery=True)
+                if (self.journal.read() != (intent['journal_revision'], intent['journal']) or
+                        self._workflow_quiescence() != outcome['quiescence']):
+                    raise ValueError('Parent acceptance journal or quiescence changed')
+                self._workflow_mutation_authority(parent_recovery=True)
+            saved = self.workflow_gate.publish_parent_accepted_state(transition, before_write=guard)
+            proof = self.workflow_gate.final_review_proof()
+            if proof['checkpoint_sha256'] != digest(saved):
+                raise ValueError('Parent acceptance postimage proof changed')
+            completed = {'contract_digest':self.contract_digest,'intent_digest':digest(intent),
+                         'journal_revision':intent['journal_revision'],'checkpoint_sha256':digest(saved),
+                         'postimage_review_proof':proof,'parent_accepted':True,
+                         'delivery_verified':False,'complete':False}
+            guard()
+            if self.workflow_gate._read()[1] != saved:
+                raise ValueError('Parent checkpoint changed before completion publication')
+            self._workflow_mutation_authority(parent_recovery=True)
+            name = self.contract_digest + '.parent-acceptance.json'
+            try: self.store.create(name, completed)
+            except FileExistsError:
+                if self.store.read(name) != completed:
+                    raise ValueError('Parent acceptance completion drift')
+            if self.store.read(name) != completed:
+                raise ValueError('Parent acceptance completion readback differs')
+            return 'recovered_workflow_parent_acceptance'
+
+    def advance_workflow_parent_acceptance(self):
+        """Only explicitly enrolled parents may enter integrated review acceptance."""
+        with self.store.lock():
+            try: binding = self.store.read(self.contract_digest + '.workflow.json')
+            except FileNotFoundError: return None
+            if binding.get('schema') != 3: return None
+            try: self.store.read(self.contract_digest + '.parent-acceptance-intent.json')
+            except FileNotFoundError:
+                _, _, tasks = self.workflow_gate._read()
+                if any(task['status'] != 'done' for task in tasks.values()): return None
+                pending = False
+            else: pending = True
+            completed = (self.store.root / (self.contract_digest + '.parent-acceptance.json')).exists()
+        if pending:
+            result = self.recover_workflow_parent_acceptance()
+            return 'workflow_delivery_pending' if completed else result
+        self.prepare_workflow_parent_acceptance()
+        return 'prepared_workflow_parent_acceptance'
 
     def observe_workflow_outcome(self):
         """Authenticate every task's current proof and historical credit; read only."""

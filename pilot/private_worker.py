@@ -111,7 +111,8 @@ def main():
                       'recovered_native_verifier_publication','recovered_native_verifier_cleanup',
                       'recovered_native_verifier_preparation_cleanup',
                       'submitted_native_workflow_verifier','recorded_workflow_task_proof',
-                      'accepted_workflow_task'}:
+                      'accepted_workflow_task','prepared_workflow_parent_acceptance',
+                      'recovered_workflow_parent_acceptance'}:
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
 
 
