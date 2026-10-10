@@ -44,6 +44,138 @@ class WorkflowGateTests(unittest.TestCase):
                           boundary='integrated_candidate')
         self.store.create(self.key+'.workflow.json',self.binding)
         self.gate=WorkflowGate(self.store,self.key,deep_loop)
+    def modern_binding(self):
+        from unittest.mock import patch
+        if sys.platform != 'linux':
+            mount=patch('candidate_snapshot._mount_id',return_value=1)
+            mount.start();self.addCleanup(mount.stop)
+        candidate=(self.f.root/'mutable-project').resolve();candidate.mkdir()
+        (candidate/'project.py').write_text('first candidate')
+        output=(self.f.root/'verifier-output').resolve();output.mkdir()
+        self.binding.update(schema=2,candidate_source_policy={
+            'schema':1,'candidate_root':str(candidate.resolve()),'scope':'entire_candidate',
+            'allowed_uids':[os.getuid()],'max_entries':100,'max_file_bytes':4096,
+            'max_total_bytes':16384,'max_depth':5},artifact_output_root=str(output.resolve()))
+        for verifier in self.f.contract['verifiers']:
+            verifier['proof']['artifacts']=[{'path':str(output/'result.txt')}]
+        (output/'result.txt').write_text('verified')
+        self.replace_contract()
+        return candidate,output
+
+    def test_version_two_plan_binds_mutable_candidate_without_repinning_manifest(self):
+        candidate,_=self.modern_binding()
+        selection=self.accepted_selection('portable')
+        first=self.gate.verification_plan(selection)
+        (candidate/'project.py').write_text('second candidate')
+        second=self.gate.verification_plan(selection)
+        self.assertNotEqual(first['candidate_source'],second['candidate_source'])
+        self.assertEqual(first['definitions'],second['definitions'])
+        self.assertEqual(first['selection'],second['selection'])
+        self.assertFalse(second['execution_authorized'])
+
+    def test_version_two_policy_and_output_overlap_fail_closed(self):
+        candidate,_=self.modern_binding()
+        for mutation in ('schema','scope','output'):
+            binding=copy.deepcopy(self.binding)
+            if mutation=='schema':binding['schema']=True
+            elif mutation=='scope':binding['candidate_source_policy']['scope']='subset'
+            else:binding['artifact_output_root']=str(candidate/'output')
+            with self.assertRaises(ValueError):self.gate.validate_binding(binding)
+
+    def test_version_two_immutable_candidate_inputs_and_wrong_artifacts_block_plan(self):
+        candidate,output=self.modern_binding()
+        from unittest.mock import patch
+        original=self.gate.helper.verification_definitions
+        def candidate_input(state,ids):
+            rows=original(state,ids);rows[0]['input_paths'].append(str(candidate/'project.py'))
+            return rows
+        with patch.object(self.gate.helper,'verification_definitions',side_effect=candidate_input):
+            with self.assertRaisesRegex(ValueError,'Immutable verifier inputs'):
+                self.gate.verification_plan(self.accepted_selection('portable'))
+        self.f.contract['verifiers'][2]['proof']['artifacts']=[{'path':str(candidate/'unapproved')}]
+        self.replace_contract()
+        with self.assertRaisesRegex(ValueError,'approved output'):
+            self.gate.verification_plan(self.accepted_selection('portable'))
+
+    def test_version_two_receipts_require_protected_exact_fresh_snapshot(self):
+        candidate,_=self.modern_binding()
+        source=self.gate.candidate_snapshot(self.binding)
+        self.store.create('candidate-receipt.json',[{'verifier_id':'V3','candidate_source':source}])
+        path=self.store.root/'candidate-receipt.json'
+        state=copy.deepcopy(self.f.state)
+        check=next(row for row in state['checks'] if row['verifierId']=='V3')
+        check['receipt']={'path':str(path),'sha256':sha(path)}
+        self.assertEqual(self.gate._candidate_receipts(self.binding,state,['V3']),source)
+        (candidate/'project.py').write_text('new final candidate')
+        with self.assertRaisesRegex(ValueError,'stale'):
+            self.gate._candidate_receipts(self.binding,state,['V3'])
+        check['receipt']['path']=str(self.f.root/'receipt.json')
+        with self.assertRaisesRegex(ValueError,'Protected'):
+            self.gate._candidate_receipts(self.binding,state,['V3'])
+
+    def test_dependent_edit_refreshes_ancestor_verifiers_without_reopening_task(self):
+        from unittest.mock import patch
+        candidate,_=self.modern_binding()
+        original_task=copy.deepcopy(self.f.state['tasks'][0])
+        source=self.gate.candidate_snapshot(self.binding)
+        def receipt(identifier,source):
+            name=identifier.lower()+'.candidate-receipt.json'
+            try:self.store.remove(name)
+            except FileNotFoundError:pass
+            self.store.create(name,[{'verifier_id':identifier,'candidate_source':source}])
+            path=self.store.root/name
+            next(c for c in self.f.state['checks'] if c['verifierId']==identifier).update(
+                status='passed',receipt={'path':str(path),'sha256':sha(path)})
+            save(self.checkpoint,self.f.state)
+        receipt('V1',source);receipt('V2',source)
+        (candidate/'project.py').write_text('edited by dependent task')
+        selected=self.accepted_selection('dependent')
+        with patch.object(self.gate.helper,'prerequisite_issues',return_value=[]):
+            plan=self.gate.verification_plan(selected)
+            self.assertEqual(plan['verifier_ids'],['V1','V2'])
+            self.assertEqual(self.gate.unresolved_verifiers(self.binding,self.f.state,plan['verifier_ids']),['V1','V2'])
+            with self.assertRaisesRegex(ValueError,'stale'):self.gate.task_acceptance(selected)
+            fresh=self.gate.candidate_snapshot(self.binding)
+            receipt('V1',fresh);receipt('V2',fresh)
+            self.assertEqual(self.gate.unresolved_verifiers(self.binding,self.f.state,plan['verifier_ids']),[])
+            self.assertEqual(self.gate.task_acceptance(selected)['candidate_source'],fresh)
+        self.assertEqual(self.f.state['tasks'][0],original_task)
+        self.assertEqual(self.f.state['tasks'][1]['status'],'pending')
+
+    def test_final_task_verifies_all_blocking_checks_without_new_task_selection(self):
+        self.modern_binding()
+        self.f.state['tasks'][1].update(status='done',evidence='retained history')
+        save(self.checkpoint,self.f.state)
+        plan=self.gate.verification_plan(self.accepted_selection('portable'))
+        self.assertEqual(plan['verifier_ids'],['V1','V2','V3'])
+        self.assertEqual(plan['selection']['task_id'],'portable')
+        self.assertFalse(plan['parent_accepted'])
+
+    def test_version_two_writer_rejects_expiry_or_mutation_after_callback(self):
+        from unittest.mock import patch
+        candidate,_=self.modern_binding()
+        source=self.gate.candidate_snapshot(self.binding)
+        before=copy.deepcopy(self.f.state)
+        after=copy.deepcopy(before);after['task']='postimage'
+        transition={'before':before,'after':after,'observation':{'candidate_source':source}}
+        original=self.checkpoint.read_bytes()
+        with patch('worker_window.remaining',return_value=0):
+            with self.assertRaisesRegex(ValueError,'window expired'):
+                self.gate._publish_checkpoint(transition,lambda _:transition,lambda:None)
+        self.assertEqual(self.checkpoint.read_bytes(),original)
+        with patch('worker_window.remaining',return_value=100):
+            with self.assertRaisesRegex(ValueError,'snapshot changed'):
+                self.gate._publish_checkpoint(transition,lambda _:transition,lambda:None,
+                    before_write=lambda:(candidate/'project.py').write_text('late mutation'))
+        self.assertEqual(self.checkpoint.read_bytes(),original)
+
+    def test_owned_binding_metadata_remains_readable_with_invalid_mutable_source(self):
+        candidate,_=self.modern_binding()
+        (candidate/'forbidden-alias').symlink_to('/etc/passwd')
+        self.assertEqual(self.gate._read()[0],self.binding)
+        with self.assertRaisesRegex(ValueError,'unsupported'):
+            self.gate.verification_plan(self.accepted_selection('portable'))
+
     def select(self):
         save(self.checkpoint,self.f.state)
         return self.gate.selection()

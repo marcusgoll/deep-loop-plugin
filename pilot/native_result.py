@@ -152,6 +152,8 @@ class NativeResult:
                 'runtime':{'executable':str(Path(sys.executable).resolve()),'python':sys.version,
                            'platform':platform.platform(),'scope':'protected result observer'},
                 'exitCode':0,'unit_result':'success','native_result_sealed':True,'checkpoint_published':False,'parent_accepted':False}
+        if 'candidate_source' in plan:
+            result['candidate_source']=plan['candidate_source']
         try:self.store.create(prefix+'.result.json',result)
         except FileExistsError:
             if self.store.read(prefix+'.result.json')!=result:raise ValueError('Protected native result changed')
@@ -190,6 +192,8 @@ class NativeResult:
                    status='passed',native_provenance={key:result[key] for key in
                    ('unit','invocation_id','plan_digest','owned_plan_digest','execution_interval','unit_result')},
                    sealed_result_sha256=digest(result),captures=result['captures'])
+        if 'candidate_source' in result:
+            row['candidate_source']=result['candidate_source']
         if (self.gate._read()[:2]!=(binding,state) or
                 not self._current_plan_matches(prefix,owned)):
             raise ValueError('Receipt binding changed during preparation')

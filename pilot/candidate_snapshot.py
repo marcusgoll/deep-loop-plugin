@@ -28,7 +28,7 @@ def _mount_id(fd):
         raise ValueError('Candidate mount identity unavailable') from exc
 
 
-def capture_candidate(policy):
+def validate_candidate_policy(policy):
     if (not isinstance(policy, dict) or set(policy) != {
             'schema', 'candidate_root', 'scope', 'max_entries',
             'max_file_bytes', 'max_total_bytes', 'max_depth', 'allowed_uids'} or
@@ -48,7 +48,15 @@ def capture_candidate(policy):
     root = policy['candidate_root']
     if (not isinstance(root, str) or not root or
             not Path(root).is_absolute() or str(Path(root)) != root or
-            '..' in Path(root).parts or Path(root).resolve() != Path(root)):
+            '..' in Path(root).parts):
+        raise ValueError('Canonical candidate root required')
+    return policy
+
+
+def capture_candidate(policy):
+    validate_candidate_policy(policy)
+    root=policy['candidate_root'];owners=policy['allowed_uids']
+    if Path(root).resolve()!=Path(root):
         raise ValueError('Canonical candidate root required')
     directory = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
     try:
@@ -156,9 +164,58 @@ def capture_candidate(policy):
         os.close(directory)
 
 
-def require_candidate_snapshot(policy, snapshot):
+def validate_candidate_snapshot(policy, snapshot):
+    """Authenticate a retained envelope without reading mutable source.
+
+    Ownership/cleanup must remain reconstructible after candidate mutation.
+    Execution and acceptance additionally require a fresh snapshot comparison.
+    """
+    validate_candidate_policy(policy)
     if (not isinstance(snapshot, dict) or set(snapshot) != {'manifest', 'sha256'} or
-            snapshot['sha256'] != digest(snapshot['manifest']) or
-            capture_candidate(policy) != snapshot):
+            not isinstance(snapshot['manifest'], dict) or
+            set(snapshot['manifest']) != {'schema', 'policy_sha256', 'entries'} or
+            type(snapshot['manifest']['schema']) is not int or snapshot['manifest']['schema'] != 1 or
+            snapshot['manifest']['policy_sha256'] != digest(policy) or
+            snapshot['sha256'] != digest(snapshot['manifest'])):
+        raise ValueError('Candidate snapshot envelope changed or substituted')
+    entries=snapshot['manifest']['entries']
+    if (not isinstance(entries,list) or not entries or
+            len(entries)>policy['max_entries'] or len(entries)>100000):
+        raise ValueError('Candidate snapshot inventory unavailable')
+    paths=set();directories=set();total=0
+    for entry in entries:
+        if not isinstance(entry,dict) or entry.get('type') not in ('directory','file'):
+            raise ValueError('Candidate snapshot entry unsupported')
+        fields={'path','type','mode','uid','gid'}
+        if entry['type']=='file':fields|={'bytes','sha256'}
+        path=entry.get('path')
+        if (set(entry)!=fields or not isinstance(path,str) or
+                path in paths or Path(path).is_absolute() or '..' in Path(path).parts or
+                path and str(Path(path))!=path or
+                any(type(entry[key]) is not int or entry[key]<0 for key in ('mode','uid','gid'))):
+            raise ValueError('Candidate snapshot entry identity changed')
+        if (entry['mode']>0o7777 or entry['uid'] not in policy['allowed_uids'] or
+                len(Path(path).parts)>policy['max_depth']+1 or
+                path and ('' if Path(path).parent==Path('.') else str(Path(path).parent)) not in directories):
+            raise ValueError('Candidate snapshot tree or ownership changed')
+        if entry['type']=='file':
+            size=entry['bytes'];hashed=entry['sha256']
+            if (type(size) is not int or not 0<=size<=policy['max_file_bytes'] or
+                    not isinstance(hashed,str) or len(hashed)!=64 or
+                    any(c not in '0123456789abcdef' for c in hashed)):
+                raise ValueError('Candidate snapshot file identity changed')
+            total+=size
+            if total>policy['max_total_bytes']:
+                raise ValueError('Candidate snapshot total bytes exceeded')
+        else:directories.add(path)
+        paths.add(path)
+    if entries[0]['path']!='' or entries[0]['type']!='directory':
+        raise ValueError('Candidate snapshot root unavailable')
+    return snapshot
+
+
+def require_candidate_snapshot(policy, snapshot):
+    validate_candidate_snapshot(policy,snapshot)
+    if capture_candidate(policy) != snapshot:
         raise ValueError('Candidate snapshot changed or substituted')
     return snapshot

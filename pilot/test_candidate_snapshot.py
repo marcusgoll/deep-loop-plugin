@@ -87,6 +87,34 @@ class CandidateSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'mount boundary'):
                 capture_candidate(self.policy)
 
+    def test_retained_envelope_survives_source_drift_without_granting_fresh_proof(self):
+        from candidate_snapshot import validate_candidate_snapshot
+        snapshot=capture_candidate(self.policy)
+        (self.root/'source.py').write_text('changed candidate')
+        self.assertEqual(validate_candidate_snapshot(self.policy,snapshot),snapshot)
+        with self.assertRaises(ValueError):require_candidate_snapshot(self.policy,snapshot)
+
+    def test_controller_source_guard_rejects_late_candidate_drift(self):
+        from private_controller import PrivateController
+        from unittest.mock import Mock
+        controller=PrivateController.__new__(PrivateController)
+        controller._workflow_mutation_authority=Mock()
+        observation={'candidate_source':{'policy':self.policy,'snapshot':capture_candidate(self.policy)}}
+        controller._workflow_source_guard(observation)
+        (self.root/'source.py').write_text('late drift')
+        with self.assertRaises(ValueError):controller._workflow_source_guard(observation)
+        self.assertEqual(controller._workflow_mutation_authority.call_count,3)
+
+    def test_controller_guard_rechecks_deadline_after_snapshot(self):
+        from private_controller import PrivateController
+        from unittest.mock import Mock
+        controller=PrivateController.__new__(PrivateController)
+        controller._workflow_mutation_authority=Mock(side_effect=[None,ValueError('expired')])
+        observation={'candidate_source':{'policy':self.policy,'snapshot':capture_candidate(self.policy)}}
+        with self.assertRaisesRegex(ValueError,'expired'):
+            controller._workflow_source_guard(observation)
+        self.assertEqual(controller._workflow_mutation_authority.call_count,2)
+
     def test_unapproved_owner_rejected(self):
         with self.assertRaisesRegex(ValueError, 'owner'):
             capture_candidate({**self.policy, 'allowed_uids': [os.getuid() + 1]})

@@ -529,3 +529,23 @@ source policy; existing frozen contracts remain unchanged.
 
 
 Candidate-source preparation: `candidate_snapshot.py` captures a bounded complete Linux candidate inventory without writes or acceptance. Its explicit version-one policy binds the canonical root, allowed owners and entry/byte/depth limits; it permits no exclusions or partial scope. Hidden files, empty directories, modes, UID/GID, additions and deletions contribute to identity. Descriptor-relative reads reject aliases, hardlinks, special files and mount-ID changes, including same-filesystem bind mounts; missing Linux fdinfo fails closed. Two inventory passes detect observed mutations. Callers must quiesce writers and expose candidate inputs read-only throughout verification; matching snapshots do not establish historical immutability. This primitive is not yet wired into enrollment, native plans/results/receipts or final acceptance. Existing frozen bindings and generic bound semantics remain unchanged. Ten focused inventory tests pass; Mac tests explicitly substitute the mount reader. Actual Linux mount and bind-mount qualification remains pending. Both independent source reviews passed.
+
+
+Version-two workflow candidate binding is explicit source preparation. Its exact
+schema adds `schema: 2`, `candidate_source_policy` and `artifact_output_root` to
+the existing binding. Enrollment still requires the exact authenticated binding
+digest and empty inactive workflow journal; there is no recovery migration.
+The complete inventory policy permits no exclusions. Immutable verifier code,
+environment and source-manifest inputs must live outside the mutable candidate;
+artifacts must live under the separately approved disjoint output root.
+
+Owned plans, native results and protected receipt rows retain the candidate
+snapshot. Dispatch, sealing, checkpoint publication and task credit require fresh
+comparisons; authority and original window are checked after potentially long
+recaptures. Ownership/cleanup reconstructs the retained envelope without requiring
+current source truth. A dependent task refreshes ancestor verifier receipts under
+its stopped owner; the final task refreshes all blocking verifiers before credit.
+Old task credits remain immutable, and an already-run verifier prefix never
+replays. Candidate-aware proof is supplementary: generic bound verification and
+legacy bindings retain their exact semantics. Source review and local tests do
+not establish enrollment, actual native version-two integration or parent acceptance.

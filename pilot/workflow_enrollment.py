@@ -25,7 +25,7 @@ class WorkflowBindingEnrollment:
             raise ValueError('Exact authenticated workflow binding approval required')
         with self.store.lock():
             require_active(self.store,key)
-            for name in ('active-owner.json','enabled-outcome.json',key+'.workflow.json',
+            for name in ('active-owner.json','active-verifier.json','enabled-outcome.json',key+'.workflow.json',
                          key+'.workflow-binding-intent.json',key+'.workflow-binding-complete.json'):
                 try:self.store.read(name)
                 except FileNotFoundError:pass
@@ -38,6 +38,9 @@ class WorkflowBindingEnrollment:
                 raise ValueError('Checkpoint must reside in protected controller store')
             gate = WorkflowGate(self.store,key,self.helper)
             _,checkpoint,_ = gate.validate_binding(binding)
+            # Enrollment checks initial source once. Recovery/owned cleanup reads
+            # protected declarations without requiring mutable source truth.
+            gate.candidate_snapshot(binding)
             path = Path(binding['checkpoint_path'])
             # Graph status is private host authority. The candidate must not be
             # able to replace this directory, checkpoint or its proof records.

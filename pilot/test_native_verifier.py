@@ -1,3 +1,4 @@
+import os
 import copy
 import json
 from pathlib import Path
@@ -25,6 +26,36 @@ class VerifierPlanTests(unittest.TestCase):
                             'verifier_ids':['V1'],'definitions':[{'verifier':verifier,'identity':{},
                             'input_paths':[str(self.implementation)],'base':str(self.candidate)}]}}
         self.plan=launch_plan(self.owned,self.candidate,0)
+    def test_candidate_snapshot_plan_uses_complete_readonly_inputs_and_external_outputs(self):
+        from candidate_snapshot import capture_candidate
+        import sys
+        if sys.platform!='linux':
+            mount=patch('candidate_snapshot._mount_id',return_value=1)
+            mount.start();self.addCleanup(mount.stop)
+        owned=copy.deepcopy(self.owned)
+        external=self.root/'trusted-verifier.py';external.write_text('pass')
+        output=self.root/'external-output';output.mkdir()
+        row=owned['plan']['definitions'][0]
+        row['input_paths']=[str(external)]
+        row['verifier']['proof']['artifacts']=[{'path':str(output/'result.txt')}]
+        policy={'schema':1,'candidate_root':str(self.candidate),'scope':'entire_candidate',
+                'allowed_uids':[os.getuid()],'max_entries':100,'max_file_bytes':4096,
+                'max_total_bytes':16384,'max_depth':5}
+        source={'policy':policy,'artifact_output_root':str(output),'snapshot':capture_candidate(policy)}
+        owned['plan']['candidate_source']=source
+        plan=launch_plan(owned,self.candidate,0)
+        self.assertEqual(plan['candidate_source'],source)
+        self.assertIn(str(self.implementation),plan['input_paths'])
+        self.assertIn(str(external),plan['input_paths'])
+        self.assertEqual(plan['read_write_paths'],[str(output)])
+        self.implementation.write_text('mutated')
+        self.assertEqual(launch_plan(owned,self.candidate,0),plan)
+        self.implementation.unlink();self.implementation.symlink_to('/etc/passwd')
+        self.assertEqual(launch_plan(owned,self.candidate,0),plan)
+        from candidate_snapshot import require_candidate_snapshot
+        with self.assertRaisesRegex(ValueError,'unsupported'):
+            require_candidate_snapshot(source['policy'],source['snapshot'])
+
     def test_plan_freezes_command_and_readonly_candidate_with_separate_outputs(self):
         self.assertEqual(self.plan['argv'],self.owned['plan']['definitions'][0]['verifier']['proof']['argv'])
         self.assertEqual(self.plan['command'][:4],['/usr/bin/env','-i','PATH=/usr/bin:/bin','HOME=/nonexistent'])

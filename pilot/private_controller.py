@@ -665,9 +665,14 @@ class PrivateController:
             attempt=self.store.read(unit+'.workflow-attempt.json');owner=attempt['owner']
             gate,selection,_,_,_=self._finished_workflow_context(owner)
             binding,state,_=gate._read()
-            identifiers=binding['task_verifiers'][selection['task_id']]
-            unresolved=[identifier for identifier in identifiers
-                        if gate.helper.prerequisite_issues(state,[identifier])]
+            if binding.get('schema')==2:
+                plan=gate.verification_plan(selection)
+                identifiers=plan['verifier_ids']
+                unresolved=gate.unresolved_verifiers(binding,state,identifiers)
+            else:
+                identifiers=binding['task_verifiers'][selection['task_id']]
+                unresolved=[identifier for identifier in identifiers
+                            if gate.helper.prerequisite_issues(state,[identifier])]
             if not unresolved:
                 try:self.store.read(unit+'.task-proof.json')
                 except FileNotFoundError:action=('proof',None)
@@ -761,12 +766,20 @@ class PrivateController:
         if remaining(self.store,self.contract_digest)<=0:
             raise ValueError('Immutable workflow mutation window expired')
 
+    def _workflow_source_guard(self, observation):
+        self._workflow_mutation_authority()
+        source=observation.get('candidate_source')
+        if source is not None:
+            from candidate_snapshot import require_candidate_snapshot
+            require_candidate_snapshot(source['policy'],source['snapshot'])
+            self._workflow_mutation_authority()
+
     def record_workflow_task_proof(self, owner):
         """Persist exact stopped-attempt proof without credit or task mutation."""
         with self.store.lock():
             record = self._current_workflow_task_proof(owner)
             name = owner['unit'] + '.task-proof.json'
-            self._workflow_mutation_authority()
+            self._workflow_source_guard(record['observation'])
             try:
                 self.store.create(name, record)
             except FileExistsError:
@@ -796,19 +809,19 @@ class PrivateController:
                     raise ValueError('Task acceptance preimage differs from recorded proof')
                 intent = {'owner': owner, 'proof_digest': digest(proof),
                           'progress_identity': current['progress_identity'], 'transition': transition}
-                self._workflow_mutation_authority()
+                self._workflow_source_guard(current['observation'])
                 self.store.create(name, intent)
             if (set(intent) != {'owner','proof_digest','progress_identity','transition'} or
                     intent['owner'] != owner or intent['proof_digest'] != digest(proof) or
                     intent['progress_identity'] != current['progress_identity']):
                 raise ValueError('Task acceptance intent identity drift')
-            saved = self.workflow_gate.publish_accepted_state(intent['transition'],before_write=self._workflow_mutation_authority)
+            saved = self.workflow_gate.publish_accepted_state(intent['transition'],before_write=lambda:self._workflow_source_guard(current['observation']))
             completed = {'owner':owner, 'intent_digest':digest(intent),
                          'checkpoint_sha256':digest(saved),
                          'progress_identity':current['progress_identity'],
                          'progress_credit_assigned':False, 'parent_accepted':False}
             result_name = owner['unit'] + '.task-acceptance.json'
-            self._workflow_mutation_authority()
+            self._workflow_source_guard(current['observation'])
             try:
                 self.store.create(result_name, completed)
             except FileExistsError:
@@ -883,7 +896,7 @@ class PrivateController:
                 intent = {'owner':owner,'acceptance_digest':digest(acceptance),
                           'expected_revision':revision,'before':journal,'after':after,
                           'progress_identity':current['progress_identity']}
-                self._workflow_mutation_authority()
+                self._workflow_source_guard(current['observation'])
                 self.store.create(name,intent)
             if (set(intent) != {'owner','acceptance_digest','expected_revision','before','after','progress_identity'} or
                     intent['owner'] != owner or intent['acceptance_digest'] != digest(acceptance) or
@@ -895,8 +908,8 @@ class PrivateController:
             if journal == intent['before'] and revision == intent['expected_revision']:
                 # Uncertain publication propagates. A retry reads this same intent
                 # and exact remote state; it never repeats a model submission.
-                self._workflow_mutation_authority()
-                self.journal.publish(revision,intent['after'],before_publish=self._workflow_mutation_authority)
+                self._workflow_source_guard(current['observation'])
+                self.journal.publish(revision,intent['after'],before_publish=lambda:self._workflow_source_guard(current['observation']))
                 revision,journal = self.journal.read()
             if journal != intent['after']:
                 raise ValueError('Task credit journal drift requires reconciliation')
@@ -904,7 +917,7 @@ class PrivateController:
                          'progress_identity':current['progress_identity'],
                          'progress_credit_assigned':True,'parent_accepted':False}
             result_name = owner['unit'] + '.task-credit.json'
-            self._workflow_mutation_authority()
+            self._workflow_source_guard(current['observation'])
             try:self.store.create(result_name,completed)
             except FileExistsError:
                 if self.store.read(result_name) != completed:

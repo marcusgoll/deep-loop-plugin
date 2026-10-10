@@ -14,6 +14,7 @@ import sys
 
 from admission import digest
 from authority import require_active
+from candidate_snapshot import require_candidate_snapshot, validate_candidate_snapshot
 from private_launch import ACCOUNT,ROOT
 from systemd_observer import observe_unit
 from worker_window import remaining
@@ -51,17 +52,39 @@ def launch_plan(owned,candidate,index):
     if not executable.is_absolute() or '..' in executable.parts:raise ValueError('Absolute verifier executable required')
     base=canonical(row['base']);cwd=canonical(proof.get('working_directory',str(base)))
     if cwd!=candidate and candidate not in cwd.parents:raise ValueError('Verifier cwd must be inside candidate')
+    source=parent.get('candidate_source')
     inputs=[canonical(p) for p in row['input_paths']]
+    if source is not None:
+        if (not isinstance(source,dict) or set(source)!={'policy','artifact_output_root','snapshot'} or
+                source['policy']['candidate_root']!=str(candidate)):
+            raise ValueError('Exact candidate source policy required')
+        validate_candidate_snapshot(source['policy'],source['snapshot'])
+        if any(candidate==p or candidate in p.parents for p in inputs):
+            raise ValueError('Immutable verifier inputs overlap mutable candidate')
+        # Retained ownership must not depend on mutable path resolution. Fresh
+        # capture at dispatch/sealing rejects links; reconstruct names lexically.
+        for entry in source['snapshot']['manifest']['entries']:
+            if entry['type']!='file':continue
+            value=str(candidate / entry['path'])
+            if any(c.isspace() or c in '\\:' for c in value):
+                raise ValueError('Candidate input path contains property separators')
+            inputs.append(Path(value))
     outputs=sorted({str(canonical(str(base/a['path'])).parent) for a in proof['artifacts']})
     if not outputs or len(outputs)>128:raise ValueError('Bounded verifier output directories required')
     for output in map(Path,outputs):
-        if candidate not in output.parents or any(output==p or output in p.parents for p in inputs):
+        approved = (candidate in output.parents if source is None else
+                    (output==canonical(source['artifact_output_root']) or
+                     canonical(source['artifact_output_root']) in output.parents) and
+                    candidate!=output and candidate not in output.parents and output not in candidate.parents)
+        if not approved or any(output==p or output in p.parents for p in inputs):
             raise ValueError('Verifier output must not contain candidate root or declared inputs')
     core={'contract_digest':owner['contract_digest'],'source_owner':owner,'source_invocation':owned['invocation_id'],
           'owned_plan_digest':digest(owned),'index':index,'argv':list(argv),
           'command':['/usr/bin/env','-i','PATH=/usr/bin:/bin','HOME=/nonexistent',*argv],'cwd':str(cwd),
           'candidate':str(candidate),'read_write_paths':outputs,'input_paths':list(map(str,inputs)),
           'definition':row,'runtime_seconds':15}
+    if source is not None:
+        core['candidate_source']=source
     return {**core,'unit':'deep-loop-pilot-'+digest(core)+'-1-1'}
 
 
@@ -150,6 +173,14 @@ class NativeVerifier:
             info=path.lstat()
             if (not stat.S_ISDIR(info.st_mode) or info.st_uid!=account.pw_uid or info.st_gid!=account.pw_gid or
                     stat.S_IMODE(info.st_mode)!=0o700 or path.resolve()!=path):raise ValueError('Private verifier directory required')
+        if 'candidate_source' in plan:
+            source=plan['candidate_source']
+            require_candidate_snapshot(source['policy'],source['snapshot'])
+            for value in plan['read_write_paths']:
+                for parent in Path(value).parents:
+                    info=parent.lstat()
+                    if info.st_uid!=0 or info.st_mode&0o022 or stat.S_ISLNK(info.st_mode):
+                        raise ValueError('Untrusted external output ancestry')
         executable=Path(plan['argv'][0])
         resolved=executable.resolve()
         if candidate in resolved.parents:

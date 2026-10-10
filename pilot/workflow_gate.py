@@ -14,6 +14,7 @@ import uuid
 
 from admission import digest
 from authority import require_active
+from candidate_snapshot import capture_candidate, require_candidate_snapshot, validate_candidate_policy
 
 STATIC_FIELDS = ('id', 'title', 'acceptance', 'kind', 'stage', 'dependsOn')
 
@@ -68,14 +69,20 @@ class WorkflowGate:
 
     def validate_binding(self, binding):
         """Inspect a proposed binding before its protected publication."""
-        if (not isinstance(binding, dict) or set(binding) != {
+        legacy_fields = {
                 'contract_digest', 'approval_ref', 'checkpoint_path', 'session_id',
-                'verification_contract', 'graph', 'task_verifiers', 'task_prompts', 'boundary'} or
+                'verification_contract', 'graph', 'task_verifiers', 'task_prompts', 'boundary'}
+        modern = (isinstance(binding, dict) and type(binding.get('schema')) is int and
+                  binding['schema'] == 2 and set(binding) == legacy_fields |
+                  {'schema', 'candidate_source_policy', 'artifact_output_root'})
+        if (not isinstance(binding, dict) or not (set(binding) == legacy_fields or modern) or
                 binding['contract_digest'] != self.contract_digest or
                 not isinstance(binding['session_id'], str) or not binding['session_id'].strip() or
                 not isinstance(binding['approval_ref'], str) or not binding['approval_ref'].strip() or
                 binding['boundary'] != 'integrated_candidate'):
             raise ValueError('Unsupported protected workflow binding')
+        if modern:
+            self.candidate_policy(binding)
         approval = self.store.read(self.contract_digest + '.approval.json')
         if (set(approval) != {'contract', 'approval_ref'} or
                 not isinstance(approval['approval_ref'], str) or not approval['approval_ref'].strip() or
@@ -113,13 +120,99 @@ class WorkflowGate:
             raise ValueError('Task mapping must cover every parent blocking verifier exactly by ID')
         return binding, state, by_id
 
+    def candidate_policy(self, binding):
+        """Explicit v2 policy only; never infer or upgrade a legacy enrollment."""
+        if 'schema' not in binding:
+            return None
+        policy = binding['candidate_source_policy']
+        validate_candidate_policy(policy)
+        candidate = Path(policy['candidate_root'])
+        if not isinstance(binding['artifact_output_root'],str):
+            raise ValueError('Approved artifact output root required')
+        output = Path(binding['artifact_output_root'])
+        if (not output.is_absolute() or output.resolve() != output or
+                '..' in output.parts or candidate == output or
+                candidate in output.parents or output in candidate.parents or
+                self.store.root == output or self.store.root in output.parents or
+                output in self.store.root.parents):
+            raise ValueError('Disjoint approved artifact output root required')
+        return {'policy':policy,'artifact_output_root':str(output)}
+
+    def candidate_snapshot(self,binding):
+        source=self.candidate_policy(binding)
+        if source is None:return None
+        return {**source,'snapshot':capture_candidate(source['policy'])}
+
+    def _candidate_definitions(self, source, definitions):
+        if source is None:
+            return
+        candidate = Path(source['policy']['candidate_root'])
+        output = Path(source['artifact_output_root'])
+        for row in definitions:
+            # The generic bound manifest continues to pin verifier code/env.
+            # Mutable project inputs are covered by the complete inventory.
+            for value in row['input_paths']:
+                path = Path(value)
+                if candidate == path or candidate in path.parents:
+                    raise ValueError('Immutable verifier inputs must be outside mutable candidate')
+            for artifact in row['verifier']['proof']['artifacts']:
+                path = Path(row['base']) / artifact['path']
+                if path.resolve() != path or output not in path.parents:
+                    raise ValueError('Artifact outside approved output root')
+
+    def _candidate_receipts(self, binding, state, ids):
+        source = self.candidate_snapshot(binding)
+        if source is None:
+            return None
+        checks = {row.get('verifierId'): row for row in state.get('checks', [])}
+        for identifier in ids:
+            receipt = checks[identifier]['receipt']
+            path = Path(receipt['path'])
+            if path.parent != self.store.root:
+                raise ValueError('Protected candidate receipt required')
+            rows = self.store.read(path.name)
+            payload = checkpoint_bytes(path)
+            if hashlib.sha256(payload).hexdigest() != receipt['sha256']:
+                raise ValueError('Candidate receipt bytes changed')
+            matches = [row for row in rows if isinstance(row, dict) and
+                       row.get('verifier_id') == identifier] if isinstance(rows, list) else []
+            if len(matches) != 1 or matches[0].get('candidate_source') != source:
+                raise ValueError('Candidate receipt snapshot missing or stale')
+        require_candidate_snapshot(source['policy'], source['snapshot'])
+        return source
+
+    def verification_ids(self, binding, by_id, task_id):
+        if binding.get('schema') != 2:
+            return sorted(binding['task_verifiers'][task_id])
+        covered={task_id}
+        def visit(identifier):
+            for ancestor in by_id[identifier].get('dependsOn',[]):
+                if ancestor not in covered:
+                    covered.add(ancestor);visit(ancestor)
+        visit(task_id)
+        # The final stopped task verifies the entire integrated candidate before
+        # its credit. Refresh verifiers, never model tasks or historical credits.
+        if all(task['status']=='done' for identifier,task in by_id.items() if identifier!=task_id):
+            covered=set(by_id)
+        return sorted({identifier for task in covered for identifier in binding['task_verifiers'][task]})
+
+    def unresolved_verifiers(self, binding, state, identifiers):
+        unresolved=[]
+        for identifier in identifiers:
+            if self.helper.prerequisite_issues(state,[identifier]):
+                unresolved.append(identifier);continue
+            if binding.get('schema')==2:
+                try:self._candidate_receipts(binding,state,[identifier])
+                except (ValueError,FileNotFoundError):unresolved.append(identifier)
+        return unresolved
+
     def verification_plan(self,selection):
         """Read selected bound inputs; no command execution or acceptance.
 
         The controller authenticates the stopped owned attempt before use. An
         executor must run the returned argv without root candidate privileges.
         """
-        binding,state,_=self._read()
+        binding,state,by_id=self._read()
         current=self.selection()
         if (not isinstance(selection,dict) or set(selection)!={
                 'task_id','binding_digest','session_id','prompt_sha256'} or
@@ -128,13 +221,20 @@ class WorkflowGate:
                 selection['session_id']!=current['session_id'] or
                 selection['prompt_sha256']!=current['prompt_sha256'][selection['task_id']]):
             raise ValueError('Verification task selection changed')
-        ids=sorted(binding['task_verifiers'][selection['task_id']])
+        ids=self.verification_ids(binding,by_id,selection['task_id'])
+        source=self.candidate_snapshot(binding)
         definitions=self.helper.verification_definitions(state,ids)
+        self._candidate_definitions(source,definitions)
+        if source is not None:
+            require_candidate_snapshot(source['policy'],source['snapshot'])
         if self._read()[:2]!=(binding,state):
             raise ValueError('Verification checkpoint changed during inspection')
-        return {'contract_digest':self.contract_digest,'selection':dict(selection),
+        result = {'contract_digest':self.contract_digest,'selection':dict(selection),
                 'checkpoint_sha256':digest(state),'verifier_ids':ids,'definitions':definitions,
                 'execution_authorized':False,'parent_accepted':False}
+        if source is not None:
+            result['candidate_source'] = source
+        return result
 
     def outcome_proof(self):
         """Inspect all current integrated proof; never accept or deliver a parent.
@@ -221,16 +321,22 @@ class WorkflowGate:
         failures = self.helper.prerequisite_issues(state, ids)
         if failures:
             raise ValueError('Task acceptance proof blocked: ' + '; '.join(failures))
+        source = self._candidate_receipts(binding,state,ids)
         # Re-read through the same protected identities after proof inspection.
         # Concurrent checkpoint changes invalidate this observation.
         again = self._read()
         if again[0] != binding or again[1] != state:
             raise ValueError('Task acceptance checkpoint changed during inspection')
+        if source is not None:
+            require_candidate_snapshot(source['policy'],source['snapshot'])
         checks = {c.get('verifierId'): c for c in state.get('checks', [])}
-        return {'contract_digest': self.contract_digest, 'kind': 'workflow_task_proof',
+        result = {'contract_digest': self.contract_digest, 'kind': 'workflow_task_proof',
                 'selection': dict(selection), 'verifier_ids': ids,
                 'proof_receipts': {i: checks[i]['receipt'] for i in ids},
                 'checkpoint_sha256': digest(state), 'parent_accepted': False}
+        if source is not None:
+            result['candidate_source']=source
+        return result
 
     def accepted_state(self, selection, evidence):
         """Prepare helper-owned transition after protected current proof checks.
@@ -250,9 +356,20 @@ class WorkflowGate:
         binding,state,_=self._read()
         after=self.helper.verified_check_state(state,verifier_id,receipt,evidence,digest(state))
         if self._read()[:2]!=(binding,state):raise ValueError('Verification checkpoint changed before transition')
-        return {'before':state,'after':after,'observation':{'kind':'native_verification_check',
+        source=self._candidate_receipts(binding,after,[verifier_id])
+        transition = {'before':state,'after':after,'observation':{'kind':'native_verification_check',
                 'binding_digest':digest(binding),'verifier_id':verifier_id,'receipt':receipt,
                 'evidence':evidence,'parent_accepted':False}}
+        if source is not None:
+            transition['observation']['candidate_source']=source
+        return transition
+
+    def _verified_postcheck(self, verifier_id):
+        binding,state,_=self._read()
+        failures=self.helper.prerequisite_issues(state,[verifier_id])
+        if failures:
+            raise ValueError('Published verification proof blocked: '+'; '.join(failures))
+        self._candidate_receipts(binding,state,[verifier_id])
 
     def _checked_verification_transition(self,transition):
         observation=transition['observation']
@@ -269,7 +386,7 @@ class WorkflowGate:
 
     def publish_verified_state(self,transition,before_write=None):
         return self._publish_checkpoint(transition,self._checked_verification_transition,
-            lambda:self.helper.prerequisite_issues(self._read()[1],[transition['observation']['verifier_id']]),before_write)
+            lambda:self._verified_postcheck(transition['observation']['verifier_id']),before_write)
 
     def publish_accepted_state(self,transition,before_write=None):
         return self._publish_checkpoint(transition,self._checked_acceptance_transition,
@@ -330,7 +447,16 @@ class WorkflowGate:
                 # must use this same lock, and candidates cannot write this tree.
                 if checkpoint_bytes(path) != payload:
                     raise ValueError('Checkpoint changed before acceptance publication')
+                source=transition['observation'].get('candidate_source')
+                if source is not None:
+                    require_candidate_snapshot(source['policy'],source['snapshot'])
                 if before_write is not None:before_write()
+                if source is not None:
+                    require_candidate_snapshot(source['policy'],source['snapshot'])
+                    require_active(self.store,self.contract_digest)
+                    from worker_window import remaining
+                    if remaining(self.store,self.contract_digest)<=0:
+                        raise ValueError('Immutable candidate publication window expired')
                 os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
             if before_write is not None:before_write()
             os.fsync(directory)
