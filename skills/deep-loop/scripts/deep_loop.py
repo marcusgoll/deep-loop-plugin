@@ -370,7 +370,13 @@ def verification_definitions(state,verifier_ids):
             if (verifier['gate']!='blocking' or verifier['class']=='human' or not proof or proof['mode']!='bound' or
                     'readback' in proof or identifier not in checks or checks[identifier].get('stage','review')!='review'):
                 raise ValueError('Automatic verification requires bound blocking review proof: '+identifier)
-            result.append({'verifier':copy.deepcopy(verifier),'identity':proof_binding.identity(proof,proof_binding.logical(path).parent)})
+            base=proof_binding.logical(path).parent
+            inputs=[str(proof_binding.bound(proof[k],base)) for k in ('implementation','source_manifest','environment_manifest')]
+            manifest=proof_binding.bound(proof['source_manifest'],base)
+            inputs.extend(str(proof_binding.bound({'path':name,'sha256':value},proof_binding.logical(manifest).parent))
+                          for name,value in proof_binding.read(manifest)['files'].items())
+            result.append({'verifier':copy.deepcopy(verifier),'identity':proof_binding.identity(proof,base),
+                           'input_paths':sorted(set(inputs)),'base':str(base)})
         return result
 
 

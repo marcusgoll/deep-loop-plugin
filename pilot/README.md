@@ -342,3 +342,21 @@ precede the nonactivating completion. A partial binding cannot select tasks.
 This API does not open an execution window, enable an outcome, activate a timer,
 or replace the frozen pilot enrollment operator. Production graph construction
 and fully unattended verifier execution remain outstanding.
+
+
+The native-verifier primitive freezes one declared bound command from an exact
+stopped workflow attempt. It runs as the private nonroot account with a cleared
+environment, read-only candidate inputs, disjoint writable output directories,
+network and io_uring syscall denial, and an immutable execution deadline.
+Candidate inputs must be private regular files with exactly one hard link.
+Protected intent and shared-stream ownership precede submission. Interrupted
+submission can inspect the same native unit; it cannot replay dispatch.
+
+Controller cleanup requires the exact invocation to be ended and empty before
+persisting cleanup-only completion and releasing its own stream fence. An
+isolated Linux fixture exercised actual native submission, recovery, fencing and
+cleanup without a model call. A failed namespace setup was also recovered and
+cleaned without replay. These fixtures leave the task unaccepted and preserve
+charged history. Result publication, never-submitted preparation recovery and
+worker wiring remain outstanding; this primitive has no CLI or automatic worker
+entry point and is not activated in production.

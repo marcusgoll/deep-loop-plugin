@@ -105,10 +105,11 @@ class PrivateController:
     observes its exact invocation/cgroup, and authenticates a session observation.
     Journal and backend are trusted implementations, not candidate callbacks.
     """
-    def __init__(self, store, journal, backend, verifier=None, workflow_gate=None):
+    def __init__(self, store, journal, backend, verifier=None, workflow_gate=None, native_verifier=None):
         self.store, self.journal, self.backend = store, journal, backend
         self.verifier = verifier
         self.workflow_gate = workflow_gate
+        self.native_verifier = native_verifier
         self.contract_digest = journal.contract_digest
 
     def _historical_contract(self):
@@ -158,6 +159,10 @@ class PrivateController:
             except FileExistsError:
                 if self.store.read(key + '.revoked.json') != revoked:
                     raise ValueError('Protected revocation changed')
+            try:verifier_stream=self.store.read('active-verifier.json')
+            except FileNotFoundError:verifier_stream=None
+            if verifier_stream is not None and verifier_stream.get('contract_digest')==key:
+                self._observe_native_verifier(stop=True)
             complete_name = key + '.revocation-complete.json'
             try:
                 complete = self.store.read(complete_name)
@@ -260,7 +265,20 @@ class PrivateController:
                               {'contract': contract, 'approval_ref': approval_ref})
             return self.journal.publish(None, initialize(self.contract_digest))
 
+    def _verifier_unowned(self):
+        try:self.store.read('active-verifier.json')
+        except FileNotFoundError:pass
+        else:raise ValueError('Private credential stream has an unreconciled verifier')
+        # Also fence interrupted preparation before the stream marker existed.
+        for path in self.store.root.glob('deep-loop-pilot-*.verifier-*.intent.json'):
+            prefix=path.name.removesuffix('.intent.json')
+            intent=self.store.read(path.name)
+            try:self._verifier_cleanup_completion(prefix,intent)
+            except FileNotFoundError:
+                raise ValueError('Pending native verifier requires result publication or cleanup')
+
     def _unowned(self):
+        self._verifier_unowned()
         try:
             self.store.read('active-owner.json')
         except FileNotFoundError:
@@ -454,6 +472,116 @@ class PrivateController:
             if self.journal.read()!=(revision,journal):raise ValueError('Verification journal changed')
             return {'owner':owner,'invocation_id':invocation['invocation_id'],
                     'journal_revision':revision,'plan':plan}
+
+    def start_native_workflow_verification(self,owner,index):
+        """One protected dispatch; an interrupted call must inspect, never replay."""
+        from native_verifier import launch_plan as verifier_plan
+        from private_launch import ROOT
+        with self.store.lock():
+            self._verifier_unowned()
+            self._require_no_pending_task_acceptance()
+            self._require_no_pending_task_credit()
+            gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
+            owned={'owner':owner,'invocation_id':invocation['invocation_id'],
+                   'journal_revision':revision,'plan':gate.verification_plan(selection)}
+            if self.journal.read()!=(revision,journal):raise ValueError('Verification journal changed')
+            if self.native_verifier is None:raise ValueError('Native verifier adapter unavailable')
+            plan=verifier_plan(owned,ROOT+'/candidate/'+self.contract_digest,index)
+            prefix=owner['unit']+'.verifier-'+str(index)
+            intent={'owned_plan':owned,'plan':plan,'plan_digest':digest(plan)}
+            self.store.create(prefix+'.intent.json',intent)
+            stream={'contract_digest':self.contract_digest,'prefix':prefix,'plan_digest':digest(plan)}
+            self.store.create('active-verifier.json',stream)
+            if self.store.read(prefix+'.intent.json')!=intent or self.store.read('active-verifier.json')!=stream:
+                raise ValueError('Verifier ownership publication changed')
+            observation=self.native_verifier.submit(plan)
+            self._save_verifier_invocation(prefix,plan,observation)
+            return observation
+
+    def _save_verifier_invocation(self,prefix,plan,observation):
+        self._invocation(observation['invocation_id'])
+        if observation['plan_digest']!=digest(plan):raise ValueError('Verifier observation plan changed')
+        record={'plan_digest':digest(plan),'invocation_id':observation['invocation_id']}
+        try:self.store.create(prefix+'.invocation.json',record)
+        except FileExistsError:
+            if self.store.read(prefix+'.invocation.json')!=record:raise ValueError('Verifier invocation changed')
+
+    def _observe_native_verifier(self,stop=False):
+        stream=self.store.read('active-verifier.json')
+        if stream['contract_digest']!=self.contract_digest:raise ValueError('Verifier owned by another outcome')
+        intent=self.store.read(stream['prefix']+'.intent.json');plan=intent['plan']
+        if (set(stream)!={'contract_digest','prefix','plan_digest'} or
+                stream['prefix']!=plan['source_owner']['unit']+'.verifier-'+str(plan['index']) or
+                stream['plan_digest']!=digest(plan) or intent['plan_digest']!=digest(plan)):
+            raise ValueError('Verifier stream ownership changed')
+        if self.native_verifier is None:raise ValueError('Native verifier adapter unavailable')
+        observation=self.native_verifier.adopt(plan)
+        self._save_verifier_invocation(stream['prefix'],plan,observation)
+        if stop:
+            observation=self.native_verifier.stop(plan,observation['invocation_id'])
+            self._save_verifier_invocation(stream['prefix'],plan,observation)
+            native=observation['native']
+            if not (native['ownership_verified'] and native['execution_finished'] and native['cgroup_empty']):
+                raise ValueError('Verifier cleanup lacks empty ended ownership')
+        # Keep the fence until result publication or qualified cleanup completes.
+        return observation
+
+    def recover_native_workflow_verification(self):
+        with self.store.lock():return self._observe_native_verifier()
+
+    def _verifier_cleanup_completion(self,prefix,intent):
+        completion=self.store.read(prefix+'.cleanup-complete.json')
+        cleanup=self.store.read(prefix+'.cleanup-intent.json')
+        invocation=self.store.read(prefix+'.invocation.json')
+        expected={'plan_digest':digest(intent['plan']),'intent_digest':digest(intent),
+                  'invocation_id':invocation['invocation_id'],'cleanup_only':True,'parent_accepted':False}
+        if (cleanup!=expected or completion!=dict(expected,cleanup_intent_digest=digest(cleanup)) or
+                invocation['plan_digest']!=expected['plan_digest'] or intent['plan_digest']!=expected['plan_digest']):
+            raise ValueError('Verifier cleanup completion identity drift')
+        return completion
+
+    def cleanup_native_workflow_verification(self,prefix):
+        """Stop only exact owned verifier; durable cleanup grants no result proof."""
+        with self.store.lock():
+            return self._cleanup_native_verifier(prefix)
+
+    def _cleanup_native_verifier(self,prefix):
+        intent=self.store.read(prefix+'.intent.json');plan=intent['plan']
+        if (plan['contract_digest']!=self.contract_digest or
+                prefix!=plan['source_owner']['unit']+'.verifier-'+str(plan['index'])):
+            raise ValueError('Verifier cleanup ownership changed')
+        if self.native_verifier is None:raise ValueError('Native verifier adapter unavailable')
+        expected_stream={'contract_digest':self.contract_digest,'prefix':prefix,'plan_digest':digest(plan)}
+        try:stream=self.store.read('active-verifier.json')
+        except FileNotFoundError:stream=None
+        try:completed=self._verifier_cleanup_completion(prefix,intent)
+        except FileNotFoundError:completed=None
+        if completed is None and stream!=expected_stream:
+            raise ValueError('Verifier cleanup lost stream ownership')
+        observation=self.native_verifier.adopt(plan)
+        self._save_verifier_invocation(prefix,plan,observation)
+        cleanup={'plan_digest':digest(plan),'intent_digest':digest(intent),
+                 'invocation_id':observation['invocation_id'],'cleanup_only':True,'parent_accepted':False}
+        try:self.store.create(prefix+'.cleanup-intent.json',cleanup)
+        except FileExistsError:
+            if self.store.read(prefix+'.cleanup-intent.json')!=cleanup:raise ValueError('Verifier cleanup intent drift')
+        native=observation['native']
+        if not (native['ownership_verified'] and native['execution_finished'] and native['cgroup_empty']):
+            observation=self.native_verifier.stop(plan,observation['invocation_id'])
+            self._save_verifier_invocation(prefix,plan,observation)
+        fresh=self.native_verifier.adopt(plan)
+        self._save_verifier_invocation(prefix,plan,fresh)
+        native=fresh['native']
+        if not (native['ownership_verified'] and native['execution_finished'] and native['cgroup_empty']):
+            raise ValueError('Verifier cleanup lacks fresh ended empty ownership')
+        completion=dict(cleanup,cleanup_intent_digest=digest(cleanup))
+        try:self.store.create(prefix+'.cleanup-complete.json',completion)
+        except FileExistsError:
+            if self.store.read(prefix+'.cleanup-complete.json')!=completion:raise ValueError('Verifier cleanup completion drift')
+        if self._verifier_cleanup_completion(prefix,intent)!=completion:
+            raise ValueError('Verifier cleanup readback changed')
+        if stream==expected_stream:self.store.remove('active-verifier.json')
+        return completion
 
     def _current_workflow_task_proof(self,owner):
         from workflow_gate import task_progress_identity
