@@ -445,3 +445,14 @@ host readbacks verified 93 pins, exact absence/cleanup hashes, unchanged
 checkpoint and journal charges, no verifier submission or task acceptance,
 and inactive production. The installed supervisor and process-crash variant
 remain unqualified.
+
+Supervisor qualification accepts a constrained trusted qualification-unit name
+while retaining its canonical production default. Invocation identity and all
+three native timeouts are checked against that exact unit. A disposable runtime
+service/timer exercised actual `main`: timer-driven preparation cleanup, then
+stale-proof blocking and terminal self-stop. Both host reviews verified 93
+pins, exact runtime units/wrapper, 45/5/5 limits, unchanged checkpoint/charges
+and native manager journal records for both invocation IDs. The fixture uses
+a one-second timer cadence and literal initial execution, blocks model dispatch
+and leaves production inactive. Production installation, reboot, full workflow
+completion and parent acceptance remain unqualified.
