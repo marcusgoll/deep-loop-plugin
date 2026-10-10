@@ -39,6 +39,37 @@ class WorkerTests(unittest.TestCase):
                                  delivery_factory=lambda key:adapter),'wait_for_trusted_delivery')
         adapter.step.assert_called_once()
 
+    def test_schema_three_parent_never_gains_delivery_from_new_worker(self):
+        from unittest.mock import Mock
+        factory=Mock();self.store.create(self.journal.contract_digest+'.workflow.json',{'schema':3})
+        with patch('private_worker.tick',return_value='workflow_delivery_pending'):
+            self.assertEqual(run(self.store,lambda key:self.controller,window=lambda *a:2000,
+                                 workflow_delivery_factory=factory),'workflow_delivery_pending')
+        factory.assert_not_called()
+    def test_explicit_workflow_delivery_is_one_step_and_uncertainty_waits(self):
+        from unittest.mock import Mock
+        from test_workflow_delivery_contract import delivery
+        key=self.journal.contract_digest
+        self.store.create(key+'.workflow.json',{'schema':4,'workflow_delivery':delivery(key)})
+        adapter=Mock();factory=Mock(return_value=adapter)
+        with patch('private_worker.tick',return_value='workflow_delivery_pending'):
+            adapter.step.return_value='wait_for_workflow_delivery'
+            self.assertEqual(run(self.store,lambda key:self.controller,window=lambda *a:2000,
+                                 workflow_delivery_factory=factory),'wait_for_workflow_delivery')
+            adapter.step.assert_called_once();factory.assert_called_once_with(key)
+            adapter.reset_mock();adapter.step.side_effect=UncertainAPI('applied or unapplied')
+            self.assertEqual(run(self.store,lambda key:self.controller,window=lambda *a:2000,
+                                 workflow_delivery_factory=factory),'wait_for_workflow_delivery')
+            adapter.step.assert_called_once()
+    def test_workflow_factory_not_called_before_parent_or_after_window(self):
+        from unittest.mock import Mock
+        factory=Mock()
+        for result,left in [('recovered_workflow_parent_acceptance',2000),('workflow_delivery_pending',60),
+                            ('wait_for_predecessor',2000)]:
+            with patch('private_worker.tick',return_value=result):
+                run(self.store,lambda key:self.controller,window=lambda *a:left,workflow_delivery_factory=factory)
+        factory.assert_not_called()
+
     def test_requires_native_service_identity(self):
         with patch.dict('os.environ',{},clear=True),patch('private_worker.subprocess.run') as process:
             with self.assertRaises(ValueError):qualify_service()

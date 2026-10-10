@@ -24,12 +24,15 @@ from delivery_artifact import DeliveryArtifact
 from pinned_helper import BoundPinnedHelper
 from workflow_gate import WorkflowGate
 from native_verifier import NativeVerifier
+from workflow_delivery import WorkflowDelivery
+from workflow_github_transport import WorkflowGitHubAPI
+from workflow_delivery_contract import validate_workflow_delivery
 
 TIMER = 'deep-loop-private-worker.timer'
 WORKER_SECONDS = 60
 
 
-def run(store, factory, *, window=remaining, delivery_factory=None):
+def run(store, factory, *, window=remaining, delivery_factory=None, workflow_delivery_factory=None):
     enabled = store.read('enabled-outcome.json')
     if set(enabled) != {'contract_digest'}:
         raise ValueError('Malformed approved worker selection')
@@ -43,7 +46,20 @@ def run(store, factory, *, window=remaining, delivery_factory=None):
     if result=='ready_for_trusted_delivery' and delivery_factory is not None:
         try:return delivery_factory(key).step()
         except UncertainAPI:return 'wait_for_trusted_delivery'
+    if result=='workflow_delivery_pending' and workflow_delivery_factory is not None:
+        binding=store.read(key+'.workflow.json')
+        # A pending parent from a frozen schema-three enrollment gains no
+        # publication authority merely because a newer worker is installed.
+        if binding.get('schema')!=4:return result
+        validate_workflow_delivery(binding['workflow_delivery'],key)
+        try:return workflow_delivery_factory(key).step()
+        except UncertainAPI:return 'wait_for_workflow_delivery'
     return result
+
+
+def build_workflow_delivery(store,key):
+    controller=build_controller(store,key)
+    return WorkflowDelivery(controller,WorkflowGitHubAPI(controller))
 
 
 def qualify_service(service_name='deep-loop-private-worker.service'):
@@ -97,7 +113,8 @@ def main():
         return TrustedDelivery(store,journal,GitHubAPI(),reader)
     try:
         qualify_service()
-        result = run(store,factory,delivery_factory=delivery_factory)
+        result = run(store,factory,delivery_factory=delivery_factory,
+                     workflow_delivery_factory=lambda key:build_workflow_delivery(store,key))
         print(json.dumps({'terminal':result}),flush=True)
     except Exception:
         # Faults require trusted inspection; recurring wakeups cannot conceal a
@@ -112,7 +129,7 @@ def main():
                       'recovered_native_verifier_preparation_cleanup',
                       'submitted_native_workflow_verifier','recorded_workflow_task_proof',
                       'accepted_workflow_task','prepared_workflow_parent_acceptance',
-                      'recovered_workflow_parent_acceptance'}:
+                      'recovered_workflow_parent_acceptance','wait_for_workflow_delivery'}:
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
 
 

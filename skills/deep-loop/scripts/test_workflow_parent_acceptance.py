@@ -103,7 +103,7 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         self.assertTrue(cut['parent_receipt']['parent_accepted']);self.assertFalse(cut['parent_receipt']['delivery_verified'])
         self.assertEqual(self.controller.advance_workflow_parent_acceptance(),'workflow_delivery_pending')
         self.assertEqual(self.journal.read(),before);self.assertEqual(len(self.backend.submissions),3)
-    def test_model_free_provider_adapter_uses_actual_parent_authentication(self):
+    def test_model_free_worker_delivery_uses_actual_parent_authentication(self):
         import sys
         from workflow_delivery import WorkflowDelivery,WAIT
         from test_workflow_delivery import Provider
@@ -112,13 +112,19 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         self.prepared(delivery_capability=True)
         self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
         before=self.journal.read();checkpoint=self.graph.checkpoint.read_bytes()
-        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        from private_worker import run
+        self.graph.store.create('enabled-outcome.json',{'contract_digest':self.graph.key})
+        provider=Provider(self.graph.binding['workflow_delivery'])
+        def factory(key):
+            self.assertEqual(key,self.graph.key)
+            return WorkflowDelivery(self.controller,provider.api)
         for _ in range(20):
-            result=adapter.step()
+            result=run(self.graph.store,lambda key:self.controller,window=lambda *args:3600,
+                       workflow_delivery_factory=factory)
             if result=='workflow_delivery_verified':break
             self.assertEqual(result,WAIT)
         else:self.fail('Model-free provider adapter did not converge')
-        receipt=adapter._read('complete');parent=self.controller.authenticate_workflow_parent_acceptance()
+        receipt=factory(self.graph.key)._read('complete');parent=self.controller.authenticate_workflow_parent_acceptance()
         self.assertEqual(receipt['parent_receipt_sha256'],parent['parent_receipt_sha256'])
         self.assertTrue(receipt['delivery_verified']);self.assertFalse(receipt['complete'])
         self.assertEqual(self.journal.read(),before);self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint)
