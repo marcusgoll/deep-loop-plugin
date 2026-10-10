@@ -58,7 +58,7 @@ def source_identity(path):
     for name,digest in files.items():bound({'path':name,'sha256':digest},logical(path).parent)
     return sha(path)
 
-def definition(verifier,base):
+def definition(verifier,base,verify_files=True):
     proof=verifier.get('proof')
     if proof is None:return None
     if not isinstance(proof,dict):raise ValueError('Verifier proof must be an object')
@@ -71,8 +71,14 @@ def definition(verifier,base):
         raise ValueError('Bound working_directory must be absolute')
     argv=proof.get('argv')
     if not isinstance(argv,list) or not argv or any(not isinstance(a,str) or not a for a in argv):raise ValueError('Bound proof requires approved argv')
-    for key in ('implementation','source_manifest','environment_manifest'):bound(proof[key],base)
-    source_identity(bound(proof['source_manifest'],base))
+    for key in ('implementation','source_manifest','environment_manifest'):
+        record=proof.get(key)
+        if (not isinstance(record,dict) or not isinstance(record.get('path'),str) or not record['path']
+                or not isinstance(record.get('sha256'),str) or len(record['sha256'])!=64
+                or any(c not in '0123456789abcdef' for c in record['sha256'])):
+            raise ValueError('Bound proof requires path and SHA256: '+key)
+        if verify_files:bound(record,base)
+    if verify_files:source_identity(bound(proof['source_manifest'],base))
     artifacts=proof.get('artifacts')
     if not isinstance(artifacts,list) or not artifacts or any(not isinstance(a,dict) or not isinstance(a.get('path'),str) or not a['path'] for a in artifacts):raise ValueError('Bound proof requires artifact paths')
     if len({str((logical(base)/a['path']).resolve()) for a in artifacts})!=len(artifacts):raise ValueError('Duplicate proof artifacts')
@@ -138,7 +144,7 @@ def issues(contract,path,state,stage,semantics,verifier_ids=None):
     checks={c.get('verifierId'):c for c in state.get('checks',[]) if isinstance(c,dict)}
     for verifier in contract['verifiers']:
         try:
-            proof=definition(verifier,base)
+            proof=definition(verifier,base,verify_files=verifier_ids is None or verifier['id'] in verifier_ids)
             if verifier_ids is not None and verifier['id'] not in verifier_ids:continue
             if not proof or proof['mode']=='manual' or stage=='build':continue
             check=checks.get(verifier['id'])

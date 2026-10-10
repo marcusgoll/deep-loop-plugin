@@ -201,7 +201,7 @@ def skill_dependency(relative):
     raise ValueError(f'Missing skill dependency: {relative}; set DEEP_LOOP_SKILLS_ROOT to its installed skills directory.')
 
 
-def contract_data(path):
+def contract_data(path, verify_files=True):
     data = read_json(path)
     validator = skill_dependency('verification-contract/scripts/validate_contract.py')
     spec = importlib.util.spec_from_file_location('contract_validator', validator)
@@ -211,7 +211,7 @@ def contract_data(path):
     if errors:
         raise ValueError('Invalid verification contract: ' + '; '.join(errors))
     for verifier in data['verifiers']:
-        proof_binding.definition(verifier, proof_binding.logical(path).parent)
+        proof_binding.definition(verifier, proof_binding.logical(path).parent, verify_files=verify_files)
     return data
 
 
@@ -332,6 +332,18 @@ def contract_issues(state, stage, archive=None):
 
 
 
+
+def contract_definition_issues(state):
+    """Validate parent definitions and coverage, without execution acceptance."""
+    try:
+        if not isinstance(state.get('verificationContract'), dict):
+            raise ValueError('Bound parent verification contract required')
+        with resolution_context(state, None):
+            return _contract_issues(state, 'build', verify_files=False)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return ['Contract definitions BLOCKED: ' + str(error)]
+
+
 def prerequisite_issues(state, verifier_ids):
     """Inspect selected current proof without changing parent acceptance.
 
@@ -346,11 +358,11 @@ def prerequisite_issues(state, verifier_ids):
         if not isinstance(state.get('verificationContract'), dict):
             raise ValueError('Bound parent verification contract required')
         with resolution_context(state, None):
-            failures = _contract_issues(state, 'build')
+            failures = _contract_issues(state, 'build', verify_files=False)
             if failures:
                 return failures
             path = Path(state['verificationContract']['path'])
-            contract = contract_data(path)
+            contract = contract_data(path, verify_files=False)
             verifiers = {v['id']: v for v in contract['verifiers']}
             checks = {c.get('verifierId'): c for c in state.get('checks', []) if isinstance(c, dict)}
             for identifier in verifier_ids:
@@ -377,7 +389,7 @@ def prerequisite_issues(state, verifier_ids):
         return ['Prerequisite proof BLOCKED: ' + str(error)]
 
 
-def _contract_issues(state, stage):
+def _contract_issues(state, stage, verify_files=True):
     binding = state.get('verificationContract')
     try:
         ui_required = ui_binding_required(state)
@@ -390,8 +402,9 @@ def _contract_issues(state, stage):
     source = Path(binding['path'])
     if proof_binding.sha(source) != binding['sha256']:
         return ['Verification contract changed; rebind explicitly and rerun evidence.']
-    contract = contract_data(source)
-    issues = proof_binding.issues(contract, source, state, stage, contract_semantics_sha256(contract))
+    contract = contract_data(source, verify_files=verify_files)
+    issues = (proof_binding.issues(contract, source, state, stage, contract_semantics_sha256(contract))
+              if verify_files else [])
     if ui_required and 'design' not in contract:
         issues.append('Registered substantive UI requires an approved Design Contract.')
     checks = [c for c in state.get('checks', []) if isinstance(c, dict)]
