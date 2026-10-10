@@ -67,6 +67,54 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.assertFalse(accepted['progress_credit_assigned'])
         self.assertEqual(before,self.journal.read());self.assertEqual(len(self.backend.submissions),1)
 
+    def credited_task_fixture(self):
+        self.journal.state=initialize(self.graph.key,workflow=True)
+        owner=self.finished_proved_task()
+        self.controller.record_workflow_task_proof(owner);self.controller.accept_workflow_task(owner)
+        return owner
+
+    def test_task_credit_recovers_uncertain_publication_without_rewriting_attempt(self):
+        owner=self.credited_task_fixture();before=self.journal.read()
+        self.journal.uncertain=True
+        with self.assertRaises(OSError):self.controller.credit_workflow_task(owner)
+        with self.assertRaisesRegex(ValueError,'Pending task credit'):
+            self.controller.ready_workflow_tasks()
+        self.journal.uncertain=False
+        credited=self.controller.credit_workflow_task(owner)
+        self.assertTrue(credited['progress_credit_assigned']);self.assertFalse(credited['parent_accepted'])
+        self.assertEqual(self.journal.state['attempts'],before[1]['attempts'])
+        self.assertEqual(len(self.journal.state['task_credits']),1)
+        self.assertEqual(credited,self.controller.credit_workflow_task(owner))
+        self.assertEqual(len(self.backend.submissions),1)
+
+    def test_credit_fence_rejects_substituted_revision_and_journal_rollback(self):
+        owner=self.credited_task_fixture();before=self.journal.read()
+        completed=self.controller.credit_workflow_task(owner)
+        name=owner['unit']+'.task-credit.json'
+        self.graph.store.remove(name)
+        self.graph.store.create(name,{**completed,'journal_revision':'0'*64})
+        with self.assertRaisesRegex(ValueError,'historical revision'):
+            self.controller.ready_workflow_tasks()
+        self.graph.store.remove(name);self.graph.store.create(name,completed)
+        self.journal.revision,self.journal.state=before
+        with self.assertRaisesRegex(ValueError,'credited history'):
+            self.controller.ready_workflow_tasks()
+
+    def test_task_credit_rejects_rolled_back_checkpoint_acceptance(self):
+        owner=self.credited_task_fixture();before=self.journal.read()
+        from test_ui_design import save
+        save(self.graph.checkpoint,self.graph.f.state)
+        with self.assertRaisesRegex(ValueError,'current accepted checkpoint'):
+            self.controller.credit_workflow_task(owner)
+        self.assertEqual(before,self.journal.read())
+
+    def test_task_credit_missing_acceptance_or_stale_proof_never_publishes(self):
+        owner=self.credited_task_fixture();before=self.journal.read()
+        self.graph.f.source.write_text('drift')
+        with self.assertRaisesRegex(ValueError,'proof blocked'):
+            self.controller.credit_workflow_task(owner)
+        self.assertEqual(before,self.journal.read())
+
     def test_owned_task_acceptance_updates_only_checkpoint_and_retries(self):
         owner=self.finished_proved_task();self.controller.record_workflow_task_proof(owner)
         before=self.journal.read()

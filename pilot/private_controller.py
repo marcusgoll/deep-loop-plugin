@@ -12,7 +12,7 @@ from pathlib import Path
 import stat
 import tempfile
 
-from admission import digest, finish, initialize, reserve
+from admission import credit_task, digest, finish, initialize, reserve
 from authority import require_active
 from private_launch import launch_plan, recovery_action
 
@@ -271,6 +271,7 @@ class PrivateController:
         """Worker selection is advisory; start rechecks under the same lock."""
         with self.store.lock():
             self._require_no_pending_task_acceptance()
+            self._require_no_pending_task_credit()
             self._contract()
             self._unowned()
             try:
@@ -298,7 +299,24 @@ class PrivateController:
             if result != expected:
                 raise ValueError('Task acceptance completion identity drift')
 
+    def _require_no_pending_task_credit(self):
+        for path in self.store.root.glob('deep-loop-pilot-' + self.contract_digest + '-*.task-credit-intent.json'):
+            intent = self.store.read(path.name)
+            try:result = self.store.read(path.name.removesuffix('-intent.json') + '.json')
+            except FileNotFoundError:
+                raise ValueError('Pending task credit must reconcile before dispatch')
+            if (set(result) != {'owner','intent_digest','journal_revision','progress_identity',
+                               'progress_credit_assigned','parent_accepted'} or
+                    result['owner'] != intent['owner'] or result['intent_digest'] != digest(intent) or
+                    result['progress_identity'] != intent['progress_identity'] or
+                    result['progress_credit_assigned'] is not True or result['parent_accepted'] is not False or
+                    not isinstance(result['journal_revision'],str) or len(result['journal_revision']) not in (40,64) or
+                    any(c not in '0123456789abcdef' for c in result['journal_revision'])):
+                raise ValueError('Task credit completion identity drift')
+            self.journal.verify_history(result['journal_revision'], intent['after'])
+
     def _workflow_selection(self, task_id):
+        self._require_no_pending_task_credit()
         self._require_no_pending_task_acceptance()
         try:
             self.store.read(self.contract_digest + '.workflow.json')
@@ -408,6 +426,9 @@ class PrivateController:
             raise ValueError('Latest finished workflow attempt required')
         original = {**journal, 'attempts': journal['attempts'][:-1] +
                     [{**last, 'status': 'reserved', 'progress_receipt': None}]}
+        if original.get('schema') == 2:
+            original = {**original, 'task_credits':[c for c in original['task_credits']
+                        if (c['run_id'],c['run_attempt']) != (owner['run_id'],owner['run_attempt'])]}
         plan = launch_plan(original, self.contract_digest, run_id=owner['run_id'],
                            run_attempt=owner['run_attempt'], session_id=owner['session_id'])
         if plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest']:
@@ -484,6 +505,65 @@ class PrivateController:
                     raise ValueError('Task acceptance completion drift')
             if self.store.read(result_name) != completed:
                 raise ValueError('Task acceptance completion readback differs')
+            return completed
+
+    def credit_workflow_task(self, owner):
+        """Append one credit for durable acceptance; recover uncertain Git write."""
+        with self.store.lock():
+            current = self._current_workflow_task_proof(owner)
+            acceptance = self.store.read(owner['unit'] + '.task-acceptance.json')
+            accepted_intent = self.store.read(owner['unit'] + '.task-acceptance-intent.json')
+            expected = {'owner':owner,'intent_digest':digest(accepted_intent),
+                        'checkpoint_sha256':digest(accepted_intent['transition']['after']),
+                        'progress_identity':current['progress_identity'],
+                        'progress_credit_assigned':False,'parent_accepted':False}
+            if acceptance != expected:
+                raise ValueError('Durable owned task acceptance required for credit')
+            proof = self.store.read(owner['unit'] + '.task-proof.json')
+            if (accepted_intent['owner'] != owner or accepted_intent['proof_digest'] != digest(proof) or
+                    proof['invocation_id'] != current['invocation_id'] or
+                    proof['observation']['proof_receipts'] != current['observation']['proof_receipts'] or
+                    accepted_intent['progress_identity'] != current['progress_identity']):
+                raise ValueError('Task credit accepted proof identity drift')
+            accepted = self.workflow_gate.accepted_state(current['observation']['selection'],
+                            str(self.store.root / (owner['unit'] + '.task-proof.json')))
+            if accepted['before'] != accepted['after']:
+                raise ValueError('Task credit requires current accepted checkpoint task')
+            revision, journal = self.journal.read()
+            name = owner['unit'] + '.task-credit-intent.json'
+            try:
+                intent = self.store.read(name)
+            except FileNotFoundError:
+                after = credit_task(journal,self.contract_digest,run_id=owner['run_id'],
+                                    run_attempt=owner['run_attempt'],progress_receipt=current['progress_identity'])
+                intent = {'owner':owner,'acceptance_digest':digest(acceptance),
+                          'expected_revision':revision,'before':journal,'after':after,
+                          'progress_identity':current['progress_identity']}
+                self.store.create(name,intent)
+            if (set(intent) != {'owner','acceptance_digest','expected_revision','before','after','progress_identity'} or
+                    intent['owner'] != owner or intent['acceptance_digest'] != digest(acceptance) or
+                    intent['progress_identity'] != current['progress_identity'] or
+                    intent['after'] != credit_task(intent['before'],self.contract_digest,
+                        run_id=owner['run_id'],run_attempt=owner['run_attempt'],
+                        progress_receipt=current['progress_identity'])):
+                raise ValueError('Task credit intent identity drift')
+            if journal == intent['before'] and revision == intent['expected_revision']:
+                # Uncertain publication propagates. A retry reads this same intent
+                # and exact remote state; it never repeats a model submission.
+                self.journal.publish(revision,intent['after'])
+                revision,journal = self.journal.read()
+            if journal != intent['after']:
+                raise ValueError('Task credit journal drift requires reconciliation')
+            completed = {'owner':owner,'intent_digest':digest(intent),'journal_revision':revision,
+                         'progress_identity':current['progress_identity'],
+                         'progress_credit_assigned':True,'parent_accepted':False}
+            result_name = owner['unit'] + '.task-credit.json'
+            try:self.store.create(result_name,completed)
+            except FileExistsError:
+                if self.store.read(result_name) != completed:
+                    raise ValueError('Task credit completion drift')
+            if self.store.read(result_name) != completed:
+                raise ValueError('Task credit independent readback differs')
             return completed
 
     def reconcile(self):

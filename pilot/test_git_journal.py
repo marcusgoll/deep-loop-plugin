@@ -37,6 +37,11 @@ class GitJournalTests(unittest.TestCase):
         saved_revision=first.publish(revision,credited)
         self.assertEqual(restarted.read(),(saved_revision,credited))
         self.assertEqual(credited['attempts'],state['attempts'])
+        self.assertEqual(restarted.verify_history(saved_revision,credited),(saved_revision,credited))
+        with self.assertRaises(ValueError):restarted.verify_history(revision,credited)
+        next_state=reserve(credited,self.contract,run_id=2,run_attempt=1,model_seconds=600,active_seconds=1200)
+        next_revision=first.publish(saved_revision,next_state)
+        self.assertEqual(restarted.verify_history(saved_revision,credited),(next_revision,next_state))
         with self.assertRaises(ValueError):first.publish(revision,credited)
         altered={**credited,'task_credits':[]}
         with self.assertRaises(ValueError):first.publish(saved_revision,altered)

@@ -38,6 +38,23 @@ class GitJournal:
         _validate(state, self.contract_digest)
         return revision, state
 
+    def verify_history(self, revision, expected):
+        """Authenticate a saved revision and its retained append-only history."""
+        if (not isinstance(revision,str) or len(revision) not in (40,64) or
+                any(c not in '0123456789abcdef' for c in revision)):
+            raise ValueError('Canonical journal commit revision required')
+        current, state = self.read()
+        saved = json.loads(self._git('show', revision + ':journal.json'))
+        _validate(saved, self.contract_digest)
+        if saved != expected:
+            raise ValueError('Journal historical revision differs')
+        self._git('merge-base', '--is-ancestor', revision, current)
+        if (state['schema'] != saved['schema'] or
+                state['attempts'][:len(saved['attempts'])] != saved['attempts'] or
+                state.get('task_credits', [])[:len(saved.get('task_credits', []))] != saved.get('task_credits', [])):
+            raise ValueError('Journal credited history missing or rewritten')
+        return current, state
+
     def publish(self, expected_revision, state):
         """Append after exact revision, then verify provider-visible readback.
 

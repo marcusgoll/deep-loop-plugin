@@ -315,3 +315,12 @@ limits. The Git journal admits only the exact credit transition. Schema-1 pilot
 history cannot be implicitly upgraded or credited. These accounting primitives
 still require controller authentication of durable task acceptance and recovery
 around uncertain publication; they are not connected to the production worker.
+
+
+The explicit `credit_workflow_task` API now authenticates current stopped
+ownership, the durable task-acceptance receipt, and the still-accepted checkpoint
+before appending credit. Its immutable credit intent supports exact-before or
+exact-after recovery when Git publication is uncertain. Pending credit blocks
+new dispatch. Completed credit also requires an exact historical Git revision,
+ancestry and preserved attempt/credit prefixes; a substituted revision or journal
+rollback cannot clear the fence. Worker wakeup integration remains outstanding.
