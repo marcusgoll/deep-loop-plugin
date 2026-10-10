@@ -466,6 +466,36 @@ class TaskExecutionTests(WorkflowDispatchTests):
 
 
 
+    def test_provenance_survives_source_drift_without_claiming_final_proof(self):
+        owner=self.historical_credited_task();before=self.journal.read();checkpoint=self.graph.checkpoint.read_bytes()
+        self.graph.f.source.write_text('later permitted candidate edits require fresh final proof')
+        observed=self.controller.authenticate_workflow_task_provenance(owner)
+        self.assertFalse(observed['final_proof_verified']);self.assertFalse(observed['parent_accepted'])
+        self.assertEqual(observed['progress_identity'],self.journal.read()[1]['task_credits'][0]['progress_receipt'])
+        self.assertEqual(self.journal.read(),before);self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint)
+        with self.assertRaisesRegex(ValueError,'proof blocked'):self.controller.authenticate_workflow_task_history(owner)
+
+    def test_provenance_rejects_substituted_chain_and_populated_owned_attempt(self):
+        owner=self.historical_credited_task();name=owner['unit']+'.task-acceptance.json'
+        self.backend.active=True;self.backend.empty=False
+        with self.assertRaisesRegex(ValueError,'stopped task'):self.controller.authenticate_workflow_task_provenance(owner)
+        self.backend.active=False;self.backend.empty=True
+        original=self.graph.store.read(name);self.graph.store.remove(name)
+        self.graph.store.create(name,{**original,'intent_digest':'0'*64})
+        with self.assertRaisesRegex(ValueError,'completion.*drift'):self.controller.authenticate_workflow_task_provenance(owner)
+
+    def test_current_history_rejects_checkpoint_change_after_provenance_cut(self):
+        from unittest.mock import patch
+        owner=self.historical_credited_task();original=self.controller.authenticate_workflow_task_provenance
+        def changed(selected):
+            history=original(selected)
+            self.graph.f.state=__import__('json').loads(self.graph.checkpoint.read_text())
+            self.graph.f.state['blocker']='new independent review obligation';self.graph.select()
+            return history
+        with patch.object(self.controller,'authenticate_workflow_task_provenance',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'current proof changed'):
+                self.controller.authenticate_workflow_task_history(owner)
+
     def completed_outcome_fixture(self):
         self.graph.outcome_ready()
         for task in self.graph.f.state['tasks']:task.update(status='pending',evidence='')

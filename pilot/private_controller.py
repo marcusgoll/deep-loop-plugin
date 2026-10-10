@@ -969,10 +969,25 @@ class PrivateController:
                     'journal_revision':snapshot[0],'quiescence':quiescence,'parent_accepted':False,'delivery_verified':False}
 
     def authenticate_workflow_task_history(self,owner):
+        """Compatibility reader requiring both provenance and current task proof."""
+        from workflow_gate import task_progress_identity
+        history=self.authenticate_workflow_task_provenance(owner)
+        with self.store.lock():
+            self._contract();self._unowned()
+            self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+            current=self.workflow_gate.task_acceptance(history['current_selection'])
+            if (task_progress_identity(current)!=history['progress_identity'] or
+                    current['checkpoint_sha256']!=history['checkpoint_sha256'] or
+                    self.journal.read()[0]!=history['journal_revision']):
+                raise ValueError('Historical task current proof changed during inspection')
+            return {**history,'kind':'historical_workflow_task_acceptance',
+                    'current_observation':current,'final_proof_verified':True}
+
+    def authenticate_workflow_task_provenance(self,owner):
         """Read one accepted historical task chain; never accept the parent.
 
-        Final integrated proof is inspected afresh. Historical receipts establish
-        attributable acceptance and charged history, not final candidate truth.
+        Authenticate retained acceptance, credit and stopped ownership only.
+        Fresh candidate truth remains the separate final review obligation.
         """
         from workflow_gate import task_progress_identity
         with self.store.lock():
@@ -986,9 +1001,9 @@ class PrivateController:
             gate=self.workflow_gate
             if selection is None or gate is None or gate.store is not self.store or gate.contract_digest!=self.contract_digest:
                 raise ValueError('Trusted historical task proof reader required')
-            current=gate.task_acceptance(selection)
-            identity=task_progress_identity(current)
+            binding,checkpoint,_=gate._read()
             unit=owner['unit'];proof=self.store.read(unit+'.task-proof.json')
+            identity=task_progress_identity(proof['observation'])
             accepted_intent=self.store.read(unit+'.task-acceptance-intent.json')
             acceptance=self.store.read(unit+'.task-acceptance.json')
             credit_intent=self.store.read(unit+'.task-credit-intent.json')
@@ -1001,6 +1016,7 @@ class PrivateController:
                     invocation['owner']!=owner or proof['owner']!=owner or
                     proof['invocation_id']!=invocation['invocation_id'] or
                     proof['observation']['selection']!=selection or
+                    proof['observation']['contract_digest']!=self.contract_digest or
                     proof['progress_identity']!=identity or
                     task_progress_identity(proof['observation'])!=identity or
                     accepted_intent['owner']!=owner or
@@ -1048,12 +1064,13 @@ class PrivateController:
             if (by_id[selection['task_id']]['status']!='done' or
                     by_id[selection['task_id']].get('evidence')!=expected_path):
                 raise ValueError('Historical accepted task evidence identity drift')
-            fresh=gate.task_acceptance(selection)
-            if fresh!=current or self.journal.read()!=latest:
-                raise ValueError('Historical task current proof changed during inspection')
-            return {'kind':'historical_workflow_task_acceptance','owner':owner,
+            if gate._read()[:2]!=(binding,checkpoint) or self.journal.read()!=latest:
+                raise ValueError('Historical task attribution cut changed during inspection')
+            return {'kind':'historical_workflow_task_provenance','owner':owner,
                     'invocation_id':invocation['invocation_id'],'native':native,
-                    'task_id':selection['task_id'],'current_observation':current,
+                    'task_id':selection['task_id'],'current_selection':selection,
+                    'historical_observation':proof['observation'],'final_proof_verified':False,
+                    'checkpoint_sha256':digest(checkpoint),
                     'proof_digest':digest(proof),'acceptance_digest':digest(acceptance),
                     'credit_digest':digest(credit),'journal_revision':latest[0],
                     'progress_identity':identity,'parent_accepted':False,'delivery_verified':False}

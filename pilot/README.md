@@ -516,3 +516,13 @@ cut. Named checks, debt, blockers, schema/UI obligations and unfinished tasks
 remain gates. Frozen helper snapshots are unchanged; missing API/dependencies
 fail closed. Final verifier rerun routing and durable parent acceptance remain
 unimplemented.
+
+
+Historical provenance now has a distinct read-only API authenticating protected
+acceptance/credit records, Git ancestry and stopped native ownership. It keeps
+current binding/evidence attribution checks but explicitly makes no final-proof
+claim. The compatibility history reader still requires current task proof and
+a matching checkpoint/journal cut; outcome aggregation keeps that stricter
+reader. Candidate drift can therefore preserve provenance while blocking final
+acceptance. Dynamic candidate snapshots require a new explicitly enrolled
+source policy; existing frozen contracts remain unchanged.
