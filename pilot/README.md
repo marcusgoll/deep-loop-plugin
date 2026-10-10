@@ -363,9 +363,9 @@ private account establish that the protected dispatch sequence was never
 crossed. Durable preparation-only completion releases the orphan fence, rejects
 later dispatch history and prevents future submission of that closed intent.
 An isolated Linux fixture exercised this fault and exact recovery while keeping
-the checkpoint and charged journal unchanged. Result publication and worker
-wiring remain outstanding; this primitive has no CLI or automatic worker
-entry point and is not activated in production.
+the checkpoint and charged journal unchanged. Automatic worker wiring remains
+outstanding; this primitive has no CLI or automatic worker entry point and is
+not activated in production.
 
 
 `NativeResult` seals an exact successful native invocation into protected state.
@@ -377,4 +377,18 @@ Authority and the immutable window are checked before publication. Sealing keeps
 the verifier fence and grants no checkpoint check, task acceptance or credit.
 An isolated Linux fixture exercised actual sealing and exact retry with 89
 matching source pins and independently read back unchanged checkpoint/charges.
-Bound receipt publication and automatic worker integration remain outstanding.
+`NativePublication` prepares a protected bound receipt and immutable publication
+intent, then applies or adopts only its exact checkpoint transition. Saved-byte
+receipt hashing and fresh native, contract, artifact and charged-journal checks
+fence substitution. Recovery permits the saved after-checkpoint while requiring
+all other original execution-plan fields to remain unchanged. Active authority
+and the original window are checked at checkpoint replacement/adoption and
+completion persistence. Publication keeps the verifier fence; owned cleanup
+remains separate and task acceptance/credit are not implied.
+
+A model-free Linux fixture exercised the actual native backend, isolated pinned
+helper and atomic checkpoint writer. An injected completion-persistence error
+after the checkpoint write recovered without another execution. Only the selected
+check changed; tasks and charged history stayed unchanged. This is persistence
+error recovery evidence, not process-kill recovery. Automatic worker integration
+and parent acceptance remain outstanding.
