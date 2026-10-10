@@ -5,7 +5,7 @@ import tempfile
 import threading
 import unittest
 
-from admission import digest, finish, initialize, reserve
+from admission import credit_task, digest, finish, initialize, reserve
 from git_journal import GitJournal
 
 
@@ -27,6 +27,19 @@ class GitJournalTests(unittest.TestCase):
     def reserved(self, state):
         return reserve(state, self.contract, run_id=1, run_attempt=1,
                        model_seconds=600, active_seconds=1200)
+
+    def test_workflow_credit_appends_event_without_attempt_rewrite(self):
+        first,restarted=self.clients
+        revision=first.publish(None,initialize(self.contract,workflow=True))
+        _,state=first.read();state=self.reserved(state);revision=first.publish(revision,state)
+        state=finish(state,self.contract,run_id=1,run_attempt=1);revision=first.publish(revision,state)
+        credited=credit_task(state,self.contract,run_id=1,run_attempt=1,progress_receipt=digest('approved task'))
+        saved_revision=first.publish(revision,credited)
+        self.assertEqual(restarted.read(),(saved_revision,credited))
+        self.assertEqual(credited['attempts'],state['attempts'])
+        with self.assertRaises(ValueError):first.publish(revision,credited)
+        altered={**credited,'task_credits':[]}
+        with self.assertRaises(ValueError):first.publish(saved_revision,altered)
 
     def test_durable_prelaunch_charge_survives_workspace_loss(self):
         first, restarted = self.clients

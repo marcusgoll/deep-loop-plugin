@@ -306,3 +306,12 @@ interruption after intent or checkpoint publication can resume the same
 transaction without another submission or charge. Acceptance currently assigns
 no budget progress credit and never accepts the parent; the production worker
 and supported enrollment do not invoke this transaction yet.
+
+
+Workflow accounting has an explicit schema-2 journal with append-only
+`task_credits`. A credit targets the latest finished attempt and a unique
+approved task-progress identity, preserving all attempt records and cumulative
+limits. The Git journal admits only the exact credit transition. Schema-1 pilot
+history cannot be implicitly upgraded or credited. These accounting primitives
+still require controller authentication of durable task acceptance and recovery
+around uncertain publication; they are not connected to the production worker.

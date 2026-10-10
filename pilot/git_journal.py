@@ -10,7 +10,7 @@ import os
 import subprocess
 import uuid
 
-from admission import _validate, finish, initialize, reserve
+from admission import _validate, credit_task, finish, initialize, reserve
 
 
 class GitJournal:
@@ -48,7 +48,7 @@ class GitJournal:
         _validate(state, self.contract_digest)
         if expected_revision is None:
             # An orphan commit cannot fast-forward an existing journal ref.
-            if state != initialize(self.contract_digest):
+            if state != initialize(self.contract_digest, workflow=state["schema"] == 2):
                 raise ValueError("Enrollment requires an empty journal")
             parents = []
         else:
@@ -66,10 +66,15 @@ class GitJournal:
                         and new[-1]["status"] == "finished"
                         and all(new[-1][k] == old[-1][k] for k in (
                             "run_id", "run_attempt", "model_seconds", "active_seconds")))
-            if not (appended or finished):
+            credited = (previous["schema"] == state["schema"] == 2 and new == old and
+                        len(state["task_credits"]) == len(previous["task_credits"])+1 and
+                        state["task_credits"][:-1] == previous["task_credits"])
+            if not (appended or finished or credited):
                 raise ValueError("Journal history rewrite")
             last = new[-1]
-            if appended:
+            if credited:
+                allowed = credit_task(previous, self.contract_digest, **state["task_credits"][-1])
+            elif appended:
                 allowed = reserve(previous, self.contract_digest, **{
                     key: last[key] for key in (
                         "run_id", "run_attempt", "model_seconds", "active_seconds")})
