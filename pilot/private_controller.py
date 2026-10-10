@@ -623,6 +623,13 @@ class PrivateController:
         if stream==expected_stream:self.store.remove('active-verifier.json')
         return completion
 
+    def seal_native_workflow_result(self,prefix):
+        from native_result import NativeResult
+        with self.store.lock():
+            if self.native_verifier is None or self.workflow_gate is None:
+                raise ValueError('Trusted native result adapters unavailable')
+            return NativeResult(self.store,self.journal,self.native_verifier,self.workflow_gate).seal(prefix)
+
     def _current_workflow_task_proof(self,owner):
         from workflow_gate import task_progress_identity
         gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)

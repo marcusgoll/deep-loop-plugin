@@ -366,3 +366,15 @@ An isolated Linux fixture exercised this fault and exact recovery while keeping
 the checkpoint and charged journal unchanged. Result publication and worker
 wiring remain outstanding; this primitive has no CLI or automatic worker
 entry point and is not activated in production.
+
+
+`NativeResult` seals an exact successful native invocation into protected state.
+Both observations must report systemd success, exit zero and ended/empty
+ownership; a zero main-process exit cannot hide a unit timeout. Native wall and
+monotonic timestamps, declared argv/cwd, current bound inputs, artifact hashes and
+bounded capture hashes/explicitly truncated previews bind the saved result.
+Authority and the immutable window are checked before publication. Sealing keeps
+the verifier fence and grants no checkpoint check, task acceptance or credit.
+An isolated Linux fixture exercised actual sealing and exact retry with 89
+matching source pins and independently read back unchanged checkpoint/charges.
+Bound receipt publication and automatic worker integration remain outstanding.

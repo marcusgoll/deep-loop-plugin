@@ -41,6 +41,8 @@ def launch_plan(owned,candidate,index):
     row=parent['definitions'][index];verifier=row['verifier'];proof=verifier['proof']
     if (verifier['id']!=parent['verifier_ids'][index] or verifier['gate']!='blocking' or verifier['class']=='human' or
             proof.get('mode')!='bound' or 'readback' in proof):raise ValueError('Unsupported automatic verifier')
+    if not isinstance(proof['artifacts'],list) or not 1<=len(proof['artifacts'])<=128:
+        raise ValueError('Bounded verifier artifacts required')
     argv=proof['argv']
     if (not isinstance(argv,list) or not argv or len(argv)>256 or
             any(not isinstance(a,str) or not a or '\0' in a for a in argv) or
@@ -230,8 +232,11 @@ class NativeVerifier:
         if (command.get('type')!='a(sasbttttuii)' or len(command.get('data',[]))!=1 or
                 command['data'][0][0]!=plan['command'][0] or command['data'][0][1]!=plan['command']):
             raise ValueError('Native verifier argv changed')
-        return {'plan_digest':digest(plan),'invocation_id':invocation,'native':native,
-                'exit_code':command['data'][0][-1] if native['execution_finished'] and command['data'][0][-2]==1 else None}
+        unit_result=subprocess.run(['/usr/bin/systemctl','show',plan['unit']+'.service','--property=Result','--value'],capture_output=True,text=True,check=True,timeout=5).stdout.strip()
+        if not unit_result:raise ValueError('Native verifier unit result unavailable')
+        return {'plan_digest':digest(plan),'invocation_id':invocation,'native':native,'unit_result':unit_result,
+                'exit_code':command['data'][0][-1] if native['execution_finished'] and command['data'][0][-2]==1 else None,
+                'execution_interval':dict(zip(('start_wall_us','start_monotonic_us','end_wall_us','end_monotonic_us'),command['data'][0][3:7]))}
 
     def stop(self,plan,invocation_id):
         observation=self.adopt(plan)

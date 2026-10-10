@@ -71,7 +71,7 @@ class VerifierPlanTests(unittest.TestCase):
                 row=[self.plan['command'][0],self.plan['command'],False,0,0,1,1,999,1,0]
                 return type('Result',(),{'stdout':json.dumps({'type':'a(sasbttttuii)','data':[row]})})()
             name=next(a.removeprefix('--property=') for a in argv if a.startswith('--property='))
-            value={'InvocationID':'e'*32,'RuntimeMaxUSec':'15s','TimeoutStartUSec':'5s','TimeoutStopUSec':'5s','SystemCallErrorNumber':'1'}.get(name,properties.get(name))
+            value={'Result':'success','InvocationID':'e'*32,'RuntimeMaxUSec':'15s','TimeoutStartUSec':'5s','TimeoutStopUSec':'5s','SystemCallErrorNumber':'1'}.get(name,properties.get(name))
             return type('Result',(),{'stdout':str(value)})()
         native={'execution_finished':True,'cgroup_empty':True,'ownership_verified':True}
         return backend,run,native
