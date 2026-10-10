@@ -407,8 +407,9 @@ cover this source integration. A disposable native fixture also exercised
 `run`/`tick` in three fresh isolated interpreters, recovering preparation,
 publication and cleanup of the same verifier stream. Each wake preserved tasks
 and charged history; only the selected check changed. Installed systemd
-supervisor behavior, orphan preparation recovery, new verifier dispatch, task
-acceptance/credit and parent completion remain unqualified. Nothing is promoted or activated by these source changes.
+supervisor behavior, orphan preparation recovery and parent completion remain
+unqualified. A later fixture qualifies bounded automatic verifier initiation
+and task acceptance/credit as described below. Nothing is promoted or activated by these source changes.
 
 
 After recovery, a wake may advance the latest finished enrolled task attempt.
@@ -418,5 +419,11 @@ replaying. Once proofs pass, separate wakes record task proof, accept the task,
 and recover its credit. Proof, acceptance, checkpoint and credit mutation
 boundaries recheck active authority and the original execution window; remote
 journal push has a final guard after local Git preparation. Routing, actual
-checkpoint and bare-Git expiry tests cover this source path. Native automatic
-initiation/acceptance/credit orchestration remains to be qualified.
+checkpoint and bare-Git expiry tests cover this source path. A disposable model-free host fixture exercised automatic verifier initiation,
+proof publication, cleanup, task proof, acceptance and credit through seven
+fresh isolated worker interpreters. Independent host readbacks verified all
+93 source pins, exact publication/acceptance/credit chains, one credit and
+unchanged original 600/1200 charges. Only the selected task/check changed;
+fences were removed and production stayed inactive. The fixture substitutes
+literal initial execution and rejects further model dispatch. It does not
+qualify live model execution, the installed supervisor or parent completion.
