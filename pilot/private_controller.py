@@ -532,6 +532,21 @@ class PrivateController:
     def _verifier_cleanup_completion(self,prefix,intent):
         completion=self.store.read(prefix+'.cleanup-complete.json')
         cleanup=self.store.read(prefix+'.cleanup-intent.json')
+        if cleanup.get('preparation_only') is True:
+            absence=self.store.read(prefix+'.preparation-absence.json')
+            expected={'plan_digest':digest(intent['plan']),'intent_digest':digest(intent),
+                      'invocation_id':None,'cleanup_only':True,'parent_accepted':False,
+                      'preparation_only':True,'absence_digest':digest(absence)}
+            if (absence!={'plan_digest':expected['plan_digest'],'submission_intent_absent':True,
+                          'account_empty':True,'native_dispatched':False} or cleanup!=expected or
+                    completion!=dict(expected,cleanup_intent_digest=digest(cleanup)) or
+                    intent['plan_digest']!=expected['plan_digest']):
+                raise ValueError('Verifier preparation cleanup identity drift')
+            for suffix in ('.submit-intent.json','.invocation.json'):
+                try:self.store.read(prefix+suffix)
+                except FileNotFoundError:pass
+                else:raise ValueError('Closed preparation acquired dispatch history')
+            return completion
         invocation=self.store.read(prefix+'.invocation.json')
         expected={'plan_digest':digest(intent['plan']),'intent_digest':digest(intent),
                   'invocation_id':invocation['invocation_id'],'cleanup_only':True,'parent_accepted':False}
@@ -556,6 +571,31 @@ class PrivateController:
         except FileNotFoundError:stream=None
         try:completed=self._verifier_cleanup_completion(prefix,intent)
         except FileNotFoundError:completed=None
+        try:self.store.read(prefix+'.submit-intent.json')
+        except FileNotFoundError:
+            if stream not in (None,expected_stream):raise ValueError('Preparation cleanup conflicts with another stream')
+            try:self.store.read('active-owner.json')
+            except FileNotFoundError:pass
+            else:raise ValueError('Model owner blocks preparation cleanup')
+            absence=self.native_verifier.unsubmitted(plan)
+            if absence!={'plan_digest':digest(plan),'submission_intent_absent':True,
+                         'account_empty':True,'native_dispatched':False}:
+                raise ValueError('Verifier preparation absence unavailable')
+            try:self.store.create(prefix+'.preparation-absence.json',absence)
+            except FileExistsError:
+                if self.store.read(prefix+'.preparation-absence.json')!=absence:raise ValueError('Preparation absence drift')
+            cleanup={'plan_digest':digest(plan),'intent_digest':digest(intent),'invocation_id':None,
+                     'cleanup_only':True,'parent_accepted':False,'preparation_only':True,'absence_digest':digest(absence)}
+            try:self.store.create(prefix+'.cleanup-intent.json',cleanup)
+            except FileExistsError:
+                if self.store.read(prefix+'.cleanup-intent.json')!=cleanup:raise ValueError('Preparation cleanup intent drift')
+            completion=dict(cleanup,cleanup_intent_digest=digest(cleanup))
+            try:self.store.create(prefix+'.cleanup-complete.json',completion)
+            except FileExistsError:
+                if self.store.read(prefix+'.cleanup-complete.json')!=completion:raise ValueError('Preparation cleanup completion drift')
+            if self._verifier_cleanup_completion(prefix,intent)!=completion:raise ValueError('Preparation cleanup readback changed')
+            if stream==expected_stream:self.store.remove('active-verifier.json')
+            return completion
         if completed is None and stream!=expected_stream:
             raise ValueError('Verifier cleanup lost stream ownership')
         observation=self.native_verifier.adopt(plan)

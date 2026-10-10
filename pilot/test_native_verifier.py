@@ -154,3 +154,25 @@ class VerifierPlanTests(unittest.TestCase):
             return result
         with patch('native_verifier.subprocess.run',side_effect=changed),patch('native_verifier.observe_unit',return_value=native):
             with self.assertRaisesRegex(ValueError,'syscall isolation drift'):backend.adopt(self.plan)
+
+    def test_unsubmitted_cleanup_requires_missing_dispatch_and_empty_account(self):
+        import os
+        from private_controller import TrustedStore
+        control=self.root/'control';control.mkdir(mode=0o700)
+        store=TrustedStore(control,owner_uid=os.getuid());backend=NativeVerifier(store,self.key)
+        empty=type('Result',(),{'returncode':1,'stdout':''})()
+        with patch.object(backend,'_intent',return_value='fixture'),patch('native_verifier.pwd.getpwnam',return_value=type('Account',(),{'pw_uid':123})()),patch('native_verifier.subprocess.run',return_value=empty) as process:
+            result=backend.unsubmitted(self.plan)
+            self.assertFalse(result['native_dispatched'])
+            store.create('fixture.submit-intent.json',{'plan_digest':digest(self.plan)})
+            with self.assertRaisesRegex(ValueError,'requires native ownership'):backend.unsubmitted(self.plan)
+            self.assertEqual(process.call_count,1)
+    def test_cleanup_intent_prevents_later_submit(self):
+        import os
+        from private_controller import TrustedStore
+        control=self.root/'control';control.mkdir(mode=0o700)
+        store=TrustedStore(control,owner_uid=os.getuid());backend=NativeVerifier(store,self.key)
+        store.create('fixture.cleanup-intent.json',{})
+        with patch.object(backend,'_intent',return_value='fixture'),patch('native_verifier.subprocess.run') as process:
+            with self.assertRaisesRegex(ValueError,'cleanup prevents'):backend.submit(self.plan)
+            process.assert_not_called()

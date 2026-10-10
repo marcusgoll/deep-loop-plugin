@@ -170,9 +170,25 @@ class NativeVerifier:
         process=subprocess.run(['/usr/bin/pgrep','-u',str(account.pw_uid)],capture_output=True,text=True,timeout=5)
         if process.returncode!=1 or process.stdout:raise ValueError('Verifier account stream occupied or unavailable')
 
+    def unsubmitted(self,plan):
+        """Caller holds stream lock; prove this protocol never crossed dispatch."""
+        prefix=self._intent(plan)
+        for suffix in ('.submit-intent.json','.invocation.json'):
+            try:self.store.read(prefix+suffix)
+            except FileNotFoundError:pass
+            else:raise ValueError('Submitted verifier requires native ownership inspection')
+        account=pwd.getpwnam(ACCOUNT)
+        process=subprocess.run(['/usr/bin/pgrep','-u',str(account.pw_uid)],capture_output=True,text=True,timeout=5)
+        if process.returncode!=1 or process.stdout:raise ValueError('Verifier account is not empty')
+        return {'plan_digest':digest(plan),'submission_intent_absent':True,
+                'account_empty':True,'native_dispatched':False}
+
     def submit(self,plan):
         """Exactly one attempted submission; caller holds credential lock."""
         prefix=self._intent(plan)
+        try:self.store.read(prefix+'.cleanup-intent.json')
+        except FileNotFoundError:pass
+        else:raise ValueError('Verifier cleanup prevents further submission')
         self._qualify(plan)
         self.store.create(prefix+'.submit-intent.json',{'plan_digest':digest(plan)})
         for suffix in ('.stdout','.stderr'):

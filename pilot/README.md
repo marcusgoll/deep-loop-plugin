@@ -357,6 +357,12 @@ persisting cleanup-only completion and releasing its own stream fence. An
 isolated Linux fixture exercised actual native submission, recovery, fencing and
 cleanup without a model call. A failed namespace setup was also recovered and
 cleaned without replay. These fixtures leave the task unaccepted and preserve
-charged history. Result publication, never-submitted preparation recovery and
-worker wiring remain outstanding; this primitive has no CLI or automatic worker
+charged history. Interrupted preparation before stream-marker publication also has a cleanup
+path: exact protected intent, absent submission/invocation records and an empty
+private account establish that the protected dispatch sequence was never
+crossed. Durable preparation-only completion releases the orphan fence, rejects
+later dispatch history and prevents future submission of that closed intent.
+An isolated Linux fixture exercised this fault and exact recovery while keeping
+the checkpoint and charged journal unchanged. Result publication and worker
+wiring remain outstanding; this primitive has no CLI or automatic worker
 entry point and is not activated in production.

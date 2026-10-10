@@ -20,7 +20,12 @@ class VerifierOwnershipTests(unittest.TestCase):
         self.plan={'contract_digest':self.key,'source_owner':self.owner,'index':0,'unit':'deep-loop-pilot-'+'e'*64+'-1-1'}
         self.observation={'plan_digest':digest(self.plan),'invocation_id':'a'*32,
             'native':{'ownership_verified':True,'execution_finished':True,'cgroup_empty':True}}
-        self.native.adopt.return_value=self.observation;self.native.submit.return_value=self.observation
+        self.native.adopt.return_value=self.observation
+        def submit(plan):
+            self.store.create(self.owner['unit']+'.verifier-0.submit-intent.json',{'plan_digest':digest(plan)})
+            return self.observation
+        self.native.submit.side_effect=submit
+        self.native.unsubmitted.return_value={'plan_digest':digest(self.plan),'submission_intent_absent':True,'account_empty':True,'native_dispatched':False}
         self.native.stop.return_value=self.observation
         self.gate=Mock();self.gate.verification_plan.return_value={'selection':{}}
     def dispatch(self):
@@ -28,7 +33,11 @@ class VerifierOwnershipTests(unittest.TestCase):
         with patch.object(self.controller,'_finished_workflow_context',return_value=(self.gate,{},revision,state,{'invocation_id':'b'*32})),patch('native_verifier.launch_plan',return_value=self.plan):
             return self.controller.start_native_workflow_verification(self.owner,0)
     def test_response_loss_fences_other_dispatch_and_recovers_without_replay(self):
-        self.native.submit.side_effect=OSError('response lost')
+        original=self.native.submit.side_effect
+        def lost(plan):
+            original(plan)
+            raise OSError('response lost')
+        self.native.submit.side_effect=lost
         with self.assertRaises(OSError):self.dispatch()
         self.assertEqual(self.store.read('active-verifier.json')['plan_digest'],digest(self.plan))
         with self.assertRaisesRegex(ValueError,'unreconciled verifier'):self.dispatch()
@@ -99,3 +108,41 @@ class VerifierOwnershipTests(unittest.TestCase):
         self.store.create('active-verifier.json',another)
         self.controller.cleanup_native_workflow_verification(prefix)
         self.assertEqual(self.store.read('active-verifier.json'),another)
+
+    def test_interrupted_preparation_before_stream_marker_recovers_without_native_action(self):
+        original=self.store.create
+        def fail(name,value):
+            if name=='active-verifier.json':raise OSError('marker interrupted')
+            return original(name,value)
+        with patch.object(self.store,'create',side_effect=fail):
+            with self.assertRaises(OSError):self.dispatch()
+        prefix=self.owner['unit']+'.verifier-0'
+        completion=self.controller.cleanup_native_workflow_verification(prefix)
+        self.assertTrue(completion['preparation_only'])
+        self.assertIsNone(completion['invocation_id'])
+        self.native.submit.assert_not_called();self.native.adopt.assert_not_called();self.native.stop.assert_not_called()
+        self.controller._verifier_unowned()
+        self.assertEqual(self.controller.cleanup_native_workflow_verification(prefix),completion)
+    def test_preparation_cleanup_failure_retains_orphan_fence(self):
+        original=self.store.create
+        def fail_marker(name,value):
+            if name=='active-verifier.json':raise OSError('marker interrupted')
+            return original(name,value)
+        with patch.object(self.store,'create',side_effect=fail_marker):
+            with self.assertRaises(OSError):self.dispatch()
+        prefix=self.owner['unit']+'.verifier-0'
+        def fail_completion(name,value):
+            if name.endswith('.cleanup-complete.json'):raise OSError('completion interrupted')
+            return original(name,value)
+        with patch.object(self.store,'create',side_effect=fail_completion):
+            with self.assertRaises(OSError):self.controller.cleanup_native_workflow_verification(prefix)
+        with self.assertRaisesRegex(ValueError,'Pending native verifier'):self.controller._verifier_unowned()
+        self.controller.cleanup_native_workflow_verification(prefix)
+        self.controller._verifier_unowned()
+    def test_preparation_closed_then_dispatch_record_appears_blocks(self):
+        self.native.submit.side_effect=OSError('before submission intent')
+        with self.assertRaises(OSError):self.dispatch()
+        prefix=self.owner['unit']+'.verifier-0'
+        self.controller.cleanup_native_workflow_verification(prefix)
+        self.store.create(prefix+'.submit-intent.json',{'plan_digest':digest(self.plan)})
+        with self.assertRaisesRegex(ValueError,'acquired dispatch history'):self.controller._verifier_unowned()
