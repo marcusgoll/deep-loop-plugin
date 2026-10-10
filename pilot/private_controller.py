@@ -913,6 +913,139 @@ class PrivateController:
                 raise ValueError('Task credit independent readback differs')
             return completed
 
+    def observe_workflow_outcome(self):
+        """Authenticate every task's current proof and historical credit; read only."""
+        with self.store.lock():
+            self._contract();self._unowned()
+            self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+            gate=self.workflow_gate
+            if gate is None or gate.store is not self.store or gate.contract_digest!=self.contract_digest:
+                raise ValueError('Trusted workflow outcome reader required')
+            outcome=gate.outcome_proof();snapshot=self.journal.read()
+            journal=snapshot[1]
+            if journal['schema']!=2 or not journal['attempts'] or any(a['status']!='finished' for a in journal['attempts']):
+                raise ValueError('Finished workflow outcome history required')
+            owners={};credits_by_task={}
+            for credit in journal['task_credits']:
+                unit='deep-loop-pilot-'+self.contract_digest+'-'+str(credit['run_id'])+'-'+str(credit['run_attempt'])
+                owner=self.store.read(unit+'.task-credit.json')['owner']
+                if (owner['unit']!=unit or owner['run_id']!=credit['run_id'] or
+                        owner['run_attempt']!=credit['run_attempt']):
+                    raise ValueError('Workflow outcome credit owner attribution drift')
+                selected=self._workflow_receipt(owner)
+                task_id=selected['task_id']
+                if task_id not in outcome['tasks'] or task_id in owners:
+                    raise ValueError('Missing or duplicate workflow outcome task attribution')
+                owners[task_id]=owner;credits_by_task[task_id]=credit
+            if set(owners)!=set(outcome['tasks']):
+                raise ValueError('Every workflow outcome task requires durable credited acceptance')
+        # Public readers take their own credential locks. Revalidate the entire
+        # cut after sequential inspection; unlocked snapshots grant no mutation.
+        histories={task_id:self.authenticate_workflow_task_history(owner)
+                   for task_id,owner in owners.items()}
+        with self.store.lock():
+            self._contract();self._unowned()
+            self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+            if (gate.outcome_proof()!=outcome or self.journal.read()!=snapshot or
+                    any(h['journal_revision']!=snapshot[0] or
+                        h['progress_identity']!=credits_by_task[task_id]['progress_receipt'] or
+                        h['current_observation']!=outcome['tasks'][task_id]['observation']
+                        for task_id,h in histories.items())):
+                raise ValueError('Workflow outcome acceptance cut changed during inspection')
+            return {'kind':'authenticated_workflow_outcome_observation',
+                    'outcome_proof':outcome,'task_histories':histories,
+                    'journal_revision':snapshot[0],'parent_accepted':False,'delivery_verified':False}
+
+    def authenticate_workflow_task_history(self,owner):
+        """Read one accepted historical task chain; never accept the parent.
+
+        Final integrated proof is inspected afresh. Historical receipts establish
+        attributable acceptance and charged history, not final candidate truth.
+        """
+        from workflow_gate import task_progress_identity
+        with self.store.lock():
+            contract=self._contract();self._unowned()
+            self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+            if (set(owner)!={'contract_digest','unit','plan_digest','reservation_revision',
+                             'run_id','run_attempt','session_id'} or
+                    owner['contract_digest']!=self.contract_digest):
+                raise ValueError('Historical task owner identity drift')
+            selection=self._workflow_receipt(owner)
+            gate=self.workflow_gate
+            if selection is None or gate is None or gate.store is not self.store or gate.contract_digest!=self.contract_digest:
+                raise ValueError('Trusted historical task proof reader required')
+            current=gate.task_acceptance(selection)
+            identity=task_progress_identity(current)
+            unit=owner['unit'];proof=self.store.read(unit+'.task-proof.json')
+            accepted_intent=self.store.read(unit+'.task-acceptance-intent.json')
+            acceptance=self.store.read(unit+'.task-acceptance.json')
+            credit_intent=self.store.read(unit+'.task-credit-intent.json')
+            credit=self.store.read(unit+'.task-credit.json')
+            invocation=self.store.read(unit+'.invocation.json')
+            self._invocation(invocation['invocation_id'])
+            if (set(proof)!={'owner','invocation_id','journal_revision','observation','progress_identity','progress_credit_assigned'} or
+                    proof['progress_credit_assigned'] is not False or
+                    set(accepted_intent)!={'owner','proof_digest','progress_identity','transition'} or
+                    invocation['owner']!=owner or proof['owner']!=owner or
+                    proof['invocation_id']!=invocation['invocation_id'] or
+                    proof['observation']['selection']!=selection or
+                    proof['progress_identity']!=identity or
+                    task_progress_identity(proof['observation'])!=identity or
+                    accepted_intent['owner']!=owner or
+                    accepted_intent['proof_digest']!=digest(proof) or
+                    accepted_intent['progress_identity']!=identity or
+                    accepted_intent['transition']['observation']!=proof['observation'] or
+                    digest(accepted_intent['transition']['before'])!=proof['observation']['checkpoint_sha256']):
+                raise ValueError('Historical task acceptance proof chain drift')
+            expected_acceptance={'owner':owner,'intent_digest':digest(accepted_intent),
+                'checkpoint_sha256':digest(accepted_intent['transition']['after']),
+                'progress_identity':identity,'progress_credit_assigned':False,'parent_accepted':False}
+            if acceptance!=expected_acceptance:
+                raise ValueError('Historical task acceptance completion drift')
+            before=credit_intent['before'];after=credit_intent['after']
+            if (set(credit_intent)!={'owner','acceptance_digest','expected_revision','before','after','progress_identity'} or
+                    credit_intent['owner']!=owner or credit_intent['acceptance_digest']!=digest(acceptance) or
+                    credit_intent['progress_identity']!=identity or
+                    after!=credit_task(before,self.contract_digest,run_id=owner['run_id'],
+                        run_attempt=owner['run_attempt'],progress_receipt=identity) or
+                    proof['journal_revision']!=credit_intent['expected_revision']):
+                raise ValueError('Historical task credit intent drift')
+            expected_credit={'owner':owner,'intent_digest':digest(credit_intent),
+                'journal_revision':credit['journal_revision'],'progress_identity':identity,
+                'progress_credit_assigned':True,'parent_accepted':False}
+            if credit!=expected_credit:raise ValueError('Historical task credit completion drift')
+            latest=self.journal.verify_history(credit_intent['expected_revision'],before)
+            if self.journal.verify_history(credit['journal_revision'],after)!=latest:
+                raise ValueError('Historical task journal changed during inspection')
+            last=before['attempts'][-1]
+            if last['status']!='finished' or (last['run_id'],last['run_attempt'])!=(owner['run_id'],owner['run_attempt']):
+                raise ValueError('Historical finished task attempt required')
+            reserved={**before,'attempts':before['attempts'][:-1]+[{**last,'status':'reserved','progress_receipt':None}]}
+            plan=launch_plan(reserved,self.contract_digest,run_id=owner['run_id'],
+                             run_attempt=owner['run_attempt'],session_id=owner['session_id'])
+            if plan['unit']!=unit or digest(plan)!=owner['plan_digest']:
+                raise ValueError('Historical task launch ownership drift')
+            native=self.backend.observe_owned(plan,contract,owner,invocation['invocation_id'])
+            owned={k:native.get(k) for k in ('unit','active_state','cgroup_empty','ownership_verified')}
+            if 'execution_finished' in native:owned['execution_finished']=native['execution_finished']
+            if (native.get('invocation_id')!=invocation['invocation_id'] or
+                    recovery_action(reserved,self.contract_digest,owned)!='reconcile_without_refund'):
+                raise ValueError('Historical stopped task ownership proof required')
+            expected_path=str(self.store.root/(unit+'.task-proof.json'))
+            _,state,by_id=gate._read()
+            if (by_id[selection['task_id']]['status']!='done' or
+                    by_id[selection['task_id']].get('evidence')!=expected_path):
+                raise ValueError('Historical accepted task evidence identity drift')
+            fresh=gate.task_acceptance(selection)
+            if fresh!=current or self.journal.read()!=latest:
+                raise ValueError('Historical task current proof changed during inspection')
+            return {'kind':'historical_workflow_task_acceptance','owner':owner,
+                    'invocation_id':invocation['invocation_id'],'native':native,
+                    'task_id':selection['task_id'],'current_observation':current,
+                    'proof_digest':digest(proof),'acceptance_digest':digest(acceptance),
+                    'credit_digest':digest(credit),'journal_revision':latest[0],
+                    'progress_identity':identity,'parent_accepted':False,'delivery_verified':False}
+
     def reconcile(self):
         """Wakeup/restart path: inspect and finish only, never submit or refund."""
         with self.store.lock():

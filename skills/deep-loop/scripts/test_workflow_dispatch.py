@@ -430,4 +430,60 @@ class TaskExecutionTests(WorkflowDispatchTests):
         self.assertEqual(self.graph.store.read('active-owner.json'),owner)
         self.assertEqual(self.journal.state['attempts'][0]['model_seconds'],600)
 
+
+
+    def historical_credited_task(self):
+        owner=self.credited_task_fixture();self.controller.credit_workflow_task(owner);return owner
+
+    def test_historical_task_acceptance_authenticates_after_later_finished_attempt(self):
+        from admission import reserve,finish
+        owner=self.historical_credited_task();revision,state=self.journal.read()
+        reserved=reserve(state,self.graph.key,run_id=2,run_attempt=1,model_seconds=600,active_seconds=1200)
+        self.journal.publish(revision,reserved)
+        self.journal.publish(self.journal.revision,finish(reserved,self.graph.key,run_id=2,run_attempt=1))
+        before=self.journal.read();checkpoint=self.graph.checkpoint.read_bytes()
+        observed=self.controller.authenticate_workflow_task_history(owner)
+        self.assertEqual(observed['task_id'],'prerequisite');self.assertFalse(observed['parent_accepted'])
+        self.assertEqual(self.journal.read(),before);self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint)
+        self.assertEqual(len(self.backend.submissions),1)
+
+    def test_historical_chain_substitution_and_wrong_current_evidence_block(self):
+        owner=self.historical_credited_task();store=self.graph.store
+        name=owner['unit']+'.task-acceptance.json';original=store.read(name)
+        store.remove(name);store.create(name,{**original,'intent_digest':'0'*64})
+        with self.assertRaises(ValueError):self.controller.authenticate_workflow_task_history(owner)
+        store.remove(name);store.create(name,original)
+        self.graph.f.state=__import__('json').loads(self.graph.checkpoint.read_text())
+        self.graph.f.state['tasks'][0]['evidence']='Substituted task evidence';self.graph.select()
+        with self.assertRaisesRegex(ValueError,'evidence identity'):self.controller.authenticate_workflow_task_history(owner)
+
+    def test_historical_task_rejects_live_owner_or_current_source_drift(self):
+        owner=self.historical_credited_task();self.backend.active=True;self.backend.empty=False
+        with self.assertRaisesRegex(ValueError,'stopped task'):self.controller.authenticate_workflow_task_history(owner)
+        self.backend.active=False;self.backend.empty=True;self.graph.f.source.write_text('drift')
+        with self.assertRaisesRegex(ValueError,'proof blocked'):self.controller.authenticate_workflow_task_history(owner)
+
+
+
+    def test_outcome_authenticates_all_three_actual_task_acceptance_chains(self):
+        self.graph.outcome_ready()
+        for task in self.graph.f.state['tasks']:task.update(status='pending',evidence='')
+        self.graph.select();self.journal.state=initialize(self.graph.key,workflow=True)
+        for run_id,task_id in enumerate(('prerequisite','dependent','portable'),1):
+            self.backend.active=True;self.backend.empty=False
+            owner=self.controller.start(run_id=run_id,run_attempt=1,model_seconds=600,active_seconds=1200,task_id=task_id)
+            self.backend.active=False;self.backend.empty=True;self.controller.reconcile()
+            self.controller.record_workflow_task_proof(owner);self.controller.accept_workflow_task(owner);self.controller.credit_workflow_task(owner)
+        before=self.journal.read();checkpoint=self.graph.checkpoint.read_bytes()
+        observed=self.controller.observe_workflow_outcome()
+        self.assertEqual(set(observed['task_histories']),{'prerequisite','dependent','portable'})
+        self.assertFalse(observed['parent_accepted']);self.assertFalse(observed['delivery_verified'])
+        self.assertEqual(self.journal.read(),before);self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint)
+
+    def test_done_graph_without_credited_task_attribution_cannot_accept_outcome(self):
+        self.graph.outcome_ready();self.journal.state=initialize(self.graph.key,workflow=True)
+        from admission import reserve,finish
+        self.journal.state=finish(reserve(self.journal.state,self.graph.key,run_id=1,run_attempt=1,model_seconds=600,active_seconds=1200),self.graph.key,run_id=1,run_attempt=1)
+        with self.assertRaisesRegex(ValueError,'Every workflow'):self.controller.observe_workflow_outcome()
+
 if __name__=='__main__':unittest.main()

@@ -465,3 +465,13 @@ nor delivery authority. Raw task evidence remains input for historical stopped
 ownership, durable acceptance and credit authentication, which are not yet
 integrated. Final quiescent proof, parent transition and endpoint readback
 remain required before workflow completion.
+
+Historical task authentication binds protected ownership, proof, acceptance
+and credit records, validates the exact credit transition against retained
+Git ancestry, reconstructs the charged launch, and requires fresh ended/empty
+native ownership plus current accepted-task evidence. The aggregate observer
+requires exactly one attributed credit per approved task and a freshly unchanged
+whole proof/journal cut after inspection. Tests exercise earlier histories after
+later attempts and all three task acceptance chains. Both source reviews passed;
+actual native/Git multi-task qualification remains pending. These read-only
+observations do not grant parent acceptance or delivery.
