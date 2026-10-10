@@ -166,6 +166,14 @@ class BoundPinnedHelper(PinnedHelper):
                 record['approval_ref']!=binding.get('approval_ref') or
                 not isinstance(record['approval_ref'],str) or not record['approval_ref'].strip()):
             raise ValueError('Pinned helper workflow authority changed')
+        intent=self.store.read(self.contract_digest+'.workflow-helper-intent.json')
+        completed=self.store.read(self.contract_digest+'.workflow-helper-complete.json')
+        if (not isinstance(intent,dict) or set(intent)!={
+                'contract_digest','helper_digest','binding_digest','approval_ref','journal_revision'} or
+                intent['contract_digest']!=self.contract_digest or intent['helper_digest']!=digest(record) or
+                intent['binding_digest']!=record['binding_digest'] or intent['approval_ref']!=record['approval_ref'] or
+                completed!={**intent,'activated':False}):
+            raise ValueError('Pinned helper enrollment completion changed')
         if sys.platform!='linux':raise ValueError('Pinned helper requires qualified Linux runtime')
         self.configuration=record['helper']
         return super()._verify()

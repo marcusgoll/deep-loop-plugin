@@ -81,6 +81,9 @@ class PinnedHelperTests(unittest.TestCase):
         binding={'approval_ref':'fixture binding'}
         store.create(key+'.workflow.json',binding)
         record={'contract_digest':key,'binding_digest':digest(binding),'approval_ref':binding['approval_ref'],'helper':self.config}
+        intent={'contract_digest':key,'binding_digest':digest(binding),'approval_ref':binding['approval_ref'],'helper_digest':digest(record),'journal_revision':'a'*40}
+        store.create(key+'.workflow-helper-intent.json',intent)
+        store.create(key+'.workflow-helper-complete.json',{**intent,'activated':False})
         return BoundPinnedHelper(store,key),store,key,record
 
     def test_protected_binding_reloads_authority_and_source_on_each_call(self):
@@ -97,3 +100,10 @@ class PinnedHelperTests(unittest.TestCase):
     def test_protected_helper_construction_is_lazy_but_use_requires_record(self):
         helper,store,key,record=self.bound()
         with self.assertRaises(FileNotFoundError):helper.task_records({})
+
+    def test_partial_or_changed_completion_blocks_helper_use(self):
+        helper,store,key,record=self.bound();store.create(key+'.workflow-helper.json',record)
+        complete=store.read(key+'.workflow-helper-complete.json');store.remove(key+'.workflow-helper-complete.json')
+        with self.assertRaises(FileNotFoundError):helper.task_records({})
+        store.create(key+'.workflow-helper-complete.json',{**complete,'activated':True})
+        with self.assertRaisesRegex(ValueError,'completion changed'):helper.task_records({})
