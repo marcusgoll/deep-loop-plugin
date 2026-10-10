@@ -104,4 +104,81 @@ class WorkflowDispatchTests(unittest.TestCase):
         self.assertIsNone(self.journal.state['attempts'][0]['progress_receipt'])
         self.assertEqual(self.graph.f.state['tasks'][1]['status'],'pending')
 
+class TaskExecutionTests(WorkflowDispatchTests):
+    def test_worker_dispatches_portable_task_when_prerequisite_is_stale(self):
+        from private_worker import run
+        self.graph.store.create('enabled-outcome.json',{'contract_digest':self.graph.key})
+        self.graph.f.source.write_text('drift')
+        self.assertEqual(run(self.graph.store,lambda key:self.controller,window=lambda *args:3600),'submitted_once')
+        owner=self.graph.store.read('active-owner.json')
+        record=self.graph.store.read(owner['unit']+'.workflow-attempt.json')
+        self.assertEqual(record['selection']['task_id'],'portable')
+        self.assertEqual(len(self.backend.submissions),1)
+
+    def test_worker_same_task_resume_and_missing_session_preserve_limits(self):
+        from private_worker import run
+        self.graph.store.create('enabled-outcome.json',{'contract_digest':self.graph.key})
+        wake=lambda:run(self.graph.store,lambda key:self.controller,window=lambda *args:3600)
+        self.assertEqual(wake(),'submitted_once')
+        self.backend.active=False;self.backend.empty=True
+        self.assertEqual(wake(),'finished_without_verified_progress')
+        self.assertEqual(wake(),'submitted_once')
+        self.assertEqual(self.backend.submissions[-1]['session_id'],controller_fixtures.SESSION)
+        self.assertEqual(wake(),'finished_without_verified_progress')
+        self.assertEqual(wake(),'stopped_limits')
+        self.assertEqual(sum(a['model_seconds'] for a in self.journal.state['attempts']),1200)
+
+    def test_native_graph_execution_requires_trusted_reader(self):
+        from unittest.mock import patch
+        from admission import digest
+        from native_backend import NativeBackend
+        self.start();plan=self.backend.submissions[0]
+        native=NativeBackend(self.graph.store,self.graph.key)
+        native.qualified=(digest(plan),digest(self.graph.contract))
+        with patch('native_backend.subprocess.run') as process:
+            with self.assertRaisesRegex(ValueError,'trusted proof reader'):
+                native.submit(plan,self.graph.contract)
+            process.assert_not_called()
+
+    def test_native_backend_reads_exact_task_prompt_and_rechecks_proof(self):
+        import subprocess
+        from unittest.mock import patch
+        from admission import digest
+        from native_backend import NativeBackend
+        owner=self.start();plan=self.backend.submissions[0]
+        native=NativeBackend(self.graph.store,self.graph.key,workflow_gate=self.graph.gate)
+        native.qualified=(digest(plan),digest(self.graph.contract))
+        observed={'unit':owner['unit'],'invocation_id':'a'*32,'active_state':'inactive',
+                  'cgroup_empty':True,'ownership_verified':True,'execution_finished':True}
+        calls=[]
+        def run(args,**kwargs):
+            calls.append(args)
+            return subprocess.CompletedProcess(args,0,stdout='a'*32+'\n')
+        with patch('native_backend.remaining',return_value=3600),patch('native_backend.subprocess.run',side_effect=run),patch('native_backend.observe_unit',return_value=observed):
+            self.assertEqual(native.submit(plan,self.graph.contract),'a'*32)
+        prompt=self.graph.store.read(owner['unit']+'.workflow-attempt.json')['selection']['task_id']
+        text=(self.graph.store.root/(owner['unit']+'.prompt')).read_text()
+        self.assertIn('Literal approved '+prompt,text)
+        self.assertNotIn('Literal approved portable',text)
+        self.assertNotIn(text,calls[0])
+
+    def test_proof_drift_during_native_capture_writes_blocks_systemd(self):
+        from unittest.mock import patch
+        from admission import digest
+        from native_backend import NativeBackend
+        owner=self.start();plan=self.backend.submissions[0]
+        native=NativeBackend(self.graph.store,self.graph.key,workflow_gate=self.graph.gate)
+        native.qualified=(digest(plan),digest(self.graph.contract))
+        raw=native._raw
+        def drift(name,data):
+            result=raw(name,data)
+            if name.endswith('.stderr'):self.graph.f.source.write_text('drift')
+            return result
+        native._raw=drift
+        with patch('native_backend.remaining',return_value=3600),patch('native_backend.subprocess.run') as process:
+            with self.assertRaises(ValueError):native.submit(plan,self.graph.contract)
+            process.assert_not_called()
+        self.assertEqual(self.graph.store.read('active-owner.json'),owner)
+        self.assertEqual(self.journal.state['attempts'][0]['model_seconds'],600)
+
 if __name__=='__main__':unittest.main()

@@ -31,13 +31,16 @@ class WorkflowGateTests(unittest.TestCase):
         self.checkpoint=save(f.root/'state.json',f.state).resolve()
         control=f.root.resolve()/'control';control.mkdir(mode=0o700)
         self.store=TrustedStore(control,owner_uid=os.getuid())
-        self.contract={'fixture':'model-free parent'};self.key=digest(self.contract)
+        self.contract={'fixture':'model-free parent','prompt':'Bounded parent scope',
+                       'wakeup':{'model_seconds':600,'active_seconds':1200},
+                       'executor':{'path':'/pinned/native/codex','sha256':'b'*64}};self.key=digest(self.contract)
         self.store.create(self.key+'.approval.json',dict(contract=self.contract,approval_ref='fixture approval'))
         self.binding=dict(contract_digest=self.key,approval_ref='fixture graph approval',
                           checkpoint_path=str(self.checkpoint),session_id=f.state['sessionId'],
                           verification_contract=f.state['verificationContract'],
                           graph=graph_identity(f.state['tasks']),
                           task_verifiers={'prerequisite':['V1'],'dependent':['V2'],'portable':['V3']},
+                          task_prompts={i:'Literal approved '+i for i in ['prerequisite','dependent','portable']},
                           boundary='integrated_candidate')
         self.store.create(self.key+'.workflow.json',self.binding)
         self.gate=WorkflowGate(self.store,self.key,deep_loop)

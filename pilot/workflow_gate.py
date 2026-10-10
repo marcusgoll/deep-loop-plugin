@@ -4,6 +4,7 @@ The caller supplies the trusted, pinned helper and holds the credential lock.
 This module selects tasks; it neither enrolls a live outcome nor dispatches one.
 Mutable task state stays in the existing checkpoint.
 """
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -52,7 +53,7 @@ class WorkflowGate:
         binding = self.store.read(self.contract_digest + '.workflow.json')
         if (not isinstance(binding, dict) or set(binding) != {
                 'contract_digest', 'approval_ref', 'checkpoint_path', 'session_id',
-                'verification_contract', 'graph', 'task_verifiers', 'boundary'} or
+                'verification_contract', 'graph', 'task_verifiers', 'task_prompts', 'boundary'} or
                 binding['contract_digest'] != self.contract_digest or
                 not isinstance(binding['session_id'], str) or not binding['session_id'].strip() or
                 not isinstance(binding['approval_ref'], str) or not binding['approval_ref'].strip() or
@@ -80,6 +81,11 @@ class WorkflowGate:
                     any(not isinstance(i, str) or not i for i in ids) or
                     len(ids) != len(set(ids)) for ids in mapping.values())):
             raise ValueError('Complete approved task verifier mapping required')
+        prompts = binding['task_prompts']
+        if (not isinstance(prompts, dict) or set(prompts) != set(by_id) or
+                any(not isinstance(prompt, str) or not prompt.strip() or
+                    len(prompt.encode('utf-8')) > 65536 for prompt in prompts.values())):
+            raise ValueError('Complete bounded approved task prompts required')
         failures = self.helper.contract_definition_issues(state)
         if failures:
             raise ValueError('Parent contract definitions blocked: ' + '; '.join(failures))
@@ -109,4 +115,27 @@ class WorkflowGate:
             else:
                 ready.append(task['id'])
         return {'binding_digest': digest(binding), 'session_id': state['sessionId'],
-                'ready': ready, 'blocked': blocked}
+                'ready': ready, 'blocked': blocked,
+                'prompt_sha256': {i: hashlib.sha256(binding['task_prompts'][i].encode()).hexdigest() for i in ready}}
+
+
+def native_prompt(store, key, owner, contract):
+    """Read exact approved task instructions from private authority, not argv."""
+    try:
+        binding = store.read(key + '.workflow.json')
+    except FileNotFoundError:
+        try:
+            store.read(owner['unit'] + '.workflow-attempt.json')
+        except FileNotFoundError:
+            return contract['prompt']
+        raise ValueError('Workflow native attempt lost its binding')
+    receipt = store.read(owner['unit'] + '.workflow-attempt.json')
+    selection = receipt['selection']
+    if (set(receipt) != {'owner', 'selection'} or receipt['owner'] != owner or
+            selection['binding_digest'] != digest(binding) or
+            binding['contract_digest'] != key or selection['session_id'] != binding['session_id']):
+        raise ValueError('Native workflow selection identity drift')
+    prompt = binding['task_prompts'][selection['task_id']]
+    if hashlib.sha256(prompt.encode()).hexdigest() != selection['prompt_sha256']:
+        raise ValueError('Native task instructions changed')
+    return contract['prompt'] + '\n\nApproved task instructions:\n' + prompt

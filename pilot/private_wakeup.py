@@ -47,7 +47,15 @@ def tick(store, controller_factory, *, expected_contract_digest=None, active_win
     attempts = journal['attempts']
     if attempts and attempts[-1]['status'] == 'reserved':
         return 'blocked_missing_owner'
+    workflow_tasks = controller.ready_workflow_tasks()
+    task_id = None
+    if workflow_tasks is not None:
+        if not workflow_tasks:
+            return 'blocked_workflow_prerequisites'
+        task_id = workflow_tasks[0]
     if attempts and attempts[-1]['progress_receipt'] is not None:
+        if workflow_tasks is not None:
+            raise ValueError('Frozen progress cannot accept a workflow parent')
         evidence = store.read(attempts[-1]['progress_receipt']+'.progress.json')
         if digest(evidence) != attempts[-1]['progress_receipt'] or evidence.get('contract_digest') != contract_digest:
             raise ValueError('Unavailable protected acceptance evidence')
@@ -72,10 +80,19 @@ def tick(store, controller_factory, *, expected_contract_digest=None, active_win
                 receipt['invocation_id'] != invocation['invocation_id']):
             raise ValueError('Unverified attempt session provenance')
         session = receipt['session_id']
-        if session is None:
+        if workflow_tasks is not None:
+            prior = store.read(plan['unit'] + '.workflow-attempt.json')
+            if prior['selection']['task_id'] != task_id:
+                # A newly eligible independent task is a distinct approved scope;
+                # its fresh attempt still uses the same cumulative parent limits.
+                session = None
+            elif session is None:
+                return 'blocked_missing_session'
+        if session is None and workflow_tasks is None:
             # A missing session does not justify silently starting a fresh task.
             return 'blocked_missing_session'
     if active_window_remaining is not None and active_window_remaining < schedule['active_seconds']:
         return 'stopped_insufficient_execution_window'
-    controller.start(run_id=len(attempts)+1, run_attempt=1, session_id=session, **schedule)
+    controller.start(run_id=len(attempts)+1, run_attempt=1, session_id=session,
+                     **({'task_id':task_id} if workflow_tasks is not None else {}), **schedule)
     return 'submitted_once'

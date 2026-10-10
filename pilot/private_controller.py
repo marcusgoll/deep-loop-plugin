@@ -267,6 +267,21 @@ class PrivateController:
             return
         raise ValueError('Private credential stream has an unreconciled owner')
 
+    def ready_workflow_tasks(self):
+        """Worker selection is advisory; start rechecks under the same lock."""
+        with self.store.lock():
+            self._contract()
+            self._unowned()
+            try:
+                self.store.read(self.contract_digest + '.workflow.json')
+            except FileNotFoundError:
+                self._workflow_selection(None)
+                return None
+            gate = self.workflow_gate
+            if gate is None or gate.store is not self.store or gate.contract_digest != self.contract_digest:
+                raise ValueError('Trusted workflow reader unavailable')
+            return gate.selection()['ready']
+
     def _workflow_selection(self, task_id):
         try:
             self.store.read(self.contract_digest + '.workflow.json')
@@ -285,7 +300,8 @@ class PrivateController:
         if task_id not in selection['ready']:
             raise ValueError('Task prerequisites unavailable: ' + task_id)
         return {'task_id': task_id, 'binding_digest': selection['binding_digest'],
-                'session_id': selection['session_id']}
+                'session_id': selection['session_id'],
+                'prompt_sha256': selection['prompt_sha256'][task_id]}
 
     def _workflow_receipt(self, owner):
         try:
@@ -299,7 +315,7 @@ class PrivateController:
         receipt = self.store.read(owner['unit'] + '.workflow-attempt.json')
         selection = receipt.get('selection', {})
         if (set(receipt) != {'owner', 'selection'} or receipt['owner'] != owner or
-                set(selection) != {'task_id', 'binding_digest', 'session_id'} or
+                set(selection) != {'task_id', 'binding_digest', 'session_id', 'prompt_sha256'} or
                 selection['binding_digest'] != digest(binding) or
                 selection['session_id'] != binding['session_id'] or
                 selection['task_id'] not in binding['task_verifiers']):
