@@ -13,6 +13,8 @@ class WorkflowDeliveryBindingTests(unittest.TestCase):
         g.binding.update(schema=4,parent_acceptance={'kind':'review_to_ship','approval_ref':'literal parent authority'},
                          workflow_delivery=delivery(g.key))
         c=g.binding['workflow_delivery']
+        g.f.state['verificationContract']['endpoint']='github_draft_pr'
+        g.binding['verification_contract']=g.f.state['verificationContract']
         g.f.state['delivery']={'status':'pending','endpoint':'github_draft_pr','repository':c['repository'],
                               'baseRef':c['base_ref'],'headRef':c['branch'],
                               'endpointDecision':{'status':'settled','source':'contract','evidence':c['approval_ref']}}
