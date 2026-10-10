@@ -280,3 +280,18 @@ credential-stream lock; an already-issued provider request can have an uncertain
 result and is never undone or replayed by cleanup. No new request is allowed after
 the protected intent exists. Source fixtures do not establish deployment of these
 changes or full A01-A11 qualification.
+
+
+The protected workflow gate now offers an observation-only `task_acceptance`
+reader. It checks the selected approved task, current bound proof for that task
+and its ancestors, prerequisite completion, and an unchanged checkpoint after
+inspection. Cancelled or blocked tasks cannot produce an observation. It does
+not change task status or accept the parent.
+
+`task_progress_identity` assigns one identity per immutable approved task
+selection. Receipt reruns, checkpoint changes and native invocation changes are
+provenance and cannot create a second progress credit. Before controller use,
+current proof and exact stopped-attempt ownership must be validated, credits
+must be deduplicated across the entire charged history, and provenance must be
+retained separately. Supported enrollment, checkpoint mutation and final parent
+acceptance remain outstanding; these readers are not wired into live execution.

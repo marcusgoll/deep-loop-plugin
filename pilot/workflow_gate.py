@@ -96,6 +96,51 @@ class WorkflowGate:
             raise ValueError('Task mapping must cover every parent blocking verifier exactly by ID')
         return binding, state, by_id
 
+    def task_acceptance(self, selection):
+        """Inspect selected task proof; never mutate checkpoint or accept parent.
+
+        The controller must retain this observation only for its authenticated,
+        stopped owned attempt. A task status or successful model exit is not proof.
+        Checkpoint identity is provenance, never semantic progress identity.
+        """
+        binding, state, by_id = self._read()
+        if (not isinstance(selection, dict) or set(selection) != {
+                'task_id', 'binding_digest', 'session_id', 'prompt_sha256'} or
+                selection['binding_digest'] != digest(binding) or
+                selection['session_id'] != state['sessionId'] or
+                selection['task_id'] not in by_id):
+            raise ValueError('Task acceptance selection identity drift')
+        task_id = selection['task_id']
+        if by_id[task_id]['status'] not in ('pending', 'running', 'done'):
+            raise ValueError('Task acceptance cancelled or blocked')
+        if selection['prompt_sha256'] != hashlib.sha256(
+                binding['task_prompts'][task_id].encode()).hexdigest():
+            raise ValueError('Task acceptance prompt identity drift')
+        ancestors = set()
+        def visit(identifier):
+            for parent in by_id[identifier].get('dependsOn', []):
+                if parent not in ancestors:
+                    ancestors.add(parent)
+                    visit(parent)
+        visit(task_id)
+        if any(by_id[i]['status'] != 'done' for i in ancestors):
+            raise ValueError('Task acceptance has unfinished prerequisites')
+        ids = sorted({v for i in ancestors | {task_id}
+                      for v in binding['task_verifiers'][i]})
+        failures = self.helper.prerequisite_issues(state, ids)
+        if failures:
+            raise ValueError('Task acceptance proof blocked: ' + '; '.join(failures))
+        # Re-read through the same protected identities after proof inspection.
+        # Concurrent checkpoint changes invalidate this observation.
+        again = self._read()
+        if again[0] != binding or again[1] != state:
+            raise ValueError('Task acceptance checkpoint changed during inspection')
+        checks = {c.get('verifierId'): c for c in state.get('checks', [])}
+        return {'contract_digest': self.contract_digest, 'kind': 'workflow_task_proof',
+                'selection': dict(selection), 'verifier_ids': ids,
+                'proof_receipts': {i: checks[i]['receipt'] for i in ids},
+                'checkpoint_sha256': digest(state), 'parent_accepted': False}
+
     def selection(self):
         binding, state, by_id = self._read()
         queue = self.helper.task_queue(state)
@@ -117,6 +162,26 @@ class WorkflowGate:
         return {'binding_digest': digest(binding), 'session_id': state['sessionId'],
                 'ready': ready, 'blocked': blocked,
                 'prompt_sha256': {i: hashlib.sha256(binding['task_prompts'][i].encode()).hexdigest() for i in ready}}
+
+
+def task_progress_identity(observation):
+    """One progress credit per approved task, independent of receipt reruns.
+
+    Only call after current proof and stopped-attempt ownership validation.
+    Receipt/checkpoint/invocation changes are provenance, not new task progress.
+    This identity neither accepts the checkpoint nor the parent.
+    """
+    if (not isinstance(observation, dict) or observation.get('kind') != 'workflow_task_proof' or
+            observation.get('parent_accepted') is not False):
+        raise ValueError('Task proof observation required')
+    selection = observation.get('selection')
+    if (not isinstance(selection, dict) or set(selection) != {
+            'task_id', 'binding_digest', 'session_id', 'prompt_sha256'} or
+            any(not isinstance(value, str) or not value for value in selection.values()) or
+            not isinstance(observation.get('contract_digest'), str)):
+        raise ValueError('Task progress identity required')
+    return digest({'contract_digest': observation['contract_digest'],
+                   'kind': 'approved_workflow_task', 'selection': selection})
 
 
 def native_prompt(store, key, owner, contract):

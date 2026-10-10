@@ -10,7 +10,7 @@ import test_receipt_recovery
 from test_ui_design import save, sha
 from admission import digest
 from private_controller import TrustedStore
-from workflow_gate import WorkflowGate, graph_identity
+from workflow_gate import WorkflowGate, graph_identity, task_progress_identity
 
 
 class WorkflowGateTests(unittest.TestCase):
@@ -47,6 +47,55 @@ class WorkflowGateTests(unittest.TestCase):
     def select(self):
         save(self.checkpoint,self.f.state)
         return self.gate.selection()
+    def accepted_selection(self, task_id='prerequisite'):
+        import hashlib
+        return dict(task_id=task_id,binding_digest=digest(self.binding),
+                    session_id=self.f.state['sessionId'],
+                    prompt_sha256=hashlib.sha256(self.binding['task_prompts'][task_id].encode()).hexdigest())
+
+    def test_task_acceptance_requires_own_current_proof(self):
+        before=copy.deepcopy(self.f.state)
+        receipt=self.gate.task_acceptance(self.accepted_selection())
+        self.assertFalse(receipt['parent_accepted'])
+        self.assertEqual(receipt['verifier_ids'],['V1'])
+        self.assertEqual(before,self.f.state)
+        with self.assertRaisesRegex(ValueError,'proof blocked'):
+            self.gate.task_acceptance(self.accepted_selection('portable'))
+        self.f.source.write_text('drift')
+        with self.assertRaisesRegex(ValueError,'proof blocked'):
+            self.gate.task_acceptance(self.accepted_selection())
+
+    def test_progress_identity_does_not_reward_receipt_or_checkpoint_churn(self):
+        observation=self.gate.task_acceptance(self.accepted_selection())
+        identity=task_progress_identity(observation)
+        changed=copy.deepcopy(observation)
+        changed.update(checkpoint_sha256='unrelated state changed',proof_receipts={'V1':{'path':'new receipt','sha256':'new run'}})
+        self.assertEqual(task_progress_identity(changed),identity)
+        changed['selection']['task_id']='other approved task'
+        self.assertNotEqual(task_progress_identity(changed),identity)
+        changed['parent_accepted']=True
+        with self.assertRaises(ValueError):task_progress_identity(changed)
+
+    def test_task_acceptance_rejects_cancelled_or_blocked_task(self):
+        for status in ('cancelled','blocked'):
+            self.f.state['tasks'][0].update(status=status,reason='Revoked task',evidence='Existing receipt',blocker='Revoked',nextAction='Resolve authority')
+            save(self.checkpoint,self.f.state)
+            with self.assertRaisesRegex(ValueError,'cancelled or blocked'):
+                self.gate.task_acceptance(self.accepted_selection())
+
+    def test_task_acceptance_rejects_identity_and_concurrent_drift(self):
+        selected=self.accepted_selection();selected['prompt_sha256']='0'*64
+        with self.assertRaisesRegex(ValueError,'prompt identity'):
+            self.gate.task_acceptance(selected)
+        original=self.gate._read;calls=[]
+        def changing_read():
+            result=original();calls.append(1)
+            if len(calls)==2:result[1]['tasks'][0]['evidence']='changed'
+            return result
+        self.gate._read=changing_read
+        with self.assertRaisesRegex(ValueError,'changed during inspection'):
+            self.gate.task_acceptance(self.accepted_selection())
+
     def test_fifo_and_linked_checkpoint_rejected_without_blocking(self):
         self.checkpoint.unlink();os.mkfifo(self.checkpoint)
         with self.assertRaisesRegex(ValueError,'Regular checkpoint'):self.gate.selection()
