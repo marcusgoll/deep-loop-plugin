@@ -60,7 +60,7 @@ class DeliveryTests(unittest.TestCase):
             if self.lost=='pr':raise OSError('Lost PR response')
             return self.pr
         if suffix.startswith('commits/'):
-            return {'check_runs':[{'name':'verify','app':{'slug':'github-actions'},'head_sha':'d'*40,'status':'completed','conclusion':'success','details_url':'https://github.com/marcusgoll/deep-loop-plugin/actions/runs/12/job/13'}]}
+            return {'total_count':1,'check_runs':[{'name':'verify','app':{'slug':'github-actions'},'head_sha':'d'*40,'status':'completed','conclusion':'success','details_url':'https://github.com/marcusgoll/deep-loop-plugin/actions/runs/12/job/13'}]}
         if suffix=='actions/runs/12':return {'head_sha':'d'*40,'path':WORKFLOW,'event':'pull_request','status':'completed','conclusion':'success'}
         if suffix=='pulls/17':return self.pr
         self.fail('Unexpected endpoint '+route)
@@ -172,6 +172,40 @@ class DeliveryTests(unittest.TestCase):
         self.configure_resume();self.advance(6)
         self.assertEqual(self.delivery.step(),'delivered_verified_draft')
         self.assertEqual(self.delivery._record('complete')['resume_acceptance_digest'],digest(self.proof))
+
+    def test_incomplete_check_listing_never_completes(self):
+        self.advance(6);original=self.api
+        def truncated(method,route,data):
+            result=original(method,route,data)
+            if 'check-runs?' in route:result['total_count']=2
+            return result
+        self.delivery.api=truncated
+        with self.assertRaisesRegex(ValueError,'verification listing'):
+            self.delivery.step()
+        with self.assertRaises(FileNotFoundError):
+            self.store.read(self.journal.contract_digest+'.delivery-complete.json')
+
+    def test_missing_check_listing_count_never_completes(self):
+        self.advance(6);original=self.api
+        def missing(method,route,data):
+            result=original(method,route,data)
+            if 'check-runs?' in route:result.pop('total_count')
+            return result
+        self.delivery.api=missing
+        with self.assertRaisesRegex(ValueError,'verification listing'):
+            self.delivery.step()
+
+    def test_malformed_check_listing_count_never_completes(self):
+        self.advance(6);original=self.api
+        for count in (True,-1,'1'):
+            with self.subTest(count=count):
+                def malformed(method,route,data):
+                    result=original(method,route,data)
+                    if 'check-runs?' in route:result['total_count']=count
+                    return result
+                self.delivery.api=malformed
+                with self.assertRaisesRegex(ValueError,'verification listing'):
+                    self.delivery.step()
 
     def test_incremental_exact_draft_delivery_and_current_readback(self):
         self.advance(6)

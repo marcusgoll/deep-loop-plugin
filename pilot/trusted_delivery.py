@@ -159,6 +159,13 @@ class TrustedDelivery:
             if len(matches)!=1:raise ValueError('Ambiguous existing pilot PR')
             number=self._pr(matches[0],head,delivery)
             checks=self._call('GET','commits/'+head+'/check-runs?per_page=100')
+            # One page cannot prove required verification when results are
+            # omitted. Refuse incomplete or malformed provider readback rather
+            # than treating the visible success as whole-head acceptance.
+            if (not isinstance(checks,dict) or not isinstance(checks.get('check_runs'),list) or
+                    type(checks.get('total_count')) is not int or
+                    checks['total_count']!=len(checks['check_runs'])):
+                raise ValueError('Hosted verification listing incomplete or malformed')
             qualifying=[]
             for check in checks['check_runs']:
                 if check.get('name')=='verify' and check.get('app',{}).get('slug')=='github-actions' and check.get('head_sha')==head:

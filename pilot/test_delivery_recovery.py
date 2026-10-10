@@ -109,6 +109,58 @@ class DeliveryProcessRecovery(unittest.TestCase):
         self.advance(5);self.crash('pulls',apply=False);self.advance(2)
         self.assertEqual(self.writes('pulls'),1)
         with self.assertRaises(FileNotFoundError):self.store.read(self.key+'.delivery-complete.json')
+    def completion_crash(self, after_write):
+        script="""import os,signal,sys
+from test_delivery_recovery import DurableProvider,delivery
+root=sys.argv[1];c=delivery(root,DurableProvider(root));original=c.store.create
+def create(name,value):
+ if name.endswith('.delivery-complete.json'):
+  if sys.argv[2]=='after':original(name,value)
+  os.kill(os.getpid(),signal.SIGKILL)
+ return original(name,value)
+c.store.create=create
+c.step()
+"""
+        result=subprocess.run([sys.executable,'-c',script,str(self.root),
+                               'after' if after_write else 'before'],
+                              cwd=Path(__file__).resolve().parent,
+                              capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,-signal.SIGKILL,result.stderr)
+
+    def test_crash_before_completion_receipt_recovers_without_duplicate(self):
+        self.advance(6);before=self.journal.read();self.completion_crash(False)
+        with self.assertRaises(FileNotFoundError):
+            self.store.read(self.key+'.delivery-complete.json')
+        self.assertEqual(self.step(),'delivered_verified_draft')
+        self.assertEqual(self.journal.read(),before)
+        self.assertEqual(self.writes('git/refs'),1);self.assertEqual(self.writes('pulls'),1)
+
+    def test_crash_after_durable_completion_requires_fresh_readback(self):
+        self.advance(6);before=self.journal.read();self.completion_crash(True)
+        receipt=self.store.read(self.key+'.delivery-complete.json')
+        self.assertEqual(self.step(),'delivered_verified_draft')
+        self.assertEqual(self.store.read(self.key+'.delivery-complete.json'),receipt)
+        self.assertEqual(self.journal.read(),before)
+        self.assertEqual(self.writes('pulls'),1)
+        provider=DurableProvider(self.root);provider.branch={'object':{'sha':'e'*40}}
+        save(provider.path,{'branch':provider.branch,'pr':provider.pr,'calls':provider.calls})
+        with self.assertRaisesRegex(ValueError,'branch drift'):self.step()
+
+    def test_failed_completion_persistence_does_not_return_success(self):
+        self.advance(6);before=self.journal.read();provider=DurableProvider(self.root)
+        c=delivery(self.root,provider);original=c.store.create
+        def fail(name,value):
+            if name.endswith('.delivery-complete.json'):
+                raise OSError('Fixture persistence failure')
+            return original(name,value)
+        c.store.create=fail
+        with self.assertRaisesRegex(OSError,'Fixture persistence failure'):c.step()
+        with self.assertRaises(FileNotFoundError):
+            self.store.read(self.key+'.delivery-complete.json')
+        self.assertEqual(self.step(),'delivered_verified_draft')
+        self.assertEqual(self.journal.read(),before)
+        self.assertEqual(self.writes('pulls'),1)
+
     def test_candidate_changed_after_export_blocks_actual_reader(self):
         self.advance(2);before=(self.root/'provider.json').read_bytes()
         (self.root/'candidate'/ARTIFACT).write_bytes(b'changed')
