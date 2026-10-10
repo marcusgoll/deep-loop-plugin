@@ -438,4 +438,10 @@ intents under the credential lock. It closes only one own preparation with
 no submission or invocation history and a fresh trusted native absence proof.
 Ambiguity, foreign ownership, plan drift or submitted-but-unowned history
 blocks without replay. Cleanup is a separate wake. Source tests and independent
-review qualify the routing; native worker-driven orphan cleanup is pending.
+review qualify the routing; A disposable native fixture also exercised
+three fresh worker interpreters: injected failure before the stream marker,
+preparation-only cleanup, then stale-proof replay blocking. Both independent
+host readbacks verified 93 pins, exact absence/cleanup hashes, unchanged
+checkpoint and journal charges, no verifier submission or task acceptance,
+and inactive production. The installed supervisor and process-crash variant
+remain unqualified.
