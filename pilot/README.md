@@ -396,3 +396,13 @@ same native invocation and original execution window. An initial native
 observation race was recovered without redispatch before reaching the fault.
 Fresh-interpreter, host-reboot and automatic worker recovery, and parent
 acceptance remain outstanding.
+
+
+Worker construction now supplies the trusted native verifier adapter. Wakeups
+recover an existing verifier stream before task selection, advancing receipt
+preparation, checkpoint publication and cleanup in separate wakes. A running
+verifier waits; a failed verifier is cleaned and stops the loop. Cleanup intent
+has priority, and no recovery wake also dispatches a model attempt. Routing tests
+cover this source integration; native automatic recovery, orphan preparation
+recovery, new verifier dispatch, task acceptance/credit and parent completion
+remain unqualified. Nothing is promoted or activated by these source changes.

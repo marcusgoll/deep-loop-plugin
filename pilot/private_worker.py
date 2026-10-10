@@ -23,6 +23,7 @@ from github_transport import GitHubAPI, UncertainAPI
 from delivery_artifact import DeliveryArtifact
 from pinned_helper import BoundPinnedHelper
 from workflow_gate import WorkflowGate
+from native_verifier import NativeVerifier
 
 TIMER = 'deep-loop-private-worker.timer'
 WORKER_SECONDS = 60
@@ -77,7 +78,7 @@ def build_controller(store,key):
     gate=WorkflowGate(store,key,BoundPinnedHelper(store,key))
     backend=NativeBackend(store,key,workflow_gate=gate)
     verifier=ResumeVerifier(Path(ROOT)/'candidate'/key,pwd.getpwnam(ACCOUNT).pw_uid,store,allow_runtime_guards=True)
-    return PrivateController(store,journal,backend,verifier,workflow_gate=gate)
+    return PrivateController(store,journal,backend,verifier,workflow_gate=gate,native_verifier=NativeVerifier(store,key))
 
 
 def main():
@@ -102,7 +103,9 @@ def main():
         raise
     if result not in {'submitted_once','wait_for_predecessor','finished_without_verified_progress',
                       'finished_with_verified_progress','wait_for_trusted_delivery',
-                      'recovered_workflow_task_acceptance','recovered_workflow_task_credit'}:
+                      'recovered_workflow_task_acceptance','recovered_workflow_task_credit',
+                      'wait_for_native_verifier','prepared_native_verifier_publication',
+                      'recovered_native_verifier_publication','recovered_native_verifier_cleanup'}:
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
 
 

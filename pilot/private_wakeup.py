@@ -47,6 +47,9 @@ def tick(store, controller_factory, *, expected_contract_digest=None, active_win
     attempts = journal['attempts']
     if attempts and attempts[-1]['status'] == 'reserved':
         return 'blocked_missing_owner'
+    recovered = controller.recover_pending_native_publication()
+    if recovered is not None:
+        return recovered
     recovered = controller.recover_pending_workflow_transition()
     if recovered is not None:
         return recovered

@@ -70,6 +70,8 @@ class WorkerConstructionTests(unittest.TestCase):
                 patch('private_worker.ResumeVerifier',return_value=None),\
                 patch('private_worker.pwd.getpwnam',return_value=SimpleNamespace(pw_uid=123)):
             controller=build_controller(self.store,self.journal.contract_digest)
+        self.assertIs(controller.native_verifier.store,self.store)
+        self.assertEqual(controller.native_verifier.key,self.journal.contract_digest)
         self.assertIs(controller.backend.workflow_gate,controller.workflow_gate)
         self.assertIs(controller.workflow_gate.helper.store,self.store)
 

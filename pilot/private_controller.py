@@ -644,6 +644,38 @@ class PrivateController:
                 raise ValueError('Trusted native publication adapters unavailable')
             return NativePublication(self.store,self.journal,self.native_verifier,self.workflow_gate).publish(prefix)
 
+    def recover_pending_native_publication(self):
+        """One worker recovery step; never dispatch or release ambiguous owners."""
+        try:stream=self.store.read('active-verifier.json')
+        except FileNotFoundError:return None
+        if stream['contract_digest']!=self.contract_digest:return 'blocked_other_verifier_owner'
+        prefix=stream['prefix']
+        # Cleanup intent takes precedence over proof work, including after a
+        # failed stop/readback. The cleanup implementation rechecks exact owner.
+        try:self.store.read(prefix+'.cleanup-intent.json')
+        except FileNotFoundError:pass
+        else:
+            self.cleanup_native_workflow_verification(prefix)
+            return 'recovered_native_verifier_cleanup'
+        observed=self.recover_native_workflow_verification()
+        if not observed['native']['execution_finished'] or not observed['native']['cgroup_empty']:
+            return 'wait_for_native_verifier'
+        if observed['exit_code']!=0 or observed['unit_result']!='success':
+            self.cleanup_native_workflow_verification(prefix)
+            return 'blocked_failed_native_verifier'
+        try:self.store.read(prefix+'.publication-complete.json')
+        except FileNotFoundError:pass
+        else:
+            self.publish_native_workflow_result(prefix)
+            self.cleanup_native_workflow_verification(prefix)
+            return 'recovered_native_verifier_cleanup'
+        try:self.store.read(prefix+'.publication-intent.json')
+        except FileNotFoundError:
+            self.prepare_native_workflow_publication(prefix)
+            return 'prepared_native_verifier_publication'
+        self.publish_native_workflow_result(prefix)
+        return 'recovered_native_verifier_publication'
+
     def _current_workflow_task_proof(self,owner):
         from workflow_gate import task_progress_identity
         gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
