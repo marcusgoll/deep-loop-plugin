@@ -427,3 +427,15 @@ unchanged original 600/1200 charges. Only the selected task/check changed;
 fences were removed and production stayed inactive. The fixture substitutes
 literal initial execution and rejects further model dispatch. It does not
 qualify live model execution, the installed supervisor or parent completion.
+
+Repeated controller recovery/advance and credit calls on the completed native
+fixture preserved the exact checkpoint, journal revision and control-file
+hashes with one credit. Independent actual-host readbacks confirmed this
+primitive idempotence; full post-credit worker scheduling remains unqualified.
+
+When the verifier stream marker is absent, a wake scans protected preparation
+intents under the credential lock. It closes only one own preparation with
+no submission or invocation history and a fresh trusted native absence proof.
+Ambiguity, foreign ownership, plan drift or submitted-but-unowned history
+blocks without replay. Cleanup is a separate wake. Source tests and independent
+review qualify the routing; native worker-driven orphan cleanup is pending.

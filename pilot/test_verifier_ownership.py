@@ -146,3 +146,39 @@ class VerifierOwnershipTests(unittest.TestCase):
         self.controller.cleanup_native_workflow_verification(prefix)
         self.store.create(prefix+'.submit-intent.json',{'plan_digest':digest(self.plan)})
         with self.assertRaisesRegex(ValueError,'acquired dispatch history'):self.controller._verifier_unowned()
+
+    def make_orphan(self):
+        original=self.store.create
+        def fail(name,value):
+            if name=='active-verifier.json':raise OSError('marker interrupted')
+            return original(name,value)
+        with patch.object(self.store,'create',side_effect=fail):
+            with self.assertRaises(OSError):self.dispatch()
+        return self.owner['unit']+'.verifier-0'
+
+    def test_worker_closes_unsubmitted_orphan_once_without_replaying(self):
+        self.make_orphan();before=self.journal.read()
+        self.assertEqual(self.controller.recover_pending_native_publication(),'recovered_native_verifier_preparation_cleanup')
+        self.assertIsNone(self.controller.recover_pending_native_publication())
+        self.assertEqual(self.journal.read(),before)
+        self.native.submit.assert_not_called();self.native.adopt.assert_not_called();self.native.stop.assert_not_called()
+        self.controller._verifier_unowned()
+
+    def test_missing_stream_with_submission_history_stays_fenced(self):
+        prefix=self.make_orphan();self.store.create(prefix+'.submit-intent.json',{})
+        self.assertEqual(self.controller.recover_pending_native_publication(),'blocked_missing_verifier_stream')
+        self.native.unsubmitted.assert_not_called()
+        with self.assertRaisesRegex(ValueError,'Pending native verifier'):self.controller._verifier_unowned()
+
+    def test_ambiguous_orphan_preparations_are_not_cleaned(self):
+        prefix=self.make_orphan();intent=self.store.read(prefix+'.intent.json')
+        self.store.create(prefix[:-1]+'1.intent.json',intent)
+        self.assertEqual(self.controller.recover_pending_native_publication(),'blocked_ambiguous_verifier_preparation')
+        self.native.unsubmitted.assert_not_called()
+
+    def test_orphan_plan_drift_blocks_before_cleanup_writes(self):
+        prefix=self.make_orphan();intent=self.store.read(prefix+'.intent.json');intent['plan_digest']='0'*64
+        self.store.remove(prefix+'.intent.json');self.store.create(prefix+'.intent.json',intent)
+        with self.assertRaisesRegex(ValueError,'identity drift'):self.controller.recover_pending_native_publication()
+        self.native.unsubmitted.assert_not_called()
+        self.assertFalse((self.store.root/(prefix+'.cleanup-intent.json')).exists())

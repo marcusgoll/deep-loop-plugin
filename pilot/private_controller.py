@@ -689,10 +689,33 @@ class PrivateController:
         self.accept_workflow_task(owner)
         return 'accepted_workflow_task'
 
+    def _recover_orphan_verifier_preparation(self):
+        """Close one provably unsubmitted preparation; never reconstruct dispatch."""
+        with self.store.lock():
+            pending=[]
+            for path in self.store.root.glob('deep-loop-pilot-*.verifier-*.intent.json'):
+                prefix=path.name.removesuffix('.intent.json')
+                intent=self.store.read(path.name)
+                try:self._verifier_cleanup_completion(prefix,intent)
+                except FileNotFoundError:pending.append((prefix,intent))
+            if not pending:return None
+            if len(pending)!=1:return 'blocked_ambiguous_verifier_preparation'
+            prefix,intent=pending[0];plan=intent['plan']
+            if plan['contract_digest']!=self.contract_digest:return 'blocked_other_verifier_owner'
+            if (intent['plan_digest']!=digest(plan) or
+                    prefix!=plan['source_owner']['unit']+'.verifier-'+str(plan['index'])):
+                raise ValueError('Orphan verifier preparation identity drift')
+            for suffix in ('.submit-intent.json','.invocation.json'):
+                try:self.store.read(prefix+suffix)
+                except FileNotFoundError:pass
+                else:return 'blocked_missing_verifier_stream'
+            self._cleanup_native_verifier(prefix)
+            return 'recovered_native_verifier_preparation_cleanup'
+
     def recover_pending_native_publication(self):
         """One worker recovery step; never dispatch or release ambiguous owners."""
         try:stream=self.store.read('active-verifier.json')
-        except FileNotFoundError:return None
+        except FileNotFoundError:return self._recover_orphan_verifier_preparation()
         if stream['contract_digest']!=self.contract_digest:return 'blocked_other_verifier_owner'
         prefix=stream['prefix']
         # Cleanup intent takes precedence over proof work, including after a
