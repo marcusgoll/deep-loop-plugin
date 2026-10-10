@@ -74,6 +74,39 @@ class WorkflowGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'session or stage'):
             deep_loop.accepted_task_state(state,'prerequisite',['V1'],'proof',digest(state))
 
+    def test_explicit_workflow_binding_requires_empty_private_approved_state(self):
+        from workflow_enrollment import WorkflowBindingEnrollment
+        from test_private_controller import FixtureJournal
+        from admission import initialize
+        self.store.create('credential-stream.lock',{})
+        self.store.remove(self.key+'.workflow.json')
+        journal=FixtureJournal(self.contract);journal.publish(None,initialize(self.key,workflow=True))
+        with self.assertRaisesRegex(ValueError,'protected controller store'):
+            WorkflowBindingEnrollment(self.store,journal,deep_loop).apply(self.binding,expected_binding_digest=digest(self.binding),approval_ref=self.binding['approval_ref'])
+        self.checkpoint=save(self.store.root/'state.json',self.f.state)
+        self.binding['checkpoint_path']=str(self.checkpoint)
+        operator=WorkflowBindingEnrollment(self.store,journal,deep_loop)
+        with self.assertRaisesRegex(ValueError,'Exact authenticated'):
+            operator.apply(self.binding,expected_binding_digest='0'*64,approval_ref=self.binding['approval_ref'])
+        journal.state=initialize(self.key)
+        with self.assertRaisesRegex(ValueError,'Empty explicitly'):
+            operator.apply(self.binding,expected_binding_digest=digest(self.binding),approval_ref=self.binding['approval_ref'])
+        journal.state=initialize(self.key,workflow=True)
+        self.checkpoint.chmod(0o666)
+        with self.assertRaisesRegex(ValueError,'Protected private'):
+            operator.apply(self.binding,expected_binding_digest=digest(self.binding),approval_ref=self.binding['approval_ref'])
+        self.checkpoint.chmod(0o600)
+        result=operator.apply(self.binding,expected_binding_digest=digest(self.binding),approval_ref=self.binding['approval_ref'])
+        self.assertFalse(result['activated'])
+        self.assertEqual(self.gate.selection()['ready'],['dependent','portable'])
+        completion=self.store.read(self.key+'.workflow-binding-complete.json')
+        self.store.remove(self.key+'.workflow-binding-complete.json')
+        with self.assertRaises(FileNotFoundError):self.gate.selection()
+        self.store.create(self.key+'.workflow-binding-complete.json',completion)
+        with self.assertRaises(FileNotFoundError):self.store.read('enabled-outcome.json')
+        with self.assertRaisesRegex(ValueError,'partial workflow'):
+            operator.apply(self.binding,expected_binding_digest=digest(self.binding),approval_ref=self.binding['approval_ref'])
+
     def accepted_selection(self, task_id='prerequisite'):
         import hashlib
         return dict(task_id=task_id,binding_digest=digest(self.binding),

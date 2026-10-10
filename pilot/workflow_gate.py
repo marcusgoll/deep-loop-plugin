@@ -53,6 +53,21 @@ class WorkflowGate:
     def _read(self):
         require_active(self.store, self.contract_digest)
         binding = self.store.read(self.contract_digest + '.workflow.json')
+        try:
+            intent = self.store.read(self.contract_digest + '.workflow-binding-intent.json')
+        except FileNotFoundError:
+            intent = None
+        if intent is not None:
+            completed = self.store.read(self.contract_digest + '.workflow-binding-complete.json')
+            if (completed != {**intent, 'activated':False} or
+                    intent.get('contract_digest') != self.contract_digest or
+                    intent.get('binding_digest') != digest(binding) or
+                    intent.get('approval_ref') != binding.get('approval_ref')):
+                raise ValueError('Workflow binding completion identity drift')
+        return self.validate_binding(binding)
+
+    def validate_binding(self, binding):
+        """Inspect a proposed binding before its protected publication."""
         if (not isinstance(binding, dict) or set(binding) != {
                 'contract_digest', 'approval_ref', 'checkpoint_path', 'session_id',
                 'verification_contract', 'graph', 'task_verifiers', 'task_prompts', 'boundary'} or

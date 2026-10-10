@@ -332,3 +332,13 @@ Credit-aware retry accounting preserves cumulative limits. The source worker
 recognizes both recovery results as continuing states. Fresh task acceptance
 still requires a trusted explicit call; production graph construction, supported
 enrollment and native end-to-end qualification remain outstanding.
+
+
+`WorkflowBindingEnrollment` stages an exact approved graph binding for an
+already-approved empty schema-2 journal. The checkpoint must reside directly in
+the private controller store with its complete ancestry revalidated. Exact graph
+approval, contract/mapping validation, durable intent and independent readback
+precede the nonactivating completion. A partial binding cannot select tasks.
+This API does not open an execution window, enable an outcome, activate a timer,
+or replace the frozen pilot enrollment operator. Production graph construction
+and fully unattended verifier execution remain outstanding.
