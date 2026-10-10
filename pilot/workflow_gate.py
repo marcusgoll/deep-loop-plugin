@@ -216,15 +216,15 @@ class WorkflowGate:
         evidence=next(t['evidence'] for t in transition['after']['tasks'] if t['id']==task_id)
         return self.accepted_state(observation['selection'],evidence)
 
-    def publish_verified_state(self,transition):
+    def publish_verified_state(self,transition,before_write=None):
         return self._publish_checkpoint(transition,self._checked_verification_transition,
-            lambda:self.helper.prerequisite_issues(self._read()[1],[transition['observation']['verifier_id']]))
+            lambda:self.helper.prerequisite_issues(self._read()[1],[transition['observation']['verifier_id']]),before_write)
 
     def publish_accepted_state(self,transition):
         return self._publish_checkpoint(transition,self._checked_acceptance_transition,
             lambda:self.task_acceptance(transition['observation']['selection']))
 
-    def _publish_checkpoint(self, transition,check_transition,postcheck):
+    def _publish_checkpoint(self, transition,check_transition,postcheck,before_write=None):
         """Publish exactly a proof-checked transition in a protected checkpoint.
 
         Caller holds the credential lock and has persisted its owned-attempt
@@ -279,7 +279,9 @@ class WorkflowGate:
                 # must use this same lock, and candidates cannot write this tree.
                 if checkpoint_bytes(path) != payload:
                     raise ValueError('Checkpoint changed before acceptance publication')
+                if before_write is not None:before_write()
                 os.replace(temporary, path.name, src_dir_fd=directory, dst_dir_fd=directory)
+            if before_write is not None:before_write()
             os.fsync(directory)
             saved = json.loads(checkpoint_bytes(path))
             if saved != transition['after']:

@@ -145,3 +145,21 @@ class NativeResultTests(unittest.TestCase):
         with patch.object(self.sealer,'seal',return_value=result):
             with self.assertRaisesRegex(ValueError,'semantics changed'):
                 self.sealer.receipt_row(self.prefix)
+
+    def test_exact_saved_after_checkpoint_can_reauthenticate_without_rerun(self):
+        before={'sessionId':'fixture','verificationContract':{'path':'/fixture.json','semanticsSha256':'f'*64},'checks':['pending']}
+        after={**before,'checks':['passed']};binding={'fixture':'bound'}
+        self.owned['plan']['checkpoint_sha256']=digest(before)
+        intent=self.store.read(self.prefix+'.intent.json');intent['owned_plan']=self.owned
+        self.store.remove(self.prefix+'.intent.json');self.store.create(self.prefix+'.intent.json',intent)
+        result=self.seal()
+        transition={'before':before,'after':after,'observation':{'binding_digest':digest(binding),'verifier_id':'V1','evidence':'fixture'}}
+        self.store.create(self.prefix+'.publication-intent.json',{'contract_digest':self.key,'prefix':self.prefix,
+            'parent_accepted':False,'sealed_result_sha256':digest(result),'transition':transition,'receipt':{'fixture':'receipt'}})
+        self.gate._read.return_value=(binding,after,{})
+        self.gate.verification_plan.return_value={**self.owned['plan'],'checkpoint_sha256':digest(after)}
+        self.gate.helper.verified_check_state.return_value=after
+        self.assertEqual(self.seal(),result)
+        self.backend.submit.assert_not_called()
+        self.gate._read.return_value=(binding,{**after,'substituted':True},{})
+        with self.assertRaisesRegex(ValueError,'recovery identity changed'):self.seal()

@@ -637,6 +637,13 @@ class PrivateController:
                 raise ValueError('Trusted native publication adapters unavailable')
             return NativePublication(self.store,self.journal,self.native_verifier,self.workflow_gate).prepare(prefix)
 
+    def publish_native_workflow_result(self,prefix):
+        from native_publication import NativePublication
+        with self.store.lock():
+            if self.native_verifier is None or self.workflow_gate is None:
+                raise ValueError('Trusted native publication adapters unavailable')
+            return NativePublication(self.store,self.journal,self.native_verifier,self.workflow_gate).publish(prefix)
+
     def _current_workflow_task_proof(self,owner):
         from workflow_gate import task_progress_identity
         gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)

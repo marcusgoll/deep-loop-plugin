@@ -55,6 +55,30 @@ class NativeResult:
         self.store,self.journal,self.backend,self.gate=store,journal,backend,gate
         self.key=journal.contract_digest
 
+    def _current_plan_matches(self,prefix,owned):
+        current=self.gate.verification_plan(owned['plan']['selection'])
+        if current==owned['plan']:return True
+        # Only an immutable publication intent may explain the one checkpoint
+        # change. All execution definitions and selection remain exact.
+        try:publication=self.store.read(prefix+'.publication-intent.json')
+        except FileNotFoundError:return False
+        transition=publication['transition'];binding,state,_=self.gate._read()
+        result=self.store.read(prefix+'.result.json')
+        if (publication['contract_digest']!=self.key or publication['prefix']!=prefix or
+                publication['parent_accepted'] is not False or
+                publication['sealed_result_sha256']!=digest(result) or
+                result['owned_plan_digest']!=digest(owned) or
+                digest(transition['before'])!=owned['plan']['checkpoint_sha256'] or
+                state!=transition['after'] or
+                transition['observation']['binding_digest']!=digest(binding)):
+            raise ValueError('Native publication recovery identity changed')
+        expected=self.gate.helper.verified_check_state(transition['before'],
+            transition['observation']['verifier_id'],publication['receipt'],
+            transition['observation']['evidence'],digest(transition['before']))
+        if expected!=transition['after']:raise ValueError('Native publication recovery transition changed')
+        normalized={**current,'checkpoint_sha256':owned['plan']['checkpoint_sha256']}
+        return normalized==owned['plan']
+
     def seal(self,prefix):
         """Caller holds credential lock; retain fence for future receipt publication."""
         require_active(self.store,self.key)
@@ -76,7 +100,7 @@ class NativeResult:
             else:raise ValueError('Cleaned verifier cannot publish result evidence')
         before=self.journal.read()
         if before[0]!=owned['journal_revision']:raise ValueError('Native result journal changed')
-        if self.gate.verification_plan(owned['plan']['selection'])!=owned['plan']:
+        if not self._current_plan_matches(prefix,owned):
             raise ValueError('Native result bound inputs changed')
         observation=self.backend.adopt(plan)
         invocation=self.store.read(prefix+'.invocation.json')
@@ -110,7 +134,7 @@ class NativeResult:
             data=read_regular(self.store.root/(prefix+'.'+name),{self.store.owner_uid},mode=0o600)
             captures[name]={'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data),
                             'text':data[:65536].decode('utf-8',errors='replace'),'truncated':len(data)>65536}
-        if self.gate.verification_plan(owned['plan']['selection'])!=owned['plan'] or self.journal.read()!=before:
+        if not self._current_plan_matches(prefix,owned) or self.journal.read()!=before:
             raise ValueError('Native result inputs changed during sealing')
         fresh=self.backend.adopt(plan)
         if (fresh['invocation_id']!=observation['invocation_id'] or fresh['exit_code']!=0 or fresh['unit_result']!='success' or
@@ -143,9 +167,12 @@ class NativeResult:
         result=self.seal(prefix)
         binding,state,_=self.gate._read()
         owned=self.store.read(prefix+'.intent.json')['owned_plan']
+        try:published_after=self.store.read(prefix+'.publication-intent.json')['transition']['after']
+        except FileNotFoundError:published_after=None
         if (digest(owned)!=result['owned_plan_digest'] or
-                self.gate.verification_plan(owned['plan']['selection'])!=owned['plan'] or
-                digest(state)!=owned['plan']['checkpoint_sha256']):
+                not self._current_plan_matches(prefix,owned) or
+                digest(state)!=owned['plan']['checkpoint_sha256'] and
+                state!=published_after):
             raise ValueError('Native receipt checkpoint changed after sealing')
         contract=self.gate.helper.contract_data(state['verificationContract']['path'])
         semantics=self.gate.helper.contract_semantics_sha256(contract)
@@ -162,6 +189,6 @@ class NativeResult:
                    ('unit','invocation_id','plan_digest','owned_plan_digest','execution_interval','unit_result')},
                    sealed_result_sha256=digest(result),captures=result['captures'])
         if (self.gate._read()[:2]!=(binding,state) or
-                self.gate.verification_plan(owned['plan']['selection'])!=owned['plan']):
+                not self._current_plan_matches(prefix,owned)):
             raise ValueError('Receipt binding changed during preparation')
         return row

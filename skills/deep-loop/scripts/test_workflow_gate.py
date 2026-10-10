@@ -373,4 +373,12 @@ class WorkflowGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'preimage'):
             deep_loop.verified_check_state(transition['before'],'V3',transition['observation']['receipt'],'Evidence','0'*64)
 
+    def test_late_publication_authority_guard_blocks_actual_atomic_replace(self):
+        transition=self.verification_transition()
+        def expired():raise ValueError('fixture publication window expired')
+        with self.assertRaisesRegex(ValueError,'window expired'):
+            self.gate.publish_verified_state(transition,before_write=expired)
+        self.assertEqual(__import__('json').loads(self.checkpoint.read_text()),transition['before'])
+        self.assertFalse(list(self.checkpoint.parent.glob('.deep-task-acceptance-*.tmp')))
+
 if __name__=='__main__':unittest.main()
