@@ -2,6 +2,8 @@
 import datetime
 import hashlib
 import os
+import platform
+import sys
 from pathlib import Path
 import stat
 import subprocess
@@ -123,9 +125,43 @@ class NativeResult:
                 'execution_interval':observation['execution_interval'],**times,
                 'argv':plan['argv'],'cwd':plan['cwd'],'verifier_id':plan['definition']['verifier']['id'],
                 'identity':plan['definition']['identity'],'artifacts':artifacts,'captures':captures,
+                'runtime':{'executable':str(Path(sys.executable).resolve()),'python':sys.version,
+                           'platform':platform.platform(),'scope':'protected result observer'},
                 'exitCode':0,'unit_result':'success','native_result_sealed':True,'checkpoint_published':False,'parent_accepted':False}
         try:self.store.create(prefix+'.result.json',result)
         except FileExistsError:
             if self.store.read(prefix+'.result.json')!=result:raise ValueError('Protected native result changed')
         if self.store.read(prefix+'.result.json')!=result:raise ValueError('Native result readback differs')
         return result
+
+    def receipt_row(self,prefix):
+        """Reauthenticate native evidence and prepare a row; no publication authority.
+
+        Runtime describes the protected observer, as in the existing bound
+        runner. Actual verifier invocation is retained separately as argv/cwd.
+        """
+        result=self.seal(prefix)
+        binding,state,_=self.gate._read()
+        owned=self.store.read(prefix+'.intent.json')['owned_plan']
+        if (digest(owned)!=result['owned_plan_digest'] or
+                self.gate.verification_plan(owned['plan']['selection'])!=owned['plan'] or
+                digest(state)!=owned['plan']['checkpoint_sha256']):
+            raise ValueError('Native receipt checkpoint changed after sealing')
+        contract=self.gate.helper.contract_data(state['verificationContract']['path'])
+        semantics=self.gate.helper.contract_semantics_sha256(contract)
+        if state['verificationContract'].get('semanticsSha256')!=semantics:
+            raise ValueError('Bound receipt contract semantics changed')
+        if (not isinstance(semantics,str) or len(semantics)!=64 or
+                any(c not in '0123456789abcdef' for c in semantics) or
+                not isinstance(state.get('sessionId'),str) or not state['sessionId']):
+            raise ValueError('Bound receipt contract/session required')
+        row={key:result[key] for key in ('verifier_id','argv','cwd','identity','artifacts',
+                                        'exitCode','startedAt','finishedAt','runtime')}
+        row.update(proof_mode='bound',goal_id=state['sessionId'],contract_semantics=semantics,
+                   status='passed',native_provenance={key:result[key] for key in
+                   ('unit','invocation_id','plan_digest','owned_plan_digest','execution_interval','unit_result')},
+                   sealed_result_sha256=digest(result),captures=result['captures'])
+        if (self.gate._read()[:2]!=(binding,state) or
+                self.gate.verification_plan(owned['plan']['selection'])!=owned['plan']):
+            raise ValueError('Receipt binding changed during preparation')
+        return row

@@ -30,9 +30,10 @@ class PinnedHelperTests(unittest.TestCase):
             self.assertEqual(self.helper.task_records({'fixture':True}),[{'fixture':True},str(self.root/'skills'),False])
     def test_verification_methods_cross_real_isolated_proxy(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py'
-        p.write_text("def verification_definitions(state,ids):return [state,ids]\ndef verified_check_state(state,verifier_id,receipt,evidence,expected):return [state,verifier_id,receipt,evidence,expected]\n")
+        p.write_text("def contract_semantics_sha256(contract):return contract['fixture_hash']\ndef verification_definitions(state,ids):return [state,ids]\ndef verified_check_state(state,verifier_id,receipt,evidence,expected):return [state,verifier_id,receipt,evidence,expected]\n")
         self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
         state={'fixture':True};receipt={'path':'fixture.json','sha256':'a'*64}
+        self.assertEqual(self.helper.contract_semantics_sha256({'fixture_hash':'c'*64}),'c'*64)
         self.assertEqual(self.helper.verification_definitions(state,['V1']),[state,['V1']])
         self.assertEqual(self.helper.verified_check_state(state,'V1',receipt,'fixture evidence','b'*64),
                          [state,'V1',receipt,'fixture evidence','b'*64])

@@ -32,6 +32,7 @@ class NativeResultTests(unittest.TestCase):
                           'execution_interval':{'start_wall_us':1700000000000000,'end_wall_us':1700000000000010,
                                                 'start_monotonic_us':100,'end_monotonic_us':110}}
         self.backend=Mock(store=self.store,key=self.key);self.backend.adopt.return_value=self.observation
+        self.gate.helper.contract_semantics_sha256.return_value='f'*64
         self.sealer=NativeResult(self.store,self.journal,self.backend,self.gate)
     def seal(self,window=100):
         with patch('native_result.require_active'),patch('native_result.remaining',return_value=window,side_effect=window if isinstance(window,list) else None),patch('pwd.getpwnam',return_value=type('Account',(),{'pw_uid':max(1,os.getuid())})()),patch('native_result.subprocess.run',return_value=type('Process',(),{'returncode':1,'stdout':''})()):
@@ -90,3 +91,57 @@ class NativeResultTests(unittest.TestCase):
         self.store.remove(self.prefix+'.invocation.json');self.store.create(self.prefix+'.invocation.json',{'plan_digest':digest(self.plan),'invocation_id':'e'*32})
         self.observation['plan_digest']=digest(self.plan)
         with self.assertRaisesRegex(ValueError,'Bounded native result artifacts'):self.seal()
+
+    def test_receipt_row_preserves_real_native_provenance_without_publication(self):
+        result=self.seal()
+        state={'sessionId':'fixture-session','verificationContract':{'semanticsSha256':'f'*64,'path':'/fixture-contract.json'}}
+        intent=self.store.read(self.prefix+'.intent.json');intent['owned_plan']['plan']['checkpoint_sha256']=digest(state)
+        self.store.remove(self.prefix+'.intent.json');self.store.create(self.prefix+'.intent.json',intent)
+        result['owned_plan_digest']=digest(intent['owned_plan'])
+        self.gate.verification_plan.return_value=intent['owned_plan']['plan']
+        self.gate._read.return_value=({'fixture':'binding'},state,{})
+        with patch.object(self.sealer,'seal',return_value=result):
+            row=self.sealer.receipt_row(self.prefix)
+        self.assertEqual(row['goal_id'],'fixture-session')
+        self.assertEqual(row['native_provenance']['invocation_id'],'e'*32)
+        self.assertEqual(row['startedAt'],result['startedAt'])
+        self.assertEqual(row['artifacts'],result['artifacts'])
+        self.assertEqual(row['sealed_result_sha256'],digest(result))
+        self.assertEqual(row['runtime']['scope'],'protected result observer')
+        self.assertTrue((self.root/'active-verifier.json').exists())
+        self.assertFalse((self.root/(self.prefix+'.receipt.json')).exists())
+
+    def test_receipt_row_rejects_changed_binding(self):
+        result=self.seal()
+        state={'sessionId':'fixture','verificationContract':{'semanticsSha256':'f'*64,'path':'/fixture-contract.json'}}
+        intent=self.store.read(self.prefix+'.intent.json');intent['owned_plan']['plan']['checkpoint_sha256']=digest(state)
+        self.store.remove(self.prefix+'.intent.json');self.store.create(self.prefix+'.intent.json',intent)
+        result['owned_plan_digest']=digest(intent['owned_plan'])
+        self.gate.verification_plan.return_value=intent['owned_plan']['plan']
+        self.gate._read.side_effect=[({},state,{}),({'changed':True},state,{})]
+        with patch.object(self.sealer,'seal',return_value=result):
+            with self.assertRaisesRegex(ValueError,'binding changed'):
+                self.sealer.receipt_row(self.prefix)
+
+    def test_receipt_row_rejects_stable_substituted_checkpoint_after_sealing(self):
+        result=self.seal()
+        self.gate._read.return_value=({},
+            {'sessionId':'substituted','verificationContract':{'semanticsSha256':'f'*64,'path':'/fixture-contract.json'}}, {})
+        intent=self.store.read(self.prefix+'.intent.json');intent['owned_plan']['plan']['checkpoint_sha256']='0'*64
+        self.store.remove(self.prefix+'.intent.json');self.store.create(self.prefix+'.intent.json',intent)
+        result['owned_plan_digest']=digest(intent['owned_plan'])
+        self.gate.verification_plan.return_value=intent['owned_plan']['plan']
+        with patch.object(self.sealer,'seal',return_value=result):
+            with self.assertRaisesRegex(ValueError,'checkpoint changed'):
+                self.sealer.receipt_row(self.prefix)
+
+    def test_receipt_row_rejects_substituted_semantics(self):
+        result=self.seal()
+        state={'sessionId':'fixture','verificationContract':{'path':'/fixture.json','semanticsSha256':'0'*64}}
+        intent=self.store.read(self.prefix+'.intent.json');intent['owned_plan']['plan']['checkpoint_sha256']=digest(state)
+        self.store.remove(self.prefix+'.intent.json');self.store.create(self.prefix+'.intent.json',intent)
+        result['owned_plan_digest']=digest(intent['owned_plan'])
+        self.gate.verification_plan.return_value=intent['owned_plan']['plan'];self.gate._read.return_value=({},state,{})
+        with patch.object(self.sealer,'seal',return_value=result):
+            with self.assertRaisesRegex(ValueError,'semantics changed'):
+                self.sealer.receipt_row(self.prefix)
