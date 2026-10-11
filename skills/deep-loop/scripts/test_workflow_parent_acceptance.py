@@ -414,6 +414,67 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         with patch.object(helper,'review_observation_with_dependencies',None):
             self.assertIsNone(gate.final_review_authority_dependency_cut())
 
+    def test_expected_source_cut_preserves_full_reviews_and_checks_source_between_them(self):
+        import workflow_gate
+        self.prepared(delivery_capability=True)
+        gate=self.graph.gate;expected=gate.final_review_authority_cut()
+        source=expected[2]['candidate_source'];events=[];inside=[False]
+        read=gate._read;require=workflow_gate.require_candidate_snapshot
+        def reviewed(**kwargs):
+            events.append('review');inside[0]=True
+            try:return read(**kwargs)
+            finally:inside[0]=False
+        def checked(*args):
+            if not inside[0]:events.append('source')
+            return require(*args)
+        with patch.object(gate,'_read',side_effect=reviewed),patch.object(workflow_gate,'require_candidate_snapshot',side_effect=checked):
+            actual=gate.final_review_expected_source_cut(source)
+        self.assertEqual(actual,expected)
+        wrapped=gate.final_review_expected_source_cut(source,dependencies=True)
+        self.assertEqual(wrapped[:4],expected);self.assertTrue(wrapped[4])
+        with patch.object(gate.helper,'review_observation_with_dependencies',None):
+            self.assertIsNone(gate.final_review_expected_source_cut(source,dependencies=True))
+        with self.assertRaisesRegex(ValueError,'accepted candidate source'):
+            gate.final_review_expected_source_cut(None)
+        # Candidate inspection is fixed between independent full reviews.
+        self.assertEqual(events.count('review'),2)
+        closing=events.index('review',1)
+        self.assertIn('source',events[1:closing])
+        with self.assertRaisesRegex(ValueError,'accepted candidate source'):
+            gate.final_review_expected_source_cut({**source,'unexpected':'foreign'})
+
+    def test_expected_source_check_drift_is_rejected_by_closing_review(self):
+        import workflow_gate
+        candidate=self.prepared(delivery_capability=True)
+        gate=self.graph.gate;source=gate.final_review_authority_cut()[2]['candidate_source']
+        require=workflow_gate.require_candidate_snapshot;read=gate._read;inside=[False]
+        def reviewed(**kwargs):
+            inside[0]=True
+            try:return read(**kwargs)
+            finally:inside[0]=False
+        def drift(*args):
+            require(*args)
+            if not inside[0]:(candidate/'project.py').write_text('late source drift')
+        with patch.object(gate,'_read',side_effect=reviewed),patch.object(workflow_gate,'require_candidate_snapshot',side_effect=drift):
+            with self.assertRaises(ValueError):gate.final_review_expected_source_cut(source)
+
+    def test_expected_source_check_checkpoint_drift_is_rejected(self):
+        import workflow_gate
+        self.prepared(delivery_capability=True)
+        gate=self.graph.gate;source=gate.final_review_authority_cut()[2]['candidate_source']
+        require=workflow_gate.require_candidate_snapshot;read=gate._read;inside=[False]
+        def reviewed(**kwargs):
+            inside[0]=True
+            try:return read(**kwargs)
+            finally:inside[0]=False
+        def drift(*args):
+            require(*args)
+            if inside[0]:return
+            state=json.loads(self.graph.checkpoint.read_text());state['phase']='BUILD'
+            self.graph.checkpoint.write_text(json.dumps(state))
+        with patch.object(gate,'_read',side_effect=reviewed),patch.object(workflow_gate,'require_candidate_snapshot',side_effect=drift):
+            with self.assertRaises(ValueError):gate.final_review_expected_source_cut(source)
+
     def test_history_guard_uses_closing_call_files_and_keeps_legacy_collector(self):
         from workflow_delivery import WorkflowDelivery
         self.prepared(delivery_capability=True)
@@ -426,6 +487,83 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         with patch.object(self.graph.gate,'final_review_authority_dependency_cut',None),patch.object(helper,'review_dependency_cut',wraps=helper.review_dependency_cut) as collector:
             adapter._locked_history_guard();self.assertEqual(collector.call_count,1)
         self.assertNotIn('dependencies',vars(adapter))
+
+    def test_ordered_delivery_guard_retains_two_reviews_and_legacy_final_read(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        gate=self.graph.gate;adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('No provider calls'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        with patch.object(gate.helper,'_verify',return_value=None,create=True),patch.object(gate,'_read',wraps=gate._read) as reads:
+            adapter._locked_guard()
+            self.assertEqual(reads.call_count,2)
+            self.assertTrue(all(call.kwargs.get('review') for call in reads.call_args_list))
+        with patch.object(gate,'final_review_expected_source_cut',None),patch.object(gate,'_read',wraps=gate._read) as reads:
+            adapter._locked_guard();self.assertEqual(reads.call_count,3)
+
+    def test_ordered_delivery_guard_closes_late_source_and_protected_record_drift(self):
+        from workflow_delivery import WorkflowDelivery
+        candidate=self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        gate=self.graph.gate;adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('No provider calls'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        source=candidate/'project.py';original=source.read_bytes()
+        name=self.graph.key+'.parent-acceptance.json';record=self.graph.store.read(name)
+        for kind in ('source','parent','helper_pin'):
+            def drift():
+                if kind=='source':source.write_text('late candidate drift')
+                elif kind=='parent':
+                    self.graph.store.remove(name);self.graph.store.create(name,{**record,'unexpected':'late'})
+                else:raise ValueError('Pinned helper source drift')
+            try:
+                with self.subTest(kind=kind),patch.object(gate.helper,'_verify',side_effect=drift,create=True):
+                    with self.assertRaises(ValueError):adapter._locked_guard()
+            finally:
+                source.write_bytes(original)
+                if self.graph.store.read(name)!=record:
+                    self.graph.store.remove(name);self.graph.store.create(name,record)
+
+    def test_ordered_guard_rejects_external_contract_drift_after_closing_review(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        gate=self.graph.gate;calls=[]
+        adapter=WorkflowDelivery(self.controller,lambda *args:calls.append(args))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance();adapter._publication_lock=True
+        contract=Path(gate._read()[1]['verificationContract']['path']);original=contract.read_bytes()
+        quiescence=self.controller._workflow_quiescence;observations=[]
+        def late():
+            result=quiescence();observations.append(True)
+            if len(observations)==2:contract.write_bytes(original+b'\n')
+            return result
+        try:
+            with patch.object(gate.helper,'_verify',return_value=None,create=True),patch.object(self.controller,'_workflow_quiescence',side_effect=late):
+                with self.assertRaisesRegex(ValueError,'proof dependency changed'):
+                    adapter._api('GET','fixture')
+            self.assertEqual(calls,[])
+        finally:contract.write_bytes(original)
+
+    def test_ordered_guard_verifies_helper_pin_after_final_quiescence(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        gate=self.graph.gate;calls=[]
+        adapter=WorkflowDelivery(self.controller,lambda *args:calls.append(args))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance();adapter._publication_lock=True
+        pin=self.graph.store.root/'helper-pin-fixture.py';pin.write_bytes(b'original helper')
+        expected=hashlib.sha256(pin.read_bytes()).hexdigest()
+        quiescence=self.controller._workflow_quiescence;observations=[];verified=[]
+        def late():
+            result=quiescence();observations.append(True)
+            if len(observations)==2:pin.write_bytes(b'substituted helper')
+            return result
+        def verify():
+            verified.append(len(observations))
+            if hashlib.sha256(pin.read_bytes()).hexdigest()!=expected:
+                raise ValueError('Pinned helper source drift')
+        with patch.object(gate.helper,'_verify',side_effect=verify,create=True),patch.object(self.controller,'_workflow_quiescence',side_effect=late):
+            with self.assertRaisesRegex(ValueError,'Pinned helper source drift'):adapter._api('GET','fixture')
+        self.assertEqual(verified,[2]);self.assertEqual(calls,[])
 
     def test_large_mapping_selects_legacy_before_closing_review(self):
         from workflow_delivery import WorkflowDelivery

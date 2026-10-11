@@ -50,11 +50,22 @@ class WorkflowDelivery:
         # result is checked again under the credential lock before I/O/write.
         c=self.controller;c._contract();c._workflow_mutation_authority(parent_recovery=True);c._unowned()
         c._require_no_pending_task_acceptance();c._require_no_pending_task_credit()
+        proof=self.cut['parent_receipt']['postimage_review_proof']
+        expected_reader=getattr(c.workflow_gate,'final_review_expected_source_cut',None)
+        capability=getattr(c.workflow_gate,'supports_review_authority_dependencies',None)
+        inspection_reader=getattr(c,'_workflow_inspection_cut',None)
+        file_closer=getattr(c,'_workflow_reobserve_proof_files',None)
+        verify=getattr(c.workflow_gate.helper,'_verify',None) if hasattr(c.workflow_gate,'helper') else None
+        ordered=(callable(expected_reader) and callable(capability) and capability() is True and
+                 callable(inspection_reader) and callable(file_closer) and callable(verify))
+        inspection=inspection_reader(proof_files={}) if ordered else None
         authority_reader=getattr(c.workflow_gate,'final_review_authority_dependency_cut' if dependencies else 'final_review_authority_cut',None)
-        authority_cut=authority_reader() if callable(authority_reader) else None
+        authority_cut=expected_reader(proof.get('candidate_source'),dependencies=True) if ordered else authority_reader() if callable(authority_reader) else None
+        if ordered and authority_cut is None:
+            raise ValueError('Required fixed-source review capability unavailable')
         if dependencies and authority_cut is None:
             raise ValueError('Required closing review dependency capability unavailable')
-        if authority_cut is not None and (not isinstance(authority_cut,tuple) or len(authority_cut)!=(5 if dependencies else 4)):
+        if authority_cut is not None and (not isinstance(authority_cut,tuple) or len(authority_cut)!=(5 if ordered or dependencies else 4)):
             raise ValueError('Malformed workflow review authority cut')
         reader=getattr(c.workflow_gate,'final_review_cut',None)
         reviewed=authority_cut[:3] if authority_cut is not None else reader() if callable(reader) else None
@@ -63,7 +74,6 @@ class WorkflowDelivery:
             current_proof=c.workflow_gate.final_review_proof()
         else:
             binding,state,current_proof=reviewed
-        proof=self.cut['parent_receipt']['postimage_review_proof']
         origin=authority_cut[3] if authority_cut is not None else c.workflow_gate.accepted_parent_image(binding,state)
         current=c._parent_proof_at_checkpoint(current_proof,digest(origin))
         if (digest(binding)!=self.cut['binding_sha256'] or digest(origin)!=proof['checkpoint_sha256'] or
@@ -73,11 +83,24 @@ class WorkflowDelivery:
                 c._workflow_quiescence()!=self.cut['outcome']['quiescence'] or
                 current!=proof):
             raise ValueError('Workflow delivery authority changed before provider operation')
-        c._workflow_source_guard(proof,parent_recovery=True)
-        if (c.workflow_gate._read()[:2]!=(binding,state) or
-                c.journal.read()[0]!=self.cut['outcome']['journal_revision'] or
-                c._workflow_quiescence()!=self.cut['outcome']['quiescence']):
-            raise ValueError('Workflow delivery cut changed during final source guard')
+        if ordered:
+            # The fixed historical source check precedes the closing full
+            # review. Close exact inputs afterward without another definition
+            # process; this cut never survives this guard or provider I/O.
+            c._contract();c._unowned()
+            c._require_no_pending_task_acceptance();c._require_no_pending_task_credit()
+            if c._workflow_quiescence()!=self.cut['outcome']['quiescence']:
+                raise ValueError('Workflow account changed during final review closure')
+            verify()
+            file_closer(authority_cut[4])
+            if inspection_reader(proof_files={})!=inspection:
+                raise ValueError('Workflow delivery exact inputs changed during final review closure')
+        else:
+            c._workflow_source_guard(proof,parent_recovery=True)
+            if (c.workflow_gate._read()[:2]!=(binding,state) or
+                    c.journal.read()[0]!=self.cut['outcome']['journal_revision'] or
+                    c._workflow_quiescence()!=self.cut['outcome']['quiescence']):
+                raise ValueError('Workflow delivery cut changed during final source guard')
         c._workflow_mutation_authority(parent_recovery=True)
         return authority_cut[4] if dependencies else None
 

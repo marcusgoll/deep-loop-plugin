@@ -576,6 +576,16 @@ class WorkflowGateTests(unittest.TestCase):
             else:self.f.state[field]=previous
             self.select()
 
+    def test_expected_source_cut_accepts_none_only_for_actual_legacy_binding(self):
+        self.outcome_ready();before=self.checkpoint.read_bytes()
+        self.assertNotIn('schema',self.binding)
+        self.assertIsNone(self.gate.candidate_snapshot(self.binding))
+        expected=self.gate.final_review_authority_cut()
+        self.assertEqual(self.gate.final_review_expected_source_cut(None),expected)
+        wrapped=self.gate.final_review_expected_source_cut(None,dependencies=True)
+        self.assertEqual(wrapped[:4],expected);self.assertTrue(wrapped[4])
+        self.assertEqual(self.checkpoint.read_bytes(),before)
+
     def test_final_review_rejects_checkpoint_drift_during_full_validation(self):
         from unittest.mock import patch
         self.outcome_ready();original=self.gate.helper.validation_issues

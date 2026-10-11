@@ -463,7 +463,18 @@ class WorkflowGate:
         if not self.supports_review_authority_dependencies():return None
         return self._final_review_cut(authority=True,dependencies=True)
 
-    def _final_review_cut(self, *, authority=False, dependencies=False):
+    def final_review_expected_source_cut(self, expected_source, *, dependencies=False):
+        """Fixed historical source check before the closing full review.
+
+        The caller must still close exact protected inputs and authority after
+        this operation. No callbacks or proof from another call are accepted.
+        """
+        if dependencies and not self.supports_review_authority_dependencies():return None
+        return self._final_review_cut(authority=True,dependencies=dependencies,
+                                      expected_source=expected_source,check_source=True)
+
+    def _final_review_cut(self, *, authority=False, dependencies=False,
+                          expected_source=None, check_source=False):
         binding=self.store.read(self.contract_digest+'.workflow.json')
         method=getattr(self.helper,'review_observation',None)
         if (not callable(method) or not isinstance(binding.get('task_verifiers'),dict) or
@@ -473,6 +484,11 @@ class WorkflowGate:
         binding,state,by_id,observation=opening[:4]
         source=self.candidate_snapshot(binding)
         outcome=self._review_outcome_at(binding,state,by_id,observation)
+        if check_source:
+            if source!=expected_source:
+                raise ValueError('Workflow accepted candidate source changed')
+            if expected_source is not None:
+                require_candidate_snapshot(expected_source['policy'],expected_source['snapshot'])
         ending=self._read(review=True,authority=True,dependencies=True) if dependencies else self._read(review=True,authority=True) if authority else self._read(review=True)
         again,after,tasks,closing=ending[:4]
         if (again!=binding or after!=state or
