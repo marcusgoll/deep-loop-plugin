@@ -301,6 +301,45 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         self.assertEqual(wake(),'workflow_complete_verified')
         self.assertTrue(self.graph.store.read(receipt)['complete'])
 
+    def test_native_history_drift_during_intent_derivation_rejects_before_write(self):
+        import sys
+        from workflow_delivery import WorkflowDelivery,WAIT
+        from workflow_checkpoint import WorkflowCheckpoint,WorkflowTerminal
+        from test_workflow_delivery import Provider
+        if sys.platform!='linux':
+            mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        for _ in range(20):
+            if adapter.step()=='workflow_delivery_verified':break
+        else:self.fail('Provider fixture did not converge')
+        name='deep-loop-pilot-'+self.graph.key+'-1-1.invocation.json'
+        original=self.graph.store.read(name);journal=self.journal.read()
+        wrapper=WorkflowCheckpoint(self.controller,adapter)
+        for terminal in (False,True):
+            if terminal:
+                self.assertEqual(wrapper.step(),'prepared_workflow_delivery_checkpoint')
+                self.assertEqual(wrapper.step(),WAIT)
+                self.assertEqual(wrapper.step(),'recovered_workflow_delivery_checkpoint')
+                wrapper=WorkflowTerminal(self.controller,adapter)
+            helper=self.graph.gate.helper
+            method='completed_state' if terminal else 'verified_delivery_state'
+            derive=getattr(helper,method);before=self.graph.checkpoint.read_bytes()
+            posts=len([row for row in provider.calls if row[0]=='POST'])
+            def changed(*args,**kwargs):
+                result=derive(*args,**kwargs)
+                self.graph.store.remove(name)
+                return result
+            with patch.object(helper,method,side_effect=changed):
+                with self.assertRaises(FileNotFoundError):wrapper.step()
+            suffix='.workflow-terminal-intent.json' if terminal else '.workflow-delivery-checkpoint-intent.json'
+            self.assertFalse((self.graph.store.root/(self.graph.key+suffix)).exists())
+            self.assertEqual(self.graph.checkpoint.read_bytes(),before)
+            self.assertEqual(self.journal.read(),journal)
+            self.assertEqual(len([row for row in provider.calls if row[0]=='POST']),posts)
+            self.graph.store.create(name,original)
+
     def test_delivery_reader_cannot_finish_pending_parent(self):
         self.prepared();self.controller.prepare_workflow_parent_acceptance();before=self.graph.checkpoint.read_bytes()
         with self.assertRaises(FileNotFoundError):self.controller.authenticate_workflow_parent_acceptance()

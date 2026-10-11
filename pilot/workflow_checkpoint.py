@@ -80,7 +80,6 @@ class WorkflowCheckpoint:
                 return WAIT if result=='workflow_delivery_verified' else result
             self.adapter._initialize()
             with self.store.lock():
-                self._provider_guard(receipt)
                 binding,state,_=self.controller.workflow_gate._read()
                 proof=self.controller.workflow_gate.final_review_proof()
                 archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
@@ -89,7 +88,9 @@ class WorkflowCheckpoint:
                         'parent_receipt_sha256':self.adapter.cut['parent_receipt_sha256'],
                         'plan_sha256':digest(self.adapter.plan),'receipt_sha256':digest(receipt),
                         'before':state,'after':after,'observation':proof}
-                self.adapter._locked_history_guard()
+                # Derive first, then freshly authenticate provider acceptance
+                # and retained history together at the protected write cut.
+                self._provider_guard(receipt)
                 if self.controller.workflow_gate._read()[:2]!=(binding,state):
                     raise ValueError('Delivery intent checkpoint changed during history guard')
                 self.controller._workflow_mutation_authority(parent_recovery=True)
@@ -186,7 +187,6 @@ class WorkflowTerminal(WorkflowCheckpoint):
             self.adapter._initialize()
             receipt=self.adapter._read('complete')
             with self.store.lock():
-                self._provider_guard(receipt)
                 gate=self.controller.workflow_gate;binding,state,_=gate._read()
                 delivery=checked_delivery_intent(self.store,self.key,binding,gate.helper)
                 checkpoint=self.store.read(self.key+'.workflow-delivery-checkpoint.json')
@@ -200,10 +200,7 @@ class WorkflowTerminal(WorkflowCheckpoint):
                 proof=gate.final_review_proof()
                 intent={**delivery,'before':state,'after':after,'observation':proof,
                         'delivery_checkpoint_sha256':digest(checkpoint),'delivery_intent_sha256':digest(delivery)}
-                self.adapter._locked_guard()
-                if gate._read()[:2]!=(binding,state):raise ValueError('Terminal intent checkpoint drift')
-                self.controller._workflow_mutation_authority(parent_recovery=True)
-                self.adapter._locked_history_guard()
+                self._provider_guard(receipt)
                 if gate._read()[:2]!=(binding,state):raise ValueError('Terminal intent changed during history guard')
                 self.controller._workflow_mutation_authority(parent_recovery=True)
                 self.store.create(name,intent)

@@ -105,6 +105,17 @@ class WorkflowCheckpointTests(unittest.TestCase):
     def test_history_guard_cannot_change_final_checkpoint_or_extend_window(self):
         late_history_mutation(self,False)
 
+    def test_provider_drift_during_derivation_blocks_delivery_intent(self):
+        helper=self.c.workflow_gate.helper;original=helper.verified_delivery_state
+        def changed(*args,**kwargs):
+            result=original(*args,**kwargs)
+            self.provider.check_status='failure'
+            return result
+        with patch.object(helper,'verified_delivery_state',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'hosted check failed'):self.wrapper.step()
+        self.assertFalse((self.c.store.root/(self.key+'.workflow-delivery-checkpoint-intent.json')).exists())
+        self.assertEqual(self.path.read_bytes(),self.before)
+
     def test_writer_default_and_distinct_closing_callbacks_preserve_exact_adoption(self):
         for separate in (False,True):
             with self.subTest(separate=separate):
@@ -249,6 +260,19 @@ class WorkflowCheckpointTests(unittest.TestCase):
 class WorkflowTerminalTests(unittest.TestCase):
     def test_history_guard_cannot_change_terminal_checkpoint_or_extend_window(self):
         late_history_mutation(self,True)
+
+    def test_provider_drift_during_derivation_blocks_terminal_intent(self):
+        self.intent();self.assertEqual(self.recover(),'recovered_workflow_delivery_checkpoint')
+        self.wrapper=WorkflowTerminal(self.c,self.adapter)
+        before=self.path.read_bytes();helper=self.c.workflow_gate.helper;original=helper.completed_state
+        def changed(*args,**kwargs):
+            result=original(*args,**kwargs)
+            self.provider.check_status='failure'
+            return result
+        with patch.object(helper,'completed_state',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'hosted check failed'):self.wrapper.step()
+        self.assertFalse((self.c.store.root/(self.key+'.workflow-terminal-intent.json')).exists())
+        self.assertEqual(self.path.read_bytes(),before)
 
     setUp=WorkflowCheckpointTests.setUp
     intent=WorkflowCheckpointTests.intent
