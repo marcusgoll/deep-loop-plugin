@@ -70,6 +70,23 @@ def late_history_mutation(case,terminal):
             case.assertFalse((case.c.store.root/(case.key+suffix)).exists())
 
 
+def completion_guard_order(case,terminal):
+    intent=case.terminal() if terminal else case.intent()
+    case.assertEqual(case.wrapper.step(),WAIT)
+    events=[];readback=case.wrapper._provider_readback_guard;history=case.adapter._locked_history_guard
+    def provider(receipt):
+        events.append('provider');return readback(receipt)
+    def historical():
+        events.append('history');return history()
+    with patch.object(case.wrapper,'_provider_readback_guard',side_effect=provider),patch.object(case.adapter,'_locked_history_guard',side_effect=historical):
+        case.wrapper.step()
+    case.assertEqual(events,['provider','history'])
+    events.clear()
+    with patch.object(case.wrapper,'_provider_readback_guard',side_effect=provider),patch.object(case.adapter,'_locked_history_guard',side_effect=historical):
+        case.wrapper.step()
+    case.assertEqual(events,['provider','history'])
+
+
 class WorkflowCheckpointTests(unittest.TestCase):
     def setUp(self):
         f=fixtures.WorkflowDeliveryTests();f.setUp();self.addCleanup(f.doCleanups)
@@ -102,6 +119,9 @@ class WorkflowCheckpointTests(unittest.TestCase):
         return self.wrapper.step()
 
     def completion_exists(self):return (self.c.store.root/(self.key+'.workflow-delivery-checkpoint.json')).exists()
+    def test_completion_and_existing_receipt_keep_provider_then_final_history(self):
+        completion_guard_order(self,False)
+
     def test_history_guard_cannot_change_final_checkpoint_or_extend_window(self):
         late_history_mutation(self,False)
 
@@ -208,7 +228,7 @@ class WorkflowCheckpointTests(unittest.TestCase):
 
     def test_late_window_expiry_during_final_readback_blocks_completion_receipt(self):
         intent=self.intent();original=self.c.workflow_gate._read
-        publication=self.c.workflow_gate._publish_checkpoint;provider_guard=self.wrapper._provider_guard
+        publication=self.c.workflow_gate._publish_checkpoint;provider_guard=self.wrapper._provider_readback_guard
         published=False
         def publish(*args,**kwargs):
             nonlocal published
@@ -221,7 +241,7 @@ class WorkflowCheckpointTests(unittest.TestCase):
                 def read_then_expire():
                     result=original();self.c.active=False;return result
                 self.c.workflow_gate._read=read_then_expire
-        with patch.object(self.c.workflow_gate,'_publish_checkpoint',side_effect=publish),                patch.object(self.wrapper,'_provider_guard',side_effect=guard_then_arm_expiry):
+        with patch.object(self.c.workflow_gate,'_publish_checkpoint',side_effect=publish),                patch.object(self.wrapper,'_provider_readback_guard',side_effect=guard_then_arm_expiry):
             self.assertEqual(self.wrapper.step(),WAIT)
             with self.assertRaisesRegex(ValueError,'expired'):self.wrapper.step()
         self.assertEqual(json.loads(self.path.read_text()),intent['after']);self.assertFalse(self.completion_exists())
@@ -315,6 +335,9 @@ class WorkflowTerminalTests(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError,'records changed during derivation'):
                         checked_terminal_intent(self.c.store,self.key,self.c.binding,helper)
                 self.assertEqual(self.path.read_bytes(),before)
+
+    def test_terminal_completion_and_existing_receipt_keep_provider_then_final_history(self):
+        completion_guard_order(self,True)
 
     def test_terminal_exact_recovery_and_immutable_parent(self):
         intent=self.terminal();self.provider.calls.clear()

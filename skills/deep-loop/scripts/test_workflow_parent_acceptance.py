@@ -652,6 +652,50 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
                 if endpoint=='terminal':self.graph.store.remove(name)
                 self.graph.store.create(name,original)
 
+    def test_completion_final_history_rejects_corruption_after_provider_or_source(self):
+        import sys
+        from workflow_delivery import WorkflowDelivery,WAIT
+        from workflow_checkpoint import WorkflowCheckpoint,WorkflowTerminal
+        from test_workflow_delivery import Provider
+        if sys.platform!='linux':
+            mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        for _ in range(20):
+            if adapter.step()=='workflow_delivery_verified':break
+        else:self.fail('Provider fixture did not converge')
+        writer=WorkflowCheckpoint(self.controller,adapter)
+        name='deep-loop-pilot-'+self.graph.key+'-1-1.invocation.json';original=self.graph.store.read(name)
+        for endpoint in ('delivery','terminal'):
+            if endpoint=='terminal':writer=WorkflowTerminal(self.controller,adapter)
+            writer.step();self.assertEqual(writer.step(),WAIT)
+            for boundary in ('provider','source'):
+                with self.subTest(endpoint=endpoint,boundary=boundary):
+                    before=self.graph.checkpoint.read_bytes();journal=self.journal.read();triggered=[]
+                    def corrupt():
+                        triggered.append(boundary);self.graph.store.remove(name)
+                        altered=copy.deepcopy(original);altered['owner']['plan_digest']='0'*64
+                        self.graph.store.create(name,altered)
+                    def changed(method,route,body,result):
+                        if adapter._publication_lock and route.endswith('/pulls/17') and not triggered:corrupt()
+                    source=self.controller._workflow_source_guard;provider_done=[]
+                    readback=writer._provider_readback_guard
+                    def readback_then_arm(receipt):
+                        result=readback(receipt);provider_done.append(True);return result
+                    def source_then_corrupt(*args,**kwargs):
+                        source(*args,**kwargs)
+                        if provider_done and not triggered:corrupt()
+                    provider.calls.clear();provider.hook=changed if boundary=='provider' else None
+                    with patch.object(writer,'_provider_readback_guard',side_effect=readback_then_arm),patch.object(self.controller,'_workflow_source_guard',side_effect=source_then_corrupt if boundary=='source' else source):
+                        with self.assertRaises((ValueError,FileNotFoundError)):writer.step()
+                    self.assertTrue(triggered);self.assertTrue(all(row[0]=='GET' for row in provider.calls))
+                    self.assertEqual(self.graph.checkpoint.read_bytes(),before);self.assertEqual(self.journal.read(),journal)
+                    suffix='.workflow-'+('delivery-checkpoint' if endpoint=='delivery' else 'terminal-complete')+'.json'
+                    self.assertFalse((self.graph.store.root/(self.graph.key+suffix)).exists())
+                    provider.hook=None;self.graph.store.remove(name);self.graph.store.create(name,original)
+            writer.step()
+
     def test_history_drift_between_wakes_blocks_completion_and_worker_recovers_exact_stage(self):
         import sys
         from workflow_delivery import WorkflowDelivery,WAIT

@@ -62,9 +62,13 @@ class WorkflowCheckpoint:
         if adapter.controller is not controller or adapter.store is not self.store:
             raise ValueError('Trusted shared workflow delivery controller required')
 
-    def _provider_guard(self,receipt):
+    def _provider_readback_guard(self,receipt):
+        """Fresh provider acceptance; never sufficient for a protected write."""
         current=self.adapter.authenticate_delivery(locked=True)
         if current!=receipt:raise ValueError('Current provider acceptance changed before checkpoint publication')
+
+    def _provider_guard(self,receipt):
+        self._provider_readback_guard(receipt)
         self.adapter._locked_history_guard()
 
     def _post_publication_guard(self,binding,expected):
@@ -140,7 +144,8 @@ class WorkflowCheckpoint:
                 if saved!=intent['after']:raise ValueError('Delivery checkpoint publication differs')
                 return WAIT
             saved=state
-            self._provider_guard(receipt)
+            # No write occurs until the final full retained-history closure.
+            self._provider_readback_guard(receipt)
             if saved!=intent['after'] or gate._read()[1]!=saved:
                 raise ValueError('Workflow delivery checkpoint changed before completion receipt')
             self.controller._workflow_source_guard(intent['observation'],parent_recovery=True)
@@ -260,7 +265,8 @@ class WorkflowTerminal(WorkflowCheckpoint):
                 if saved!=intent['after']:raise ValueError('Terminal checkpoint publication differs')
                 return WAIT
             saved=state
-            self._provider_guard(receipt)
+            # No write occurs until the final full retained-history closure.
+            self._provider_readback_guard(receipt)
             self.controller._workflow_source_guard(intent['observation'],parent_recovery=True)
             if gate._read()[:2]!=(binding,saved) or saved!=intent['after']:
                 raise ValueError('Workflow terminal checkpoint changed at final source guard')
