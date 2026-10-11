@@ -17,8 +17,131 @@ import sys
 import tempfile
 import time
 import select
+import signal
+from contextlib import contextmanager
 
 from admission import digest, initialize
+
+_PAIR_CONTAINMENT=None
+_PAIR_CAPABILITY=None
+
+
+def qualify_review_pair_containment(service,invocation,cgroup):
+    """Called only after trusted worker unit and actual cgroup qualification."""
+    global _PAIR_CONTAINMENT
+    _PAIR_CONTAINMENT=(os.getpid(),service,invocation,cgroup)
+
+
+def _review_pair_available():
+    """Select kernel support before starting any review protocol."""
+    global _PAIR_CAPABILITY
+    if sys.platform!='linux' or not hasattr(os,'fork') or not hasattr(select,'poll'):
+        return False
+    if _PAIR_CAPABILITY is not None and _PAIR_CAPABILITY[0]==os.getpid():
+        return _PAIR_CAPABILITY[1]
+    # Probe in an otherwise empty disposable child, never modify the controller's
+    # subreaper/death-signal state. A denied optional capability selects legacy.
+    import ctypes
+    libc=ctypes.CDLL(None,use_errno=True)
+    if not hasattr(libc,'prctl'):return False
+    parent=os.getpid();pid=os.fork()
+    if pid==0:
+        try:
+            for option,value in ((36,1),(1,signal.SIGKILL)):
+                if libc.prctl(option,value,0,0,0)!=0:
+                    code=ctypes.get_errno()
+                    os._exit(78 if code in {errno.ENOSYS,errno.EINVAL,errno.EPERM,errno.EACCES} else 79)
+            os._exit(0 if os.getppid()==parent else 79)
+        except BaseException:os._exit(79)
+    deadline=time.monotonic()+1
+    while True:
+        waited,status=os.waitpid(pid,os.WNOHANG)
+        if waited:break
+        if time.monotonic()>=deadline:
+            os.kill(pid,signal.SIGKILL);os.waitpid(pid,0)
+            raise RuntimeError('Review capability probe did not finish')
+        time.sleep(.001)
+    code=os.waitstatus_to_exitcode(status)
+    if code not in {0,78}:raise RuntimeError('Review capability probe failed')
+    _PAIR_CAPABILITY=(os.getpid(),code==0)
+    return code==0
+
+
+class PairedReviewWorkerError(RuntimeError):
+    """A launched pair failed; its owning worker must exit and be contained."""
+
+
+class _ReviewPair:
+    """One scoped coordinator; closing can never reuse an opening result."""
+    def __init__(self):
+        self.process=None;self.calls=0;self.request=None;self.deadline=None
+        self.errors=None
+
+    def _transfer(self,fd,data=None,size=None):
+        result=bytearray();offset=0
+        poll=select.poll();poll.register(fd,select.POLLOUT if data is not None else select.POLLIN)
+        while offset<(len(data) if data is not None else size):
+            left=self.deadline-time.monotonic()
+            if left<=0:raise subprocess.TimeoutExpired('paired helper',self.timeout)
+            try:
+                if not poll.poll(max(1,int(left*1000))):continue
+                if data is not None:
+                    offset+=os.write(fd,memoryview(data)[offset:])
+                else:
+                    block=os.read(fd,min(65536,size-offset))
+                    if not block:raise ValueError('Incomplete paired helper frame')
+                    result.extend(block);offset+=len(block)
+            except (InterruptedError,BlockingIOError):continue
+        return bytes(result)
+
+    def exchange(self,root,python,encoded,count,limit):
+        request=json.loads(encoded);method=request['method']
+        normalized={**request,'method':method.removesuffix('_with_dependencies')}
+        if normalized['method'] not in {'review_observation','checkpoint_observation'}:
+            raise ValueError('Fixed paired full review required')
+        if normalized['method']=='checkpoint_observation' and request['args'][1]!='review_observation':
+            raise ValueError('Fixed paired full review required')
+        if self.calls>=2:raise ValueError('Paired helper accepts exactly two passes')
+        if self.process is None:
+            self.request=normalized;self.identity=(str(root),str(python),count)
+            self.timeout=count*16;self.deadline=time.monotonic()+self.timeout
+            self.errors=tempfile.TemporaryFile()
+            try:
+                self.process=subprocess.Popen([str(python),'-I','-S','-B','-c',
+                    'DRIVER='+repr(DRIVER)+'\n'+PAIR_COORDINATOR,str(root)],
+                    stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.errors,
+                    env={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'})
+                os.set_blocking(self.process.stdin.fileno(),False)
+                os.set_blocking(self.process.stdout.fileno(),False)
+            except BaseException:
+                self.close();raise
+        elif normalized!=self.request or self.identity!=(str(root),str(python),count):
+            raise ValueError('Paired closing review input changed')
+        message=json.dumps({'phase':self.calls,'request':request,'count':count,'limit':limit},allow_nan=False).encode()
+        if len(message)>1573376:raise ValueError('Paired helper request exceeds bound')
+        self._transfer(self.process.stdin.fileno(),len(message).to_bytes(8,'big')+message)
+        length=int.from_bytes(self._transfer(self.process.stdout.fileno(),size=8),'big')
+        if length>limit:raise ValueError('Paired helper result exceeds bound')
+        payload=self._transfer(self.process.stdout.fileno(),size=length)
+        self.calls+=1
+        if self.calls==2:
+            self.process.stdin.close()
+            extra=self._transfer(self.process.stdout.fileno(),size=1)
+            if extra!=b'\x00':raise ValueError('Unexpected paired helper trailing frame')
+            if self.process.wait(timeout=max(0,self.deadline-time.monotonic()))!=0:
+                raise ValueError('Paired helper failed')
+            if os.read(self.process.stdout.fileno(),1):raise ValueError('Extra paired helper output')
+        return json.loads(payload)
+
+    def close(self):
+        if self.process is not None:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:self.process.wait(timeout=.2)
+                except subprocess.TimeoutExpired:self.process.kill();self.process.wait()
+            for stream in (self.process.stdin,self.process.stdout):
+                if stream is not None:stream.close()
+        if self.errors is not None:self.errors.close()
 
 
 def _pidfd_wait_available():
@@ -164,6 +287,117 @@ if dependency_cut:
 sys.stdout.write(json.dumps(result,allow_nan=False))
 '''
 
+PAIR_COORDINATOR = '''import ctypes,io,json,math,os,resource,signal,sys,tempfile,time
+from pathlib import Path
+resource.setrlimit(resource.RLIMIT_AS,(536870912,536870912))
+sys.dont_write_bytecode=True
+root=Path(sys.argv[1]);os.environ['DEEP_LOOP_SKILLS_ROOT']=str(root/'skills')
+sys.path[:0]=[str(root/'skills/deep-loop/scripts')]
+libc=ctypes.CDLL(None,use_errno=True)
+libc.prctl.argtypes=[ctypes.c_int,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_ulong,ctypes.c_ulong]
+libc.prctl.restype=ctypes.c_int
+assert libc.prctl(36,1,0,0,0)==0
+child=None
+children_path=Path('/proc/self/task')/str(os.getpid())/'children'
+def children():
+ values=children_path.read_text().split();assert len(values)<=512
+ return [int(value) for value in values]
+def cleanup():
+ signal.signal(signal.SIGTERM,signal.SIG_IGN)
+ deadline=time.monotonic()+.15
+ while True:
+  owned=children()
+  if not owned:return
+  assert time.monotonic()<deadline
+  for pid in owned:
+   # An unreaped direct child cannot have its PID recycled. This single-threaded
+   # coordinator is its only reaper; live children return zero here.
+   waited,status=os.waitpid(pid,os.WNOHANG)
+   if not waited:
+    try:os.kill(pid,signal.SIGKILL)
+    except ProcessLookupError:pass
+  time.sleep(.001)
+def stop(*args):
+ cleanup()
+ raise SystemExit(1)
+signal.signal(signal.SIGTERM,stop)
+def read_exact(size):
+ data=bytearray()
+ while len(data)<size:
+  chunk=os.read(0,min(65536,size-len(data)))
+  if not chunk:raise ValueError('Incomplete review continuation')
+  data.extend(chunk)
+ return bytes(data)
+def frame():
+ size=int.from_bytes(read_exact(8),'big')
+ assert size<=1573376
+ message=json.loads(read_exact(size));assert set(message)=={'phase','request','count','limit'}
+ assert type(message['count']) is int and 5<=message['count']<=135
+ assert type(message['limit']) is int and 0<message['limit']<=message['count']*1048576+1049600
+ assert set(message['request'])=={'method','args','kwargs'}
+ return message
+def write_all(data):
+ view=memoryview(data)
+ while view:
+  n=os.write(1,view);view=view[n:]
+opening=frame();count=opening['count']
+# Closing may include its own bounded dependency envelope. Keep import output
+# at the opening soft bound while permitting each child to set its exact limit.
+resource.setrlimit(resource.RLIMIT_FSIZE,(opening['limit'],count*1048576+1049600))
+resource.setrlimit(resource.RLIMIT_CPU,(1,count*10))
+signal.alarm(8)
+import deep_loop,proof_binding
+signal.alarm(0)
+normalized=None
+try:
+ for phase in range(2):
+  message=opening if phase==0 else frame()
+  assert message['phase']==phase and message['count']==count
+  request=message['request'];method=request['method'].removesuffix('_with_dependencies')
+  assert method in {'review_observation','checkpoint_observation'}
+  assert method!='checkpoint_observation' or request['args'][1]=='review_observation'
+  current={**request,'method':method}
+  if phase:assert current==normalized
+  else:normalized=current
+  usage=resource.getrusage(resource.RUSAGE_SELF)
+  assert usage.ru_utime+usage.ru_stime<=1
+  with tempfile.TemporaryFile() as source,tempfile.TemporaryFile() as output,tempfile.TemporaryFile() as errors:
+   source.write(json.dumps(request,allow_nan=False).encode());source.seek(0)
+   coordinator=os.getpid();child=os.fork()
+   if child==0:
+    try:
+     assert libc.prctl(1,signal.SIGKILL,0,0,0)==0
+     if os.getppid()!=coordinator:os._exit(1)
+     signal.signal(signal.SIGTERM,signal.SIG_DFL)
+     # Descendants must not retain the coordinator's protocol pipes. Otherwise
+     # its abrupt death could leave a controller blocked on a grandchild's fd.
+     os.dup2(source.fileno(),0);os.dup2(output.fileno(),1);os.dup2(errors.fileno(),2)
+     sys.stdin=io.TextIOWrapper(source,encoding='utf-8');sys.stdout=io.TextIOWrapper(output,encoding='utf-8');sys.stderr=io.TextIOWrapper(errors,encoding='utf-8')
+     # Reserve one CPU second for the pristine coordinator from the original
+     # combined two-invocation budget. Individual reader checks stay unchanged.
+     code=DRIVER.replace('count*5','cpu_ceiling')
+     code=code.replace('limit=count*1048576','cpu_ceiling=count*5-pair_phase\\nlimit=count*1048576')
+     exec(code,{'__name__':'__main__','pair_phase':phase})
+     sys.stdout.flush();sys.stderr.flush()
+    except BaseException:os._exit(1)
+    os._exit(0)
+   waited,status=os.waitpid(child,0);child=None
+   assert os.waitstatus_to_exitcode(status)==0
+   assert not children(), 'Helper left owned descendants'
+   output.seek(0);payload=output.read(message['limit']+1)
+   assert len(payload)<=message['limit']
+   usage=resource.getrusage(resource.RUSAGE_SELF)
+   assert usage.ru_utime+usage.ru_stime<=1
+   write_all(len(payload).to_bytes(8,'big')+payload)
+   # The pristine parent must not carry an opening output allocation into the
+   # closing child's unchanged address-space allowance.
+   del payload
+ assert os.read(0,1)==b''
+ write_all(b'\\x00')
+finally:
+ cleanup()
+'''
+
 
 class PinnedHelper:
     def __init__(self, configuration, *, owner_uid=0):
@@ -271,6 +505,9 @@ class PinnedHelper:
             count=(4 if budget_method=='review_observation' else 3)+len(args[1])
         if composite:count+=1+int(original_args[4]['terminal'])
         limit=count*1048576+(1024 if method in {'definition_observation','review_observation','outcome_observation'} else 0)+(1048576 if dependency_wrapped else 0)
+        pair=getattr(self,'_review_pair',None)
+        if pair is not None:
+            return pair.exchange(root,python,encoded,count,limit)
         environment={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'}
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             result=_run_helper([str(python),'-I','-S','-B','-c',DRIVER,str(root)],encoded,
@@ -279,6 +516,31 @@ class PinnedHelper:
             output.seek(0);payload=output.read(limit+1)
         if len(payload)>limit:raise ValueError('Pinned helper result exceeds bound')
         return json.loads(payload)
+
+    @contextmanager
+    def review_pair(self):
+        """Scope exactly two full reads with controller checks between them."""
+        if getattr(self,'_review_pair',None) is not None:
+            raise ValueError('Nested paired review unavailable')
+        pair=_ReviewPair();self._review_pair=pair
+        try:
+            yield
+            if pair.calls!=2:raise ValueError('Incomplete paired full review')
+        except BaseException as failure:
+            if pair.process is not None:
+                raise PairedReviewWorkerError('Paired review failed; owning worker must stop') from failure
+            raise
+        finally:
+            self._review_pair=None;pair.close()
+
+    def supports_review_pair(self):
+        boundary=_PAIR_CONTAINMENT
+        if boundary is None or boundary[0]!=os.getpid():return False
+        if os.environ.get('INVOCATION_ID')!=boundary[2]:
+            raise RuntimeError('Qualified worker invocation changed')
+        if Path('/proc/self/cgroup').read_text().strip()!='0::'+boundary[3]:
+            raise RuntimeError('Qualified worker containment changed')
+        return _review_pair_available()
 
     def review_observation_with_dependencies(self,state,groups,archive=None):
         return self._call('review_observation_with_dependencies',state,groups,str(archive) if archive is not None else None)

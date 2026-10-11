@@ -21,7 +21,7 @@ from worker_window import remaining
 from trusted_delivery import TrustedDelivery
 from github_transport import GitHubAPI, UncertainAPI
 from delivery_artifact import DeliveryArtifact
-from pinned_helper import BoundPinnedHelper
+from pinned_helper import BoundPinnedHelper,qualify_review_pair_containment
 from workflow_gate import WorkflowGate
 from native_verifier import NativeVerifier
 from workflow_checkpoint import WorkflowTerminal
@@ -83,6 +83,18 @@ def qualify_service(service_name='deep-loop-private-worker.service'):
                                 capture_output=True,text=True,check=True,timeout=5).stdout.strip()
         if observed != 't '+str(expected):
             raise ValueError('Native worker timeout configuration drift')
+    properties={}
+    for name in ('KillMode','ControlGroup'):
+        observed=subprocess.run(['/usr/bin/busctl','get-property','org.freedesktop.systemd1',path,
+                                 'org.freedesktop.systemd1.Service',name],
+                                capture_output=True,text=True,check=True,timeout=5).stdout.strip()
+        if not observed.startswith('s '):raise ValueError('Native containment property unavailable')
+        properties[name]=json.loads(observed[2:])
+    cgroup='/system.slice/'+service_name
+    if (properties!={'KillMode':'control-group','ControlGroup':cgroup} or
+            Path('/proc/self/cgroup').read_text().strip()!='0::'+cgroup):
+        raise ValueError('Native worker containment configuration drift')
+    qualify_review_pair_containment(service_name,invocation,cgroup)
 
 
 def build_controller(store,key):

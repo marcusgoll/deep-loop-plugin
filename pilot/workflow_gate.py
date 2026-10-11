@@ -476,6 +476,21 @@ class WorkflowGate:
     def _final_review_cut(self, *, authority=False, dependencies=False,
                           expected_source=None, check_source=False):
         binding=self.store.read(self.contract_digest+'.workflow.json')
+        if (not callable(getattr(self.helper,'review_observation',None)) or
+                not isinstance(binding.get('task_verifiers'),dict) or
+                len(binding['task_verifiers'])>128):return None
+        paired=getattr(self.helper,'review_pair',None)
+        capability=getattr(self.helper,'supports_review_pair',None)
+        if callable(paired) and callable(capability) and capability():
+            with paired():
+                return self._final_review_reads(authority=authority,dependencies=dependencies,
+                    expected_source=expected_source,check_source=check_source)
+        return self._final_review_reads(authority=authority,dependencies=dependencies,
+            expected_source=expected_source,check_source=check_source)
+
+    def _final_review_reads(self, *, authority=False, dependencies=False,
+                            expected_source=None, check_source=False):
+        binding=self.store.read(self.contract_digest+'.workflow.json')
         method=getattr(self.helper,'review_observation',None)
         if (not callable(method) or not isinstance(binding.get('task_verifiers'),dict) or
                 len(binding['task_verifiers'])>128):

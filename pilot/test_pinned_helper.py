@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pinned_helper import PinnedHelper,BoundPinnedHelper
+from pinned_helper import PinnedHelper,BoundPinnedHelper,PairedReviewWorkerError
 
 
 @unittest.skipUnless(sys.platform=='linux','Production helper requires Linux runtime')
@@ -258,3 +258,207 @@ def validation_issues(state,stage,archive=None):
         with self.assertRaises(FileNotFoundError):helper.task_records({})
         store.create(key+'.workflow-helper-complete.json',{**complete,'activated':True})
         with self.assertRaisesRegex(ValueError,'completion changed'):helper.task_records({})
+
+    def paired_fixture(self):
+        code="""import proof_binding
+_counter=[]
+def task_records(state):
+ _counter.append(1)
+ return {'counter':len(_counter),'clean':proof_binding._CONTEXT.get() is None}
+def contract_definition_issues(state):return []
+def contract_data(path,verify_files=False):return {}
+def prerequisite_issues(state,ids):return []
+def validation_issues(state,stage,archive=None):return []
+"""
+        context="""from contextlib import contextmanager
+from contextvars import ContextVar
+_CONTEXT=ContextVar('pair_test',default=None)
+@contextmanager
+def dependency_context():
+ yield {}
+def close_dependency_cut(records):return {'fixture':{'hash':'unchanged'}}
+"""
+        for name,text in [('skills/deep-loop/scripts/deep_loop.py',code),('skills/deep-loop/scripts/proof_binding.py',context)]:
+            p=self.root/name;p.write_text(text);self.files[name]=hashlib.sha256(p.read_bytes()).hexdigest()
+        return {'verificationContract':{'path':str(self.root/'contract.json')}}
+
+    def test_paired_passes_have_independent_module_state_and_dependency_results(self):
+        state=self.paired_fixture()
+        original=self.helper.review_observation(state,[['V1']],None)
+        with self.helper.review_pair():
+            opening=self.helper.review_observation(state,[['V1']],None)
+            closing=self.helper.review_observation_with_dependencies(state,[['V1']],None)
+        self.assertEqual(opening,original);self.assertEqual(closing['observation'],original)
+        self.assertEqual(opening['records'],{'counter':1,'clean':True})
+        self.assertEqual(closing['dependencies'],{'fixture':{'hash':'unchanged'}})
+        self.assertIsNone(self.helper._review_pair)
+
+    def test_paired_checkpoint_review_matches_ordinary_images_and_dependencies(self):
+        state=self.paired_fixture();path=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        path.write_text(path.read_text()+"\ndef verified_delivery_state(state,revision,evidence,archive=None):return {**state,'revision':revision,'evidence':evidence}\ndef completed_state(state,archive=None):return {**state,'complete':True}\n")
+        self.files[str(path.relative_to(self.root))]=hashlib.sha256(path.read_bytes()).hexdigest()
+        for terminal in (False,True):
+            derivation={'before':{'pending':True,'payload':'b'*300000},'revision':'a'*40,'evidence':'fixture','terminal':terminal}
+            ordinary=self.helper.checkpoint_observation(state,'review_observation',[['V1']],self.root,derivation)
+            with self.helper.review_pair():
+                opening=self.helper.checkpoint_observation(state,'review_observation',[['V1']],self.root,derivation)
+                closing=self.helper.checkpoint_observation_with_dependencies(state,'review_observation',[['V1']],self.root,derivation)
+            self.assertEqual(opening,ordinary);self.assertEqual(closing['observation'],ordinary)
+            self.assertEqual(closing['dependencies'],{'fixture':{'hash':'unchanged'}})
+
+    def test_pair_rejects_changed_closing_input_and_reaps_coordinator(self):
+        state=self.paired_fixture();pair=None
+        with self.assertRaises(PairedReviewWorkerError):
+            with self.helper.review_pair():
+                self.helper.review_observation(state,[['V1']],None);pair=self.helper._review_pair
+                self.helper.review_observation({**state,'changed':True},[['V1']],None)
+        self.assertIsNotNone(pair.process.returncode);self.assertIsNone(self.helper._review_pair)
+
+    def test_pair_import_stderr_is_file_size_bounded(self):
+        state=self.paired_fixture()
+        path=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        path.write_text("import os\nwhile True: os.write(2,b'x'*65536)\n"+path.read_text())
+        self.files['skills/deep-loop/scripts/deep_loop.py']=hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaises(PairedReviewWorkerError):
+            with self.helper.review_pair():
+                pair=self.helper._review_pair
+                self.helper.review_observation(state,[['V1']],None)
+        self.assertIsNotNone(pair.process.returncode)
+        self.assertIsNone(self.helper._review_pair)
+
+    def test_pair_rejects_and_reaps_detached_adopted_descendants(self):
+        import time
+        for mode in ('live','zombie'):
+            with self.subTest(mode=mode):
+                state=self.paired_fixture();marker=self.root/'descendant.json'
+                path=self.root/'skills/deep-loop/scripts/deep_loop.py'
+                path.write_text(path.read_text()+f"""
+def task_records(state):
+ import os,time,json
+ from pathlib import Path
+ marker=Path({str(marker)!r})
+ pid=os.fork()
+ if pid==0:
+  os.setsid()
+  grandchild=os.fork()
+  if grandchild==0:
+   marker.write_text(json.dumps({{'pid':os.getpid(),'stat':Path('/proc/self/stat').read_text()}}))
+   if {mode!r}=='zombie':os._exit(0)
+   while True:time.sleep(.01)
+  os._exit(0)
+ os.waitpid(pid,0)
+ deadline=time.monotonic()+1
+ while not marker.exists():
+  assert time.monotonic()<deadline
+  time.sleep(.001)
+ return {{'fixture':'descendant'}}
+""")
+                self.files[str(path.relative_to(self.root))]=hashlib.sha256(path.read_bytes()).hexdigest()
+                with self.assertRaises(PairedReviewWorkerError):
+                    with self.helper.review_pair():
+                        pair=self.helper._review_pair
+                        self.helper.review_observation(state,[['V1']],None)
+                pid=__import__('json').loads(marker.read_text())['pid']
+                self.assertFalse(Path('/proc',str(pid)).exists())
+                self.assertIsNotNone(pair.process.returncode)
+                marker.unlink()
+
+    def test_pair_preserves_normal_git_subprocess_and_near_reader_limit(self):
+        state=self.paired_fixture();path=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        path.write_text(path.read_text()+"\ndef task_records(state):\n import subprocess\n return {'git':subprocess.run(['/usr/bin/git','--version'],capture_output=True,text=True,check=True).stdout,'data':'x'*1048000}\n")
+        self.files[str(path.relative_to(self.root))]=hashlib.sha256(path.read_bytes()).hexdigest()
+        original=self.helper.review_observation(state,[['V1']],None)
+        with self.helper.review_pair():
+            opening=self.helper.review_observation(state,[['V1']],None)
+            closing=self.helper.review_observation_with_dependencies(state,[['V1']],None)
+        self.assertEqual(opening,original);self.assertEqual(closing['observation'],original)
+
+    def test_pair_maximum_group_count_preserves_large_result_capacity(self):
+        from admission import digest
+        state=self.paired_fixture();path=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        path.write_text(path.read_text()+"\ndef prerequisite_issues(state,ids):return 'x'*1048000\n")
+        self.files[str(path.relative_to(self.root))]=hashlib.sha256(path.read_bytes()).hexdigest()
+        groups=[['V'+str(index)] for index in range(129)]
+        ordinary=self.helper.review_observation(state,groups,None);expected=digest(ordinary)
+        del ordinary
+        with self.helper.review_pair():
+            opening=self.helper.review_observation(state,groups,None)
+            self.assertEqual(digest(opening),expected);del opening
+            closing=self.helper.review_observation_with_dependencies(state,groups,None)
+            self.assertEqual(digest(closing['observation']),expected)
+
+    def test_pair_capability_selection_requires_current_outer_containment(self):
+        import pinned_helper
+        self.assertFalse(self.helper.supports_review_pair())
+        with patch.object(pinned_helper,'_PAIR_CONTAINMENT',(os.getpid(),'fixture','a'*32,'/system.slice/fixture.service')):
+            with patch.dict(os.environ,{'INVOCATION_ID':'b'*32}):
+                with self.assertRaisesRegex(RuntimeError,'invocation'):self.helper.supports_review_pair()
+            with patch.dict(os.environ,{'INVOCATION_ID':'a'*32}),patch('pinned_helper.Path.read_text',return_value='0::/other'):
+                with self.assertRaisesRegex(RuntimeError,'containment'):self.helper.supports_review_pair()
+            with patch.dict(os.environ,{'INVOCATION_ID':'a'*32}),patch('pinned_helper.Path.read_text',return_value='0::/system.slice/fixture.service'),patch.object(pinned_helper,'_review_pair_available',return_value=False):
+                self.assertFalse(self.helper.supports_review_pair())
+
+    def test_pair_reverifies_pins_before_closing_and_reaps_after_callback_failure(self):
+        state=self.paired_fixture()
+        for failure in ('pins','callback'):
+            with self.subTest(failure=failure):
+                with self.assertRaises(PairedReviewWorkerError):
+                    with self.helper.review_pair():
+                        self.helper.review_observation(state,[['V1']],None);pair=self.helper._review_pair
+                        if failure=='callback':raise ValueError('controller check failed')
+                        path=self.root/'skills/deep-loop/scripts/deep_loop.py';original=path.read_text()
+                        path.write_text(original+'\n# changed pin\n')
+                        try:self.helper.review_observation(state,[['V1']],None)
+                        finally:path.write_text(original)
+                self.assertIsNotNone(pair.process.returncode);self.assertIsNone(self.helper._review_pair)
+
+    def test_pair_protocol_rejects_oversized_partial_and_extra_frames(self):
+        import pinned_helper
+        state=self.paired_fixture()
+        for mode in ('oversized','partial','extra'):
+            program="""import json,os
+size=int.from_bytes(os.read(0,8),'big');data=bytearray()
+while len(data)<size:data.extend(os.read(0,size-len(data)))
+request=json.loads(data)
+"""
+            if mode=='oversized':program+="os.write(1,(request['limit']+1).to_bytes(8,'big'))\n"
+            elif mode=='partial':program+="os.write(1,b'bad')\n"
+            else:program+="os.write(1,(2).to_bytes(8,'big')+b'{}')\nsize=int.from_bytes(os.read(0,8),'big');data=bytearray()\nwhile len(data)<size:data.extend(os.read(0,size-len(data)))\nos.write(1,(2).to_bytes(8,'big')+b'{}'+b'x')\n"
+            with self.subTest(mode=mode),patch.object(pinned_helper,'PAIR_COORDINATOR',program):
+                with self.assertRaises(PairedReviewWorkerError):
+                    with self.helper.review_pair():
+                        pair=self.helper._review_pair
+                        self.helper.review_observation(state,[['V1']],None)
+                        self.helper.review_observation(state,[['V1']],None)
+                self.assertIsNotNone(pair.process.returncode)
+
+    def test_pair_deadline_covers_between_pass_controller_work_without_reset(self):
+        import time
+        state=self.paired_fixture()
+        with self.assertRaises(PairedReviewWorkerError):
+            with self.helper.review_pair():
+                self.helper.review_observation(state,[['V1']],None);pair=self.helper._review_pair
+                pair.deadline=time.monotonic()-1
+                self.helper.review_observation(state,[['V1']],None)
+        self.assertIsNotNone(pair.process.returncode)
+
+    def test_pair_context_rejects_incomplete_nested_and_nonreview_operations(self):
+        state=self.paired_fixture()
+        with self.assertRaises(PairedReviewWorkerError):
+            with self.helper.review_pair():
+                self.helper.review_observation(state,[['V1']],None);pair=self.helper._review_pair
+        self.assertIsNotNone(pair.process.returncode)
+        with self.assertRaisesRegex(ValueError,'Nested'):
+            with self.helper.review_pair():
+                with self.helper.review_pair():pass
+        with self.assertRaisesRegex(ValueError,'Fixed paired full review'):
+            with self.helper.review_pair():self.helper.task_records(state)
+
+    def test_pair_reader_output_bound_is_still_enforced(self):
+        state=self.paired_fixture();path=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        path.write_text(path.read_text().replace("return {'counter':len(_counter),'clean':proof_binding._CONTEXT.get() is None}","return 'x'*1048577"))
+        self.files[str(path.relative_to(self.root))]=hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaises(PairedReviewWorkerError):
+            with self.helper.review_pair():
+                pair=self.helper._review_pair;self.helper.review_observation(state,[['V1']],None)
+        self.assertIsNotNone(pair.process.returncode)

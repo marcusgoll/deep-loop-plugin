@@ -77,9 +77,10 @@ class WorkerTests(unittest.TestCase):
     def test_qualification_service_checks_its_actual_invocation_and_timeouts(self):
         from types import SimpleNamespace
         service='deep-loop-qualification-supervisor.service';invocation='a'*32
-        outputs=[invocation,'t 45000000','t 5000000','t 5000000']
-        with patch.dict('os.environ',{'INVOCATION_ID':invocation},clear=True),patch('private_worker.subprocess.run',side_effect=[SimpleNamespace(stdout=x) for x in outputs]) as process:
+        outputs=[invocation,'t 45000000','t 5000000','t 5000000','s \"control-group\"','s \"/system.slice/'+service+'\"']
+        with patch.dict('os.environ',{'INVOCATION_ID':invocation},clear=True),patch('private_worker.Path.read_text',return_value='0::/system.slice/'+service),patch('private_worker.qualify_review_pair_containment') as qualified,patch('private_worker.subprocess.run',side_effect=[SimpleNamespace(stdout=x) for x in outputs]) as process:
             qualify_service(service)
+        qualified.assert_called_once_with(service,invocation,'/system.slice/'+service)
         self.assertEqual(process.call_args_list[0].args[0][2],service)
         self.assertEqual(process.call_args_list[1].args[0][3],'/org/freedesktop/systemd1/unit/deep_2dloop_2dqualification_2dsupervisor_2eservice')
 
@@ -87,6 +88,26 @@ class WorkerTests(unittest.TestCase):
         with patch('private_worker.subprocess.run') as process:
             with self.assertRaisesRegex(ValueError,'identity'):qualify_service('other.service')
         process.assert_not_called()
+
+    def test_qualification_rejects_wrong_kill_mode_or_actual_cgroup(self):
+        from types import SimpleNamespace
+        service='deep-loop-qualification-supervisor.service';invocation='a'*32
+        for mode,actual in [('process','0::/system.slice/'+service),('control-group','0::/foreign.scope')]:
+            outputs=[invocation,'t 45000000','t 5000000','t 5000000',
+                     's '+__import__('json').dumps(mode),'s '+__import__('json').dumps('/system.slice/'+service)]
+            with self.subTest(mode=mode,actual=actual),patch.dict('os.environ',{'INVOCATION_ID':invocation},clear=True),patch('private_worker.Path.read_text',return_value=actual),patch('private_worker.qualify_review_pair_containment') as qualified,patch('private_worker.subprocess.run',side_effect=[SimpleNamespace(stdout=x) for x in outputs]):
+                with self.assertRaisesRegex(ValueError,'containment'):qualify_service(service)
+                qualified.assert_not_called()
+
+    def test_fatal_pair_error_stops_timer_and_never_becomes_worker_wait(self):
+        from pinned_helper import PairedReviewWorkerError
+        from private_worker import main
+        from unittest.mock import Mock
+        for stop_failure in (None,RuntimeError('fixture timer stop failed')):
+            with self.subTest(stop_failure=stop_failure),patch('private_worker.os.geteuid',return_value=0),patch('private_worker.TrustedStore',return_value=self.store),patch('private_worker.qualify_service'),patch('private_worker.run',side_effect=PairedReviewWorkerError('fixture containment failure')),patch('private_worker.subprocess.run',side_effect=stop_failure) as stop,patch('builtins.print') as output:
+                with self.assertRaises(RuntimeError):main()
+                stop.assert_called_once_with(['/usr/bin/systemctl','stop','deep-loop-private-worker.timer'],check=True,timeout=5)
+                output.assert_not_called()
 
     def test_qualification_service_rejects_invocation_or_native_timeout_drift(self):
         from types import SimpleNamespace
