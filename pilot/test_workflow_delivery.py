@@ -124,6 +124,19 @@ class FixtureController:
     def authenticate_workflow_parent_acceptance(self):
         self._workflow_mutation_authority();self._unowned();require_candidate_snapshot(self.policy,self.snapshot)
         return copy.deepcopy(self.cut)
+    def _workflow_inspection_cut(self):
+        return copy.deepcopy((self.binding,self.state,self.journal.read(),self.proof))
+    def _workflow_close_inspection_cut(self,expected,records,histories,quiescence):
+        self._workflow_close_retained_histories(records,histories)
+        self._workflow_source_guard(self.proof)
+        if self._workflow_inspection_cut()!=expected or self._workflow_quiescence()!=quiescence:
+            raise ValueError('Literal inspection cut changed')
+    def _workflow_retained_record_cut(self,owners):
+        if owners:raise ValueError('Literal fixture has no retained native chains')
+        return {}
+    def _workflow_close_retained_histories(self,records,histories):
+        if records or histories:raise ValueError('Literal fixture has no retained native chains')
+        self._workflow_mutation_authority();self._unowned()
     def _contract(self):require_active(self.store,self.contract_digest)
     def _workflow_mutation_authority(self,**kwargs):
         require_active(self.store,self.contract_digest)
@@ -160,6 +173,36 @@ class WorkflowDeliveryTests(unittest.TestCase):
             self.assertEqual(self.adapter.step(),WAIT)
             if self.adapter._read('commit') is not None:return
         self.fail('Commit publication failed')
+
+    def test_history_inspection_drift_blocks_closing_guard_without_provider_io(self):
+        for mutation in ('candidate','proof','checkpoint','binding','journal','parent','intent','owner','expiry','projection'):
+            with self.subTest(mutation=mutation):
+                self.setUp();c=self.controller
+                owner={'fixture':'owned native history'}
+                expected={'owner':owner,'checkpoint_sha256':digest(c.state),'history':'accepted'}
+                c.cut['outcome']['task_histories']={'task':expected}
+                self.adapter.cut=copy.deepcopy(c.cut)
+                def historical(_):
+                    actual={**expected,'kind':'historical_workflow_task_provenance','final_proof_verified':False}
+                    if mutation=='candidate':(c.candidate/'source.txt').write_text('late edit')
+                    elif mutation=='proof':c.proof['outcome_proof']['required']='missing'
+                    elif mutation=='checkpoint':c.state['unverified']='late state'
+                    elif mutation=='binding':
+                        name=c.contract_digest+'.workflow.json';c.store.remove(name);c.store.create(name,{**c.binding,'changed':True})
+                    elif mutation=='journal':c.journal.read=lambda:('changed',{})
+                    elif mutation in ('parent','intent'):
+                        suffix='.parent-acceptance.json' if mutation=='parent' else '.parent-acceptance-intent.json'
+                        name=c.contract_digest+suffix;old=c.store.read(name);c.store.remove(name);c.store.create(name,{**old,'changed':True})
+                    elif mutation=='owner':c.owned=True
+                    elif mutation=='expiry':c.active=False
+                    else:actual['history']='substituted'
+                    return actual
+                c._workflow_retained_record_cut=lambda owners:{}
+                c._workflow_close_retained_histories=lambda records,histories:None
+                c._workflow_task_provenance_locked=historical
+                with self.assertRaises(ValueError):self.adapter._locked_history_guard()
+                self.assertFalse(self.provider.calls)
+                self.assertIsNone(self.adapter._read('complete'))
 
     def test_authority_cut_uses_only_invocation_local_origin_and_rejects_get_drift(self):
         c=self.controller;calls=[]

@@ -57,6 +57,38 @@ class PinnedHelperTests(unittest.TestCase):
         self.assertEqual(self.helper.completed_state({'fixture':True},self.root),[{'fixture':True},str(self.root)])
         self.assertEqual(self.helper.verified_delivery_state({},'a'*40,'readback',self.root),[{},'a'*40,'readback',str(self.root)])
 
+    def test_dependency_collector_crosses_isolated_proxy_and_rejects_drift(self):
+        with self.assertRaisesRegex(ValueError,'unavailable or failed'):
+            self.helper.review_dependency_cut({'verificationContract':{'path':'/missing'}},[['V1']])
+        source=Path(__file__).with_name('proof_binding_source.py')
+        if not source.exists():source=Path(__file__).resolve().parents[1]/'skills/deep-loop/scripts/proof_binding.py'
+        module=self.root/'skills/deep-loop/scripts/proof_binding.py';module.write_bytes(source.read_bytes())
+        self.files[str(module.relative_to(self.root))]=hashlib.sha256(module.read_bytes()).hexdigest()
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("""from pathlib import Path
+import proof_binding as proof
+def task_records(state):return [[],{}]
+def contract_definition_issues(state):return []
+def contract_data(path,verify_files=True):return proof.read(path)
+def prerequisite_issues(state,ids):proof.read(state['receipt']);return []
+def validation_issues(state,stage,archive=None):
+ proof.sha(state['artifact'])
+ if state.get('drift'):Path(state['artifact']).write_bytes(b'late drift')
+ return []
+""")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        contract=self.root/'contract.json';contract.write_text('{"verifiers":[]}')
+        receipt=self.root/'receipt.json';receipt.write_text('[]')
+        artifact=self.root/'artifact';artifact.write_bytes(b'passed')
+        state={'verificationContract':{'path':str(contract)},'receipt':str(receipt),'artifact':str(artifact)}
+        with patch.object(self.helper,'_verify',wraps=self.helper._verify) as verify:
+            cut=self.helper.review_dependency_cut(state,[['V1']],self.root)
+            self.assertEqual(verify.call_count,1)
+        self.assertEqual(set(cut),{str(contract),str(receipt),str(artifact)})
+        self.assertEqual(cut[str(artifact)]['sha256'],hashlib.sha256(b'passed').hexdigest())
+        with self.assertRaisesRegex(ValueError,'unavailable or failed'):
+            self.helper.review_dependency_cut({**state,'drift':True},[['V1']],self.root)
+
     def test_fixed_definition_batch_uses_unchanged_legacy_functions_and_rechecks_pins(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py'
         p.write_text("from pathlib import Path\ndef task_records(state):return [state['tasks'],{'task':state['tasks'][0]}]\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):\n assert isinstance(path,Path) and verify_files is False\n return {'path':str(path),'verifiers':[]}\n")

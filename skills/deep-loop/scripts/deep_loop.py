@@ -315,13 +315,13 @@ def resolution_context(state, archive=None):
     binding = state.get('proofResolution')
     if binding is None:
         return proof_binding.files_context()
-    path = (Path(archive)/'resolution.json').resolve() if archive else Path(binding['path']).resolve()
-    if hashlib.sha256(path.read_bytes()).hexdigest() != binding['sha256']:
+    path = Path(archive)/'resolution.json' if archive else Path(binding['path'])
+    if hashlib.sha256(proof_binding.dependency_bytes(path)).hexdigest() != binding['sha256']:
         raise ValueError('Preserved resolution map changed')
-    mapping = json.loads(path.read_text(encoding='utf-8'))
+    mapping = json.loads(proof_binding.dependency_bytes(path).decode('utf-8'))
     if mapping.get('schemaVersion') != 1 or not isinstance(mapping.get('files'), dict):
         raise ValueError('Invalid preserved resolution map')
-    return proof_binding.files_context(path.parent, mapping['files'])
+    return proof_binding.files_context(path.resolve().parent, mapping['files'])
 
 
 def contract_issues(state, stage, archive=None):
@@ -826,6 +826,13 @@ def review_observation(state,groups,archive=None):
     result['prerequisites']=[prerequisite_issues(state,ids) for ids in groups]
     result['review_issues']=validation_issues(state,'ship' if state.get('complete') is True else 'review',archive)
     return result
+
+
+def review_dependency_cut(state,groups,archive=None):
+    """Bounded read-only full-review file cut; no durable/public proof schema."""
+    with proof_binding.dependency_context() as records:
+        review_observation(state,groups,archive)
+        return proof_binding.close_dependency_cut(records)
 
 
 def checkpoint_observation(state,mode,groups,archive,derivation):

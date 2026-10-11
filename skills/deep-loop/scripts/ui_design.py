@@ -4,7 +4,8 @@ No design generation, approval issuance, capture engine, or transition controlle
 import argparse
 from contextlib import contextmanager
 from contextvars import ContextVar
-from proof_binding import logical, resolve_file, files_context
+from proof_binding import logical, resolve_file, files_context, dependency_bytes
+from io import BytesIO
 import datetime
 import hashlib
 import json
@@ -32,10 +33,10 @@ def inspection_only():
 OPERATORS = {'==': operator.eq, '<=': operator.le, '>=': operator.ge, '<': operator.lt, '>': operator.gt}
 
 def read(path):
-    return json.loads(resolve_file(path).read_text(encoding='utf-8-sig'))
+    return json.loads(dependency_bytes(resolve_file(path)).decode('utf-8-sig'))
 
 def sha(path):
-    return hashlib.sha256(resolve_file(path).read_bytes()).hexdigest()
+    return hashlib.sha256(dependency_bytes(resolve_file(path))).hexdigest()
 
 def design_sha(design):
     body = {k: v for k, v in design.items() if k != 'approval'}
@@ -59,7 +60,7 @@ def schema_check(data, name):
         raise ValueError('; '.join(e.message for e in errors))
 
 def bound_file(record, base):
-    path = (logical(base) / record['path']).resolve()
+    path = logical(base) / record['path']
     if sha(path) != record['sha256']:
         raise ValueError('Bound file changed: ' + str(path))
     return resolve_file(path)
@@ -124,7 +125,7 @@ def capture_data(capture, capture_path, viewport):
     box = [crop[0]*scale, crop[1]*scale, (crop[0]+crop[2])*scale, (crop[1]+crop[3])*scale]
     if any(not float(n).is_integer() for n in box):
         raise ValueError('Capture density produces fractional pixel crop')
-    with Image.open(original) as image, Image.open(actual) as target:
+    with Image.open(BytesIO(dependency_bytes(original))) as image, Image.open(BytesIO(dependency_bytes(actual))) as target:
         if (image.size != (observed['width']*scale, observed['height']*scale)
                 or target.size != (viewport['width']*scale, viewport['height']*scale)
                 or image.crop(tuple(map(int, box))).convert('RGBA').tobytes() != target.convert('RGBA').tobytes()):
@@ -351,7 +352,7 @@ def compare(contract_path, verifier_id, capture_path, output, goal_id):
     if read(environment) != capture['conditions']:
         raise ValueError('Capture environment differs from declared conditions')
     from PIL import Image
-    with Image.open(expected) as image:
+    with Image.open(BytesIO(dependency_bytes(expected))) as image:
         if list(image.size) != [viewport[k] * viewport['device_scale_factor'] for k in ('width', 'height')]:
             raise ValueError('Reference pixel dimensions do not match the canonical viewport/density')
     started = datetime.datetime.now(datetime.timezone.utc).isoformat()
@@ -437,7 +438,7 @@ def evidence_issues(contract, contract_path, state):
                     viewport = next(v for v in design['canonical_viewports'] if v['id'] == fixture['viewport'])
                     captured = capture_data(capture, bound_file(capture_artifact, logical(record_path).parent), viewport)
                     from PIL import Image
-                    with Image.open(captured) as original, Image.open(bound_file(actual, logical(record_path).parent)) as preserved:
+                    with Image.open(BytesIO(dependency_bytes(captured))) as original, Image.open(BytesIO(dependency_bytes(bound_file(actual, logical(record_path).parent)))) as preserved:
                         if original.size != preserved.size or original.convert('RGBA').tobytes() != preserved.convert('RGBA').tobytes():
                             raise ValueError('Preserved pixel actual differs from the bound capture')
                     if (source_identity(Path(capture['source_manifest'])) != source
@@ -456,7 +457,7 @@ def evidence_issues(contract, contract_path, state):
                             boxes = [region(','.join(map(str, box))) for box in threshold['regions']]
                         except argparse.ArgumentTypeError as error:
                             raise ValueError(str(error)) from error
-                        with Image.open(bound_file(reference, base)) as expected_image, Image.open(bound_file(actual, logical(record_path).parent)) as actual_image:
+                        with Image.open(BytesIO(dependency_bytes(bound_file(reference, base)))) as expected_image, Image.open(BytesIO(dependency_bytes(bound_file(actual, logical(record_path).parent)))) as actual_image:
                             if getattr(expected_image, 'n_frames', 1) != 1 or getattr(actual_image, 'n_frames', 1) != 1:
                                 raise ValueError('Use single-frame captures')
                             _, measured_comparison, measured_regions = compare_images(

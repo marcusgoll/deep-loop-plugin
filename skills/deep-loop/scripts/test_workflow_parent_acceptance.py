@@ -220,6 +220,199 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
                 if corruption=='substituted':self.graph.store.remove(name)
                 self.graph.store.create(name,original)
 
+    def test_later_history_read_cannot_replace_an_earlier_native_invocation(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('History guard cannot call provider'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        owners=[row['owner'] for row in adapter.cut['outcome']['task_histories'].values()]
+        self.assertGreater(len(owners),1)
+        history=self.controller._workflow_task_provenance_locked
+        before=self.graph.checkpoint.read_bytes();journal=self.journal.read()
+        for suffix in ('.workflow-attempt.json','.invocation.json','.task-proof.json',
+                       '.task-acceptance-intent.json','.task-acceptance.json',
+                       '.task-credit-intent.json','.task-credit.json'):
+            with self.subTest(suffix=suffix):
+                name=owners[0]['unit']+suffix;original=self.graph.store.read(name);called=[]
+                def changed(owner):
+                    actual=history(owner);called.append(owner)
+                    if owner==owners[-1]:self.graph.store.remove(name)
+                    return actual
+                try:
+                    with patch.object(self.controller,'_workflow_task_provenance_locked',side_effect=changed):
+                        with self.assertRaises((ValueError,FileNotFoundError)):adapter._locked_history_guard()
+                    self.assertEqual(len(called),len(owners))
+                    self.assertEqual(self.graph.checkpoint.read_bytes(),before);self.assertEqual(self.journal.read(),journal)
+                finally:
+                    try:self.graph.store.read(name)
+                    except FileNotFoundError:self.graph.store.create(name,original)
+
+    def test_history_closure_reobserves_native_generation_and_post_guard_records(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('History guard cannot call provider'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        owners=[row['owner'] for row in adapter.cut['outcome']['task_histories'].values()]
+        history=self.controller._workflow_task_provenance_locked;observe=self.backend.observe_owned
+        for mutation in ('generation','populated','restarted'):
+            with self.subTest(mutation=mutation):
+                changed=False
+                def historical(owner):
+                    nonlocal changed
+                    result=history(owner)
+                    if owner==owners[-1]:changed=True
+                    return result
+                def native(plan,contract,owner,invocation):
+                    result=observe(plan,contract,owner,invocation)
+                    if changed and owner==owners[0]:
+                        if mutation=='generation':result={**result,'invocation_id':'b'*32}
+                        elif mutation=='populated':result={**result,'cgroup_empty':False}
+                        else:result={**result,'active_state':'active','execution_finished':False}
+                    return result
+                with patch.object(self.controller,'_workflow_task_provenance_locked',side_effect=historical),patch.object(self.backend,'observe_owned',side_effect=native):
+                    with self.assertRaisesRegex(ValueError,'native generation changed'):adapter._locked_history_guard()
+        name=owners[0]['unit']+'.invocation.json';original=self.graph.store.read(name)
+        source=self.controller._workflow_source_guard
+        def late(*args,**kwargs):
+            source(*args,**kwargs)
+            # Only alter during the closing current-proof/source guard.
+            if len(seen)==len(owners):self.graph.store.remove(name)
+        seen=[]
+        def inspected(owner):
+            value=history(owner);seen.append(owner);return value
+        try:
+            with patch.object(self.controller,'_workflow_task_provenance_locked',side_effect=inspected),patch.object(self.controller,'_workflow_source_guard',side_effect=late):
+                with self.assertRaises((ValueError,FileNotFoundError)):adapter._locked_history_guard()
+        finally:
+            self.graph.store.create(name,original)
+
+    def test_final_native_observation_cannot_invalidate_current_outcome_cut(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('No provider calls permitted'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        owners=[row['owner'] for row in adapter.cut['outcome']['task_histories'].values()]
+        observe=self.backend.observe_owned;read=self.controller.journal.read
+        for reader in (self.controller.observe_workflow_outcome,adapter._locked_history_guard):
+            with self.subTest(reader=reader.__name__):
+                counts={};changed=False
+                def native(plan,contract,owner,invocation):
+                    nonlocal changed
+                    result=observe(plan,contract,owner,invocation)
+                    counts[owner['unit']]=counts.get(owner['unit'],0)+1
+                    # Each owner's second native observation is the final pass.
+                    if owner==owners[-1] and counts[owner['unit']]==2:changed=True
+                    return result
+                def journal():
+                    result=read()
+                    return ('f'*40,result[1]) if changed else result
+                with patch.object(self.backend,'observe_owned',side_effect=native),patch.object(self.controller.journal,'read',side_effect=journal):
+                    with self.assertRaises(ValueError):reader()
+                self.assertTrue(changed)
+
+    def test_last_native_pass_closes_helper_generation_and_current_input_drift(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('No provider calls permitted'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        owners=[row['owner'] for row in adapter.cut['outcome']['task_histories'].values()]
+        observe=self.backend.observe_owned;read=self.controller.journal.read
+        proof=self.controller.workflow_gate.outcome_proof;source=self.controller._workflow_source_guard
+        terminal_name=self.graph.key+'.workflow-terminal-complete.json'
+        self.graph.store.create(terminal_name,{'fixture':'exact optional completion record'})
+        for mode in ('generation','journal','terminal'):
+            for reader in (self.controller.observe_workflow_outcome,adapter._locked_history_guard):
+                with self.subTest(mode=mode,reader=reader.__name__):
+                    counts={};changed=False
+                    def native(plan,contract,owner,invocation):
+                        nonlocal changed
+                        result=observe(plan,contract,owner,invocation)
+                        counts[owner['unit']]=counts.get(owner['unit'],0)+1
+                        if mode=='generation' and changed and owner==owners[0]:
+                            return {**result,'invocation_id':'c'*32}
+                        if mode in ('journal','terminal') and owner==owners[-1] and counts[owner['unit']]==3:
+                            changed=True
+                            if mode=='terminal':self.graph.store.remove(terminal_name)
+                        return result
+                    def after_helper(value):
+                        nonlocal changed
+                        if mode=='generation' and counts.get(owners[-1]['unit'],0)>=2:changed=True
+                        return value
+                    def outcome():return after_helper(proof())
+                    def source_guard(*args,**kwargs):return after_helper(source(*args,**kwargs))
+                    def journal():
+                        result=read()
+                        return ('e'*40,result[1]) if mode=='journal' and changed else result
+                    with patch.object(self.backend,'observe_owned',side_effect=native),patch.object(self.controller.journal,'read',side_effect=journal),patch.object(self.controller.workflow_gate,'outcome_proof',side_effect=outcome),patch.object(self.controller,'_workflow_source_guard',side_effect=source_guard):
+                        with self.assertRaises(ValueError):reader()
+                    self.assertTrue(changed)
+                    if mode=='terminal':self.graph.store.create(terminal_name,{'fixture':'exact optional completion record'})
+
+    def test_last_native_pass_cannot_drift_external_proof_files(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('No provider calls permitted'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        owners=[row['owner'] for row in adapter.cut['outcome']['task_histories'].values()]
+        state=json.loads(self.graph.checkpoint.read_text())
+        contract=Path(state['verificationContract']['path'])
+        spec=json.loads(contract.read_text())
+        verifier=next(v for v in spec['verifiers'] if v.get('proof',{}).get('mode')=='bound')
+        artifact=(contract.parent/verifier['proof']['artifacts'][0]['path']).resolve()
+        receipt=Path(state['checks'][0]['receipt']['path'])
+        observe=self.backend.observe_owned
+        for path in (contract,receipt,artifact):
+            original=path.read_bytes()
+            for reader in (self.controller.observe_workflow_outcome,adapter._locked_history_guard):
+                with self.subTest(path=str(path),reader=reader.__name__):
+                    counts={};changed=False
+                    def native(plan,enrollment,owner,invocation):
+                        nonlocal changed
+                        result=observe(plan,enrollment,owner,invocation)
+                        counts[owner['unit']]=counts.get(owner['unit'],0)+1
+                        if owner==owners[-1] and counts[owner['unit']]==3:
+                            path.write_bytes(original+b'\n');changed=True
+                        return result
+                    try:
+                        with patch.object(self.backend,'observe_owned',side_effect=native):
+                            with self.assertRaises(ValueError):reader()
+                        self.assertTrue(changed)
+                    finally:path.write_bytes(original)
+
+    def test_missing_dependency_collector_cannot_authorize_history_closure(self):
+        self.prepared(delivery_capability=True)
+        with patch.object(self.controller.workflow_gate.helper,'review_dependency_cut',None):
+            with self.assertRaisesRegex(ValueError,'lacks required proof dependency collection'):
+                self.controller._workflow_inspection_cut()
+
+    def test_public_and_aggregate_history_readers_close_retained_records(self):
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        outcome=self.controller.observe_workflow_outcome()
+        owners=[row['owner'] for row in outcome['task_histories'].values()]
+        name=owners[0]['unit']+'.invocation.json';original=self.graph.store.read(name)
+        observe=self.backend.observe_owned
+        def native(*args):
+            result=observe(*args);self.graph.store.remove(name);return result
+        try:
+            with patch.object(self.backend,'observe_owned',side_effect=native):
+                with self.assertRaises(FileNotFoundError):self.controller.authenticate_workflow_task_provenance(owners[0])
+        finally:self.graph.store.create(name,original)
+        provenance=self.controller.authenticate_workflow_task_provenance
+        def later(owner):
+            result=provenance(owner)
+            if owner==owners[-1]:self.graph.store.remove(name)
+            return result
+        try:
+            with patch.object(self.controller,'authenticate_workflow_task_provenance',side_effect=later):
+                with self.assertRaises(FileNotFoundError):self.controller.observe_workflow_outcome()
+        finally:self.graph.store.create(name,original)
+
     def test_direct_checkpoint_and_terminal_writers_reject_mid_get_history_corruption(self):
         import sys
         from workflow_delivery import WorkflowDelivery

@@ -7,6 +7,7 @@ from model-controlled code or accept its calls through a public workflow.
 import contextlib
 import copy
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -1138,6 +1139,7 @@ class PrivateController:
                 owners[task_id]=owner;credits_by_task[task_id]=credit
             if set(owners)!=set(outcome['tasks']):
                 raise ValueError('Every workflow outcome task requires durable credited acceptance')
+            retained=self._workflow_retained_record_cut(list(owners.values()))
         # Public readers take their own credential locks. Revalidate the entire
         # cut after sequential inspection; unlocked snapshots grant no mutation.
         histories={task_id:self.authenticate_workflow_task_provenance(owner)
@@ -1145,6 +1147,8 @@ class PrivateController:
         with self.store.lock():
             self._contract();self._unowned()
             self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+            inspection=self._workflow_inspection_cut()
+            self._workflow_close_retained_histories(retained,list(histories.values()))
             if (gate.outcome_proof()!=outcome or self.journal.read()!=snapshot or
                     any(h['journal_revision']!=snapshot[0] or
                         h['progress_identity']!=credits_by_task[task_id]['progress_receipt'] or
@@ -1155,6 +1159,9 @@ class PrivateController:
                 raise ValueError('Workflow outcome acceptance cut changed during inspection')
             if self._workflow_quiescence()!=quiescence:
                 raise ValueError('Workflow account identity changed during outcome inspection')
+            if self._workflow_retained_record_cut(list(owners.values()))!=retained:
+                raise ValueError('Retained records changed during closing outcome proof')
+            self._workflow_close_inspection_cut(inspection,retained,list(histories.values()),quiescence)
             # The opening and closing aggregate proofs authenticate these exact
             # current observations. Provenance above still independently checks
             # every retained chain and stopped native owner. Reuse is confined
@@ -1181,6 +1188,115 @@ class PrivateController:
             return {**history,'kind':'historical_workflow_task_acceptance',
                     'current_observation':current,'final_proof_verified':True}
 
+    def _workflow_inspection_cut(self,*,proof_files=None):
+        """Exact operation-local inputs; no helper process or derived proof."""
+        from workflow_gate import checkpoint_bytes
+        suffixes=('approval','window','workflow','workflow-binding-intent','workflow-binding-complete',
+                  'workflow-helper','workflow-helper-intent','workflow-helper-complete',
+                  'parent-acceptance-intent','parent-acceptance','workflow-delivery-plan',
+                  'workflow-delivery-complete','workflow-delivery-checkpoint-intent',
+                  'workflow-delivery-checkpoint','workflow-terminal-intent','workflow-terminal-complete')
+        records={}
+        for suffix in suffixes:
+            try:records[suffix]=self.store.read(self.contract_digest+'.'+suffix+'.json')
+            except FileNotFoundError:records[suffix]=None
+        binding=records['workflow']
+        payload=checkpoint_bytes(Path(binding['checkpoint_path']));state=json.loads(payload)
+        ids=sorted({identifier for group in binding['task_verifiers'].values() for identifier in group})
+        archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
+        collector=getattr(self.workflow_gate.helper,'review_dependency_cut',None)
+        if proof_files is None and not callable(collector):
+            raise ValueError('Pinned helper lacks required proof dependency collection capability')
+        files=collector(state,[ids],archive) if proof_files is None else proof_files
+        return {'records':records,'checkpoint':checkpoint_bytes(Path(binding['checkpoint_path'])),
+                'journal':self.journal.read(),'source':self.workflow_gate.candidate_snapshot(binding),'proof_files':files}
+
+    def _workflow_reobserve_proof_files(self,expected):
+        """Controller-only bounded byte closure; helper code stays isolated."""
+        if not isinstance(expected,dict) or not expected or len(expected)>512:
+            raise ValueError('Bounded nonempty proof dependency cut required')
+        observed={};total=0
+        for lexical,row in expected.items():
+            if (not isinstance(lexical,str) or os.path.abspath(lexical)!=lexical or
+                    not isinstance(row,dict) or set(row)!={'physical_path','sha256','size','device','inode','mode'} or
+                    type(row['size']) is not int or not 0<=row['size']<=67108864):
+                raise ValueError('Malformed proof dependency identity')
+            path=Path(lexical).resolve();directory=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+            try:
+                for component in path.parts[1:-1]:
+                    child=os.open(component,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+                    os.close(directory);directory=child
+                fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+                with os.fdopen(fd,'rb') as stream:
+                    before=os.fstat(stream.fileno())
+                    if not stat.S_ISREG(before.st_mode):raise ValueError('Regular proof dependency required')
+                    payload=stream.read(67108865);after=os.fstat(stream.fileno())
+                if (len(payload)>67108864 or Path(lexical).resolve()!=path or
+                        (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=
+                        (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)):
+                    raise ValueError('Proof dependency changed during controller read')
+            finally:os.close(directory)
+            total+=len(payload)
+            if total>268435456:raise ValueError('Proof dependency total exceeds bound')
+            observed[lexical]={'physical_path':str(path),'sha256':hashlib.sha256(payload).hexdigest(),
+                'size':len(payload),'device':after.st_dev,'inode':after.st_ino,'mode':stat.S_IMODE(after.st_mode)}
+        if observed!=expected:raise ValueError('Workflow proof dependency changed after final native observation')
+        return observed
+
+    def _workflow_close_inspection_cut(self,expected,records,histories,quiescence):
+        """Close after the last helper, with bounded native and exact-input reads.
+
+        Root-owned unit control and the credential lock remain trust boundaries;
+        these observations do not form an atomic snapshot of the operating system.
+        """
+        self._workflow_close_retained_histories(records,histories)
+        if self._workflow_quiescence()!=quiescence:
+            raise ValueError('Workflow account identity changed during final inspection')
+        verify=getattr(self.workflow_gate.helper,'_verify',None)
+        if callable(verify):verify()
+        self._contract();self._unowned()
+        self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+        files=self._workflow_reobserve_proof_files(expected['proof_files'])
+        if self._workflow_inspection_cut(proof_files=files)!=expected:
+            raise ValueError('Workflow exact inspection inputs changed after final native observation')
+        if self._workflow_retained_record_cut([h['owner'] for h in histories])!=records:
+            raise ValueError('Retained records changed after final native observation')
+        self._workflow_mutation_authority(parent_recovery=True)
+
+    def _workflow_retained_record_cut(self,owners):
+        """Operation-local selected chains; no public receipt/schema change."""
+        records={}
+        for owner in owners:
+            if (not isinstance(owner,dict) or set(owner)!={'contract_digest','unit','plan_digest',
+                    'reservation_revision','run_id','run_attempt','session_id'} or
+                    owner['contract_digest']!=self.contract_digest or owner['unit'] in records):
+                raise ValueError('Retained history owner identity drift')
+            records[owner['unit']]={suffix:self.store.read(owner['unit']+suffix) for suffix in
+                ('.workflow-attempt.json','.invocation.json','.task-proof.json',
+                 '.task-acceptance-intent.json','.task-acceptance.json',
+                 '.task-credit-intent.json','.task-credit.json')}
+        return records
+
+    def _workflow_close_retained_histories(self,records,histories):
+        """Fresh native generation observations, then exact selected records."""
+        self._workflow_mutation_authority(parent_recovery=True);contract=self._contract()
+        owners=[]
+        for history in histories:
+            owner=history['owner'];owners.append(owner);chain=records[owner['unit']]
+            before=chain['.task-credit-intent.json']['before'];last=before['attempts'][-1]
+            reserved={**before,'attempts':before['attempts'][:-1]+[{**last,'status':'reserved','progress_receipt':None}]}
+            plan=launch_plan(reserved,self.contract_digest,run_id=owner['run_id'],
+                             run_attempt=owner['run_attempt'],session_id=owner['session_id'])
+            invocation=chain['.invocation.json']
+            if plan['unit']!=owner['unit'] or digest(plan)!=owner['plan_digest'] or invocation['owner']!=owner:
+                raise ValueError('Retained native closing ownership drift')
+            native=self.backend.observe_owned(plan,contract,owner,invocation['invocation_id'])
+            if native!=history['native']:
+                raise ValueError('Retained native generation changed during history inspection')
+        if self._workflow_retained_record_cut(owners)!=records:
+            raise ValueError('Retained records changed during history inspection')
+        self._unowned();self._workflow_mutation_authority(parent_recovery=True)
+
     def authenticate_workflow_task_provenance(self,owner):
         """Read one accepted historical task chain; never accept the parent.
 
@@ -1200,6 +1316,7 @@ class PrivateController:
                          'run_id','run_attempt','session_id'} or
                 owner['contract_digest']!=self.contract_digest):
             raise ValueError('Historical task owner identity drift')
+        retained=self._workflow_retained_record_cut([owner])
         selection=self._workflow_receipt(owner)
         gate=self.workflow_gate
         if selection is None or gate is None or gate.store is not self.store or gate.contract_digest!=self.contract_digest:
@@ -1256,7 +1373,7 @@ class PrivateController:
                          run_attempt=owner['run_attempt'],session_id=owner['session_id'])
         if plan['unit']!=unit or digest(plan)!=owner['plan_digest']:
             raise ValueError('Historical task launch ownership drift')
-        native=self.backend.observe_owned(plan,contract,owner,invocation['invocation_id'])
+        native=copy.deepcopy(self.backend.observe_owned(plan,contract,owner,invocation['invocation_id']))
         owned={k:native.get(k) for k in ('unit','active_state','cgroup_empty','ownership_verified')}
         if 'execution_finished' in native:owned['execution_finished']=native['execution_finished']
         if (native.get('invocation_id')!=invocation['invocation_id'] or
@@ -1272,6 +1389,8 @@ class PrivateController:
         # intervenes between inspecting its task row and comparing its cut.
         if (closing_binding,state)!=(binding,checkpoint) or self.journal.read()!=latest:
             raise ValueError('Historical task attribution cut changed during inspection')
+        if self._workflow_retained_record_cut([owner])!=retained:
+            raise ValueError('Retained task records changed during provenance inspection')
         return {'kind':'historical_workflow_task_provenance','owner':owner,
                 'invocation_id':invocation['invocation_id'],'native':native,
                 'task_id':selection['task_id'],'current_selection':selection,

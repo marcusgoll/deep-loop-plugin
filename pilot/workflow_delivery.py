@@ -82,8 +82,11 @@ class WorkflowDelivery:
         """Reauthenticate retained chains before direct checkpoint mutations."""
         self._locked_guard()
         c=self.controller;checkpoint=digest(c.workflow_gate._read()[1])
+        expected_histories=list(self.cut['outcome']['task_histories'].values())
+        owners=[row['owner'] for row in expected_histories]
+        retained=c._workflow_retained_record_cut(owners);histories=[]
         for expected in self.cut['outcome']['task_histories'].values():
-            actual=c._workflow_task_provenance_locked(expected['owner'])
+            actual=c._workflow_task_provenance_locked(expected['owner']);histories.append(actual)
             if actual['checkpoint_sha256']!=checkpoint:
                 raise ValueError('Workflow history checkpoint changed before publication')
             projected={k:v for k,v in expected.items() if k!='current_observation'}
@@ -91,7 +94,12 @@ class WorkflowDelivery:
             actual={**actual,'checkpoint_sha256':expected['checkpoint_sha256']}
             if actual!=projected:
                 raise ValueError('Workflow retained history changed before publication')
+        inspection=c._workflow_inspection_cut()
+        c._workflow_close_retained_histories(retained,histories)
         self._locked_guard()
+        if c._workflow_retained_record_cut(owners)!=retained:
+            raise ValueError('Retained records changed during closing publication proof')
+        c._workflow_close_inspection_cut(inspection,retained,histories,self.cut['outcome']['quiescence'])
 
     def _save(self, suffix, value):
         self._fresh()
