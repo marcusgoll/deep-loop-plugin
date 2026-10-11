@@ -809,6 +809,15 @@ def definition_observation(state):
             'contract':contract_data(Path(state['verificationContract']['path']),verify_files=False)}
 
 
+def outcome_observation(state,groups):
+    """Compose definition and prerequisite readers without full review gates."""
+    if not isinstance(groups,list) or not 1<=len(groups)<=129:
+        raise ValueError('Bounded outcome prerequisite groups required')
+    result=definition_observation(state)
+    result['prerequisites']=[prerequisite_issues(state,ids) for ids in groups]
+    return result
+
+
 def review_observation(state,groups,archive=None):
     """Compose current readers for one bounded host review observation."""
     if not isinstance(groups,list) or not 1<=len(groups)<=129:

@@ -602,6 +602,31 @@ class WorkflowGateTests(unittest.TestCase):
         self.f.source.write_text('drift')
         with self.assertRaisesRegex(ValueError,'proof blocked'):self.gate.outcome_proof()
 
+    def test_outcome_batch_matches_legacy_without_full_review_requirement(self):
+        from unittest.mock import patch
+        self.outcome_ready()
+        with patch.object(deep_loop,'outcome_observation',None):legacy=self.gate.outcome_proof()
+        with patch.object(deep_loop,'validation_issues',side_effect=AssertionError('full review required only by final review')):
+            self.assertEqual(self.gate.outcome_proof(),legacy)
+
+    def test_outcome_batch_malformed_result_never_falls_back(self):
+        from unittest.mock import patch
+        self.outcome_ready()
+        for observation in (None,{}, {'records':[[],{}],'issues':[],'contract':{},'prerequisites':[]}):
+            with self.subTest(observation=observation),patch.object(deep_loop,'outcome_observation',return_value=observation):
+                with self.assertRaisesRegex(ValueError,'Malformed'):self.gate.outcome_proof()
+
+    def test_outcome_batch_rejects_receipt_substitution_during_closing_observation(self):
+        from unittest.mock import patch
+        self.outcome_ready();original=deep_loop.outcome_observation;calls=[]
+        def changed(state,groups):
+            calls.append(None)
+            if len(calls)==2:
+                Path(self.f.state['checks'][0]['receipt']['path']).write_text('substituted closing receipt')
+            return original(state,groups)
+        with patch.object(deep_loop,'outcome_observation',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'blocked'):self.gate.outcome_proof()
+
     def test_review_batch_matches_legacy_and_rejects_changed_receipt(self):
         from unittest.mock import patch
         self.outcome_ready()

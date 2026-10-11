@@ -52,7 +52,7 @@ class WorkflowGate:
     def __init__(self, store, contract_digest, helper):
         self.store, self.contract_digest, self.helper = store, contract_digest, helper
 
-    def _read(self, *, review=False):
+    def _read(self, *, review=False, outcome=False):
         require_active(self.store, self.contract_digest)
         binding = self.store.read(self.contract_digest + '.workflow.json')
         try:
@@ -66,9 +66,9 @@ class WorkflowGate:
                     intent.get('binding_digest') != digest(binding) or
                     intent.get('approval_ref') != binding.get('approval_ref')):
                 raise ValueError('Workflow binding completion identity drift')
-        return self.validate_binding(binding,review=review)
+        return self.validate_binding(binding,review=review,outcome=outcome)
 
-    def validate_binding(self, binding, *, review=False):
+    def validate_binding(self, binding, *, review=False, outcome=False):
         """Inspect a proposed binding before its protected publication."""
         legacy_fields = {
                 'contract_digest', 'approval_ref', 'checkpoint_path', 'session_id',
@@ -123,22 +123,22 @@ class WorkflowGate:
                 state.get('verificationContract') != binding['verification_contract']):
             raise ValueError('Checkpoint parent identity drift')
         groups=None
-        if review:
+        if review or outcome:
             mapping=binding['task_verifiers'];tasks={t['id']:t for t in state.get('tasks',[])}
             groups=self._review_groups(mapping,tasks)
             archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
-            observation=self.helper.review_observation(state,groups,archive)
-            if (not isinstance(observation,dict) or set(observation)!={'records','issues','contract','prerequisites','review_issues'} or
+            observation=self.helper.review_observation(state,groups,archive) if review else self.helper.outcome_observation(state,groups)
+            if (not isinstance(observation,dict) or set(observation)!=({'records','issues','contract','prerequisites','review_issues'} if review else {'records','issues','contract','prerequisites'}) or
                     not isinstance(observation['prerequisites'],list) or len(observation['prerequisites'])!=len(groups) or
                     any(not isinstance(issues,list) or any(not isinstance(i,str) for i in issues)
-                        for issues in observation['prerequisites']+[observation['review_issues']])):
+                        for issues in observation['prerequisites']+([observation['review_issues']] if review else []))):
                 raise ValueError('Malformed bounded workflow review observation')
             definition={key:observation[key] for key in ('records','issues','contract')}
             observe=True
         else:
             observe=getattr(self.helper,'definition_observation',None)
             definition=observe(state) if callable(observe) else None
-        if review or callable(observe):
+        if review or outcome or callable(observe):
             if (not isinstance(definition,dict) or set(definition)!={'records','issues','contract'} or
                     not isinstance(definition['records'],(list,tuple)) or len(definition['records'])!=2 or
                     not isinstance(definition['issues'],list) or
@@ -168,7 +168,7 @@ class WorkflowGate:
         mapped = {i for ids in mapping.values() for i in ids}
         if mapped != blocking:
             raise ValueError('Task mapping must cover every parent blocking verifier exactly by ID')
-        if review:return binding,state,by_id,observation
+        if review or outcome:return binding,state,by_id,observation
         return binding, state, by_id
 
     def _review_groups(self,mapping,by_id):
@@ -311,6 +311,20 @@ class WorkflowGate:
         return result
 
     def outcome_proof(self):
+        """Fresh fixed prerequisite batches; outcome semantics only."""
+        binding=self.store.read(self.contract_digest+'.workflow.json')
+        if (not callable(getattr(self.helper,'outcome_observation',None)) or
+                not isinstance(binding.get('task_verifiers'),dict) or len(binding['task_verifiers'])>128):
+            return self._legacy_outcome_proof()
+        binding,state,by_id,opening=self._read(outcome=True)
+        proof=self._observed_outcome_at(binding,state,by_id,opening)
+        again,after,tasks,closing=self._read(outcome=True)
+        if (again!=binding or after!=state or
+                self._observed_outcome_at(again,after,tasks,closing)!=proof):
+            raise ValueError('Workflow outcome checkpoint changed during inspection')
+        return proof
+
+    def _legacy_outcome_proof(self):
         """Inspect all current integrated proof; never accept or deliver a parent.
 
         Task status/evidence here is input for the controller's historical
@@ -369,6 +383,11 @@ class WorkflowGate:
             raise ValueError('Workflow outcome has unfinished tasks')
         if observation['review_issues']:
             raise ValueError('Full workflow review blocked: '+'; '.join(observation['review_issues']))
+        return self._observed_outcome_at(binding,state,by_id,observation)
+
+    def _observed_outcome_at(self,binding,state,by_id,observation):
+        if any(task['status']!='done' for task in by_id.values()):
+            raise ValueError('Workflow outcome has unfinished tasks')
         prerequisites=observation['prerequisites']
         if prerequisites[0]:raise ValueError('Workflow outcome proof blocked: '+'; '.join(prerequisites[0]))
         tasks={}

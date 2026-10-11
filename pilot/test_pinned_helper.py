@@ -82,6 +82,19 @@ class PinnedHelperTests(unittest.TestCase):
         p.write_text('drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.review_observation(state,[['good']],self.root)
 
+    def test_fixed_outcome_batch_uses_legacy_readers_without_validation_api(self):
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("def task_records(state):return [state['tasks'],{}]\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):return {'verifiers':[]}\ndef prerequisite_issues(state,ids):return ['bad'] if ids==['bad'] else []\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        state={'tasks':[],'verificationContract':{'path':'/fixture'}}
+        result=self.helper.outcome_observation(state,[['good'],['bad']])
+        self.assertEqual(set(result),{'records','issues','contract','prerequisites'})
+        self.assertEqual(result['prerequisites'],[[],['bad']])
+        for groups in ([],[['duplicate','duplicate']],[[]]):
+            with self.assertRaises(ValueError):self.helper.outcome_observation(state,groups)
+        p.write_text('drift')
+        with self.assertRaisesRegex(ValueError,'source drift'):self.helper.outcome_observation(state,[['good']])
+
     def test_definition_batch_preserves_individual_result_capacity(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py'
         p.write_text("def task_records(state):return 'r'*600000\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):return 'c'*600000\n")

@@ -18,7 +18,7 @@ import tempfile
 from admission import digest, initialize
 
 METHODS = {'task_records','task_queue','contract_definition_issues','contract_data',
-           'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state','definition_observation','review_observation'}
+           'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state','definition_observation','review_observation','outcome_observation'}
 DRIVER = '''import json,os,resource,sys
 from pathlib import Path
 resource.setrlimit(resource.RLIMIT_AS,(536870912,536870912))
@@ -28,18 +28,18 @@ os.environ['DEEP_LOOP_SKILLS_ROOT']=str(root/'skills')
 sys.path[:0]=[str(root/'skills/deep-loop/scripts')]
 request=json.loads(sys.stdin.buffer.read(524289))
 method=request['method']
-assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state','definition_observation','review_observation'}
-batch=method in {'definition_observation','review_observation'}
+assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state','definition_observation','review_observation','outcome_observation'}
+batch=method in {'definition_observation','review_observation','outcome_observation'}
 count=3 if batch else 1
-if method=='review_observation':
- assert len(request['args'])==3 and not request['kwargs']
+if method in {'review_observation','outcome_observation'}:
+ assert len(request['args'])==(3 if method=='review_observation' else 2) and not request['kwargs']
  groups=request['args'][1]
  assert isinstance(groups,list) and 1<=len(groups)<=129
  assert all(isinstance(ids,list) and ids and all(isinstance(i,str) and i for i in ids) and len(ids)==len(set(ids)) for ids in groups)
- count=4+len(groups)
+ count=(4 if method=='review_observation' else 3)+len(groups)
 limit=count*1048576+(1024 if batch else 0)
 resource.setrlimit(resource.RLIMIT_FSIZE,(limit,limit))
-resource.setrlimit(resource.RLIMIT_CPU,(5 if method=='review_observation' else count*5,count*5))
+resource.setrlimit(resource.RLIMIT_CPU,(5 if method in {'review_observation','outcome_observation'} else count*5,count*5))
 import signal
 signal.alarm(8)
 import deep_loop
@@ -49,17 +49,17 @@ if method=='validation_issues' and len(args)>2 and args[2] is not None:args[2]=P
 if method=='completed_state' and len(args)>1 and args[1] is not None:args[1]=Path(args[1])
 if method=='verified_delivery_state' and len(args)>3 and args[3] is not None:args[3]=Path(args[3])
 if batch:
- assert not request['kwargs'] and (len(args)==1 if method=='definition_observation' else len(args)==3)
+ assert not request['kwargs'] and (len(args)==1 if method=='definition_observation' else len(args)==(3 if method=='review_observation' else 2))
  state=args[0]
  # Fixed composition preserves older pinned packages without changing them.
  result={}
  readers=[('records',lambda:deep_loop.task_records(state)),
                      ('issues',lambda:deep_loop.contract_definition_issues(state)),
                      ('contract',lambda:deep_loop.contract_data(Path(state['verificationContract']['path']),verify_files=False))]
- if method=='review_observation':
-  archive=Path(args[2]) if args[2] is not None else None
+ if method in {'review_observation','outcome_observation'}:
+  archive=Path(args[2]) if method=='review_observation' and args[2] is not None else None
   readers += [('prerequisite-'+str(index),lambda ids=ids:deep_loop.prerequisite_issues(state,ids)) for index,ids in enumerate(groups)]
-  readers.append(('review_issues',lambda:deep_loop.validation_issues(state,'ship' if state.get('complete') is True else 'review',archive)))
+  if method=='review_observation':readers.append(('review_issues',lambda:deep_loop.validation_issues(state,'ship' if state.get('complete') is True else 'review',archive)))
  for name,reader in readers:
   usage=resource.getrusage(resource.RUSAGE_SELF);before=usage.ru_utime+usage.ru_stime
   resource.setrlimit(resource.RLIMIT_CPU,(min(count*5,__import__('math').ceil(before)+5),count*5))
@@ -68,7 +68,7 @@ if batch:
   assert usage.ru_utime+usage.ru_stime-before<=5
   assert len(json.dumps(value,allow_nan=False).encode())<=1048576
   result[name]=value
- if method=='review_observation':result['prerequisites']=[result.pop('prerequisite-'+str(index)) for index in range(len(groups))]
+ if method in {'review_observation','outcome_observation'}:result['prerequisites']=[result.pop('prerequisite-'+str(index)) for index in range(len(groups))]
 else:result=getattr(deep_loop,method)(*args,**request['kwargs'])
 signal.alarm(8)
 sys.stdout.write(json.dumps(result,allow_nan=False))
@@ -163,11 +163,11 @@ class PinnedHelper:
         encoded=json.dumps({'method':method,'args':args,'kwargs':kwargs},allow_nan=False).encode()
         if len(encoded)>524288:raise ValueError('Pinned helper request exceeds bound')
         count=3 if method=='definition_observation' else 1
-        if method=='review_observation':
-            if len(args)!=3 or not isinstance(args[1],list) or not 1<=len(args[1])<=129:
+        if method in {'review_observation','outcome_observation'}:
+            if len(args)!=(3 if method=='review_observation' else 2) or not isinstance(args[1],list) or not 1<=len(args[1])<=129:
                 raise ValueError('Bounded review prerequisite groups required')
-            count=4+len(args[1])
-        limit=count*1048576+(1024 if method in {'definition_observation','review_observation'} else 0)
+            count=(4 if method=='review_observation' else 3)+len(args[1])
+        limit=count*1048576+(1024 if method in {'definition_observation','review_observation','outcome_observation'} else 0)
         environment={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'}
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             result=subprocess.run([str(python),'-I','-S','-B','-c',DRIVER,str(root)],input=encoded,
@@ -183,6 +183,7 @@ class PinnedHelper:
         return self._call('verified_delivery_state',state,revision,evidence,str(archive) if archive is not None else None)
     def completed_state(self,state,archive=None):
         return self._call('completed_state',state,str(archive) if archive is not None else None)
+    def outcome_observation(self,state,groups):return self._call('outcome_observation',state,groups)
     def review_observation(self,state,groups,archive=None):
         return self._call('review_observation',state,groups,str(archive) if archive is not None else None)
     def definition_observation(self,state):return self._call('definition_observation',state)
