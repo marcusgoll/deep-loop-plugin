@@ -161,6 +161,29 @@ class WorkflowDeliveryTests(unittest.TestCase):
             if self.adapter._read('commit') is not None:return
         self.fail('Commit publication failed')
 
+    def test_review_cut_guard_still_rejects_drift_during_get(self):
+        c=self.controller
+        c.workflow_gate.final_review_cut=lambda:(c.store.read(c.contract_digest+'.workflow.json'),copy.deepcopy(c.state),copy.deepcopy(c.proof))
+        self.adapter._initialize()
+        original=self.adapter.api
+        def changed(method,route,body):
+            result=original(method,route,body)
+            c.state['new_required_obligation']='unverified'
+            return result
+        self.adapter.api=changed
+        with self.assertRaises(ValueError):self.adapter._api('GET','user')
+        self.assertEqual(len(self.provider.calls),1)
+        self.assertIsNone(self.adapter._read('complete'))
+
+    def test_review_cut_path_and_legacy_path_produce_same_delivery(self):
+        c=self.controller
+        c.workflow_gate.final_review_cut=lambda:(c.store.read(c.contract_digest+'.workflow.json'),copy.deepcopy(c.state),copy.deepcopy(c.proof))
+        receipt=self.complete()
+        self.assertTrue(receipt['delivery_verified'])
+        self.assertFalse(receipt['complete'])
+        c.workflow_gate.final_review_cut=lambda:None
+        self.assertEqual(self.adapter.authenticate_delivery(),receipt)
+
     def test_commit_seal_stops_before_ref_and_requires_fresh_remote_commit(self):
         self.ready_commit()
         self.assertIsNone(self.provider.ref)

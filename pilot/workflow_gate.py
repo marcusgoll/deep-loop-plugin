@@ -358,11 +358,20 @@ class WorkflowGate:
 
     def final_review_proof(self):
         """Fresh opening/closing helper batches; no cross-call proof cache."""
+        cut=self.final_review_cut()
+        return self._legacy_final_review_proof() if cut is None else cut[2]
+
+    def final_review_cut(self):
+        """Return the exact binding/state inspected by the fresh full review.
+
+        None selects the existing legacy proof reader. The returned cut is
+        local to this invocation; it never authorizes a later operation.
+        """
         binding=self.store.read(self.contract_digest+'.workflow.json')
         method=getattr(self.helper,'review_observation',None)
         if (not callable(method) or not isinstance(binding.get('task_verifiers'),dict) or
                 len(binding['task_verifiers'])>128):
-            return self._legacy_final_review_proof()
+            return None
         binding,state,by_id,observation=self._read(review=True)
         source=self.candidate_snapshot(binding)
         outcome=self._review_outcome_at(binding,state,by_id,observation)
@@ -376,7 +385,7 @@ class WorkflowGate:
                'outcome_proof':outcome,'review_issues':[],
                'parent_accepted':False,'delivery_verified':False}
         if source is not None:proof['candidate_source']=source
-        return proof
+        return binding,state,proof
 
     def _review_outcome_at(self,binding,state,by_id,observation):
         if any(task['status']!='done' for task in by_id.values()):

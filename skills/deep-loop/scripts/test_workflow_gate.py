@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 from pathlib import Path
 import sys
@@ -644,6 +645,23 @@ class WorkflowGateTests(unittest.TestCase):
         for observation in (None,{}, {'records':[[],{}],'issues':[],'contract':{},'prerequisites':[],'review_issues':[]}):
             with self.subTest(observation=observation),patch.object(deep_loop,'review_observation',return_value=observation):
                 with self.assertRaisesRegex(ValueError,'Malformed'):self.gate.final_review_proof()
+
+    def test_review_cut_returns_exact_fresh_image_and_legacy_remains_supported(self):
+        from unittest.mock import patch
+        self.outcome_ready()
+        expected=self.gate.final_review_proof()
+        with patch.object(deep_loop,'review_observation',wraps=deep_loop.review_observation) as observe:
+            binding,state,proof=self.gate.final_review_cut()
+            self.assertEqual(proof,expected)
+            self.assertEqual(binding,self.binding)
+            self.assertEqual(state,json.loads(self.checkpoint.read_text()))
+            self.assertEqual(proof['checkpoint_sha256'],digest(state))
+            self.assertEqual(observe.call_count,2)
+        with patch.object(deep_loop,'review_observation',None):
+            self.assertIsNone(self.gate.final_review_cut())
+            self.assertEqual(self.gate.final_review_proof(),expected)
+        Path(self.f.state['checks'][0]['receipt']['path']).write_text('late substituted receipt')
+        with self.assertRaisesRegex(ValueError,'blocked'):self.gate.final_review_cut()
 
     def test_aggregate_task_observations_equal_fresh_public_checks(self):
         from unittest.mock import patch
