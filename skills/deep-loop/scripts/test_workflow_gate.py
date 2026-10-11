@@ -602,6 +602,16 @@ class WorkflowGateTests(unittest.TestCase):
         self.f.source.write_text('drift')
         with self.assertRaisesRegex(ValueError,'proof blocked'):self.gate.outcome_proof()
 
+    def test_aggregate_task_observations_equal_fresh_public_checks(self):
+        from unittest.mock import patch
+        self.outcome_ready()
+        with patch.object(self.gate,'_read',wraps=self.gate._read) as read:
+            observed=self.gate.outcome_proof()
+            self.assertEqual(read.call_count,2)
+        for row in observed['tasks'].values():
+            proof=row['observation']
+            self.assertEqual(self.gate.task_acceptance(proof['selection']),proof)
+
     def test_outcome_done_claim_without_all_verifier_receipts_is_blocked(self):
         for task in self.f.state['tasks']:task.update(status='done',evidence='Untrusted completion claim')
         self.select()
@@ -609,10 +619,10 @@ class WorkflowGateTests(unittest.TestCase):
 
     def test_outcome_observer_rejects_checkpoint_change_during_task_inspection(self):
         from unittest.mock import patch
-        self.outcome_ready();original=self.gate.task_acceptance
-        def change(selection):
-            observation=original(selection);self.f.state['tasks'][0]['evidence']='Concurrent drift';self.select();return observation
-        with patch.object(self.gate,'task_acceptance',side_effect=change):
+        self.outcome_ready();original=self.gate._candidate_receipts
+        def change(*args):
+            observation=original(*args);self.f.state['tasks'][0]['evidence']='Concurrent drift';self.select();return observation
+        with patch.object(self.gate,'_candidate_receipts',side_effect=change):
             with self.assertRaisesRegex(ValueError,'changed'):self.gate.outcome_proof()
 
 if __name__=='__main__':unittest.main()

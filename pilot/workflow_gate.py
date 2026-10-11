@@ -302,7 +302,7 @@ class WorkflowGate:
             selection={'task_id':task_id,'binding_digest':digest(binding),
                        'session_id':state['sessionId'],
                        'prompt_sha256':hashlib.sha256(binding['task_prompts'][task_id].encode()).hexdigest()}
-            observation=self.task_acceptance(selection)
+            observation=self._task_acceptance_at(selection,binding,state,by_id)
             if observation['checkpoint_sha256']!=digest(state):
                 raise ValueError('Workflow outcome changed during task inspection')
             tasks[task_id]={'evidence':by_id[task_id].get('evidence'),
@@ -385,7 +385,18 @@ class WorkflowGate:
         stopped owned attempt. A task status or successful model exit is not proof.
         Checkpoint identity is provenance, never semantic progress identity.
         """
-        binding, state, by_id = self._read()
+        binding,state,by_id=self._read()
+        result=self._task_acceptance_at(selection,binding,state,by_id)
+        if self._read()[:2]!=(binding,state):
+            raise ValueError('Task acceptance checkpoint changed during inspection')
+        return result
+
+    def _task_acceptance_at(self,selection,binding,state,by_id):
+        """Evaluate one task inside a caller's checked aggregate input.
+
+        The caller must reread the protected binding/checkpoint before returning.
+        No observations survive a public proof call or a provider boundary.
+        """
         if (not isinstance(selection, dict) or set(selection) != {
                 'task_id', 'binding_digest', 'session_id', 'prompt_sha256'} or
                 selection['binding_digest'] != digest(binding) or
@@ -413,11 +424,6 @@ class WorkflowGate:
         if failures:
             raise ValueError('Task acceptance proof blocked: ' + '; '.join(failures))
         source = self._candidate_receipts(binding,state,ids)
-        # Re-read through the same protected identities after proof inspection.
-        # Concurrent checkpoint changes invalidate this observation.
-        again = self._read()
-        if again[0] != binding or again[1] != state:
-            raise ValueError('Task acceptance checkpoint changed during inspection')
         if source is not None:
             require_candidate_snapshot(source['policy'],source['snapshot'])
         checks = {c.get('verifierId'): c for c in state.get('checks', [])}
