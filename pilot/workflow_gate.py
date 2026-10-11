@@ -110,7 +110,7 @@ class WorkflowGate:
             if state.get('verificationContract',{}).get('endpoint')!='github_draft_pr':
                 raise ValueError('Workflow contract endpoint differs from explicit delivery authority')
             delivery = state.get('delivery')
-            if (not isinstance(delivery,dict) or delivery.get('status') != 'pending' or
+            if (not isinstance(delivery,dict) or delivery.get('status') not in ('pending','verified') or
                     delivery.get('endpoint') != 'github_draft_pr' or
                     delivery.get('repository') != capability['repository'] or
                     delivery.get('baseRef') != capability['base_ref'] or
@@ -118,6 +118,7 @@ class WorkflowGate:
                     delivery.get('endpointDecision') != {'status':'settled','source':'contract',
                                                         'evidence':capability['approval_ref']}):
                 raise ValueError('Checkpoint delivery endpoint differs from explicit workflow authority')
+            if delivery['status']=='verified':self.accepted_parent_image(binding,state)
         if (state.get('sessionId') != binding['session_id'] or
                 state.get('verificationContract') != binding['verification_contract']):
             raise ValueError('Checkpoint parent identity drift')
@@ -144,6 +145,14 @@ class WorkflowGate:
         if mapped != blocking:
             raise ValueError('Task mapping must cover every parent blocking verifier exactly by ID')
         return binding, state, by_id
+
+    def accepted_parent_image(self,binding,state):
+        """Admit only the protected exact delivery image, preserving its origin."""
+        if binding.get('schema')!=4 or state.get('delivery',{}).get('status')=='pending':return state
+        from workflow_checkpoint import checked_delivery_intent
+        intent=checked_delivery_intent(self.store,self.contract_digest,binding,self.helper)
+        if state!=intent['after']:raise ValueError('Unapproved workflow delivery checkpoint postimage')
+        return intent['before']
 
     def candidate_policy(self, binding):
         """Explicit v2 policy only; never infer or upgrade a legacy enrollment."""

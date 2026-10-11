@@ -16,7 +16,7 @@ from urllib.parse import parse_qs
 from admission import digest
 from authority import require_active
 from candidate_snapshot import capture_candidate,require_candidate_snapshot
-from private_controller import TrustedStore
+from private_controller import TrustedStore,PrivateController
 from test_workflow_delivery_contract import delivery
 from workflow_delivery import WorkflowDelivery,WAIT,commit_object
 
@@ -107,7 +107,7 @@ class FixtureController:
                      'max_entries':100,'max_file_bytes':4096,'max_total_bytes':16384,'max_depth':6}
         self.snapshot=capture_candidate(self.policy);self.cap=delivery(self.contract_digest)
         self.binding={'schema':4,'workflow_delivery':self.cap};self.state={'phase':'SHIP','delivery':{'status':'pending'},'complete':False}
-        self.proof={'checkpoint_sha256':digest(self.state),'candidate_source':{'policy':self.policy,'snapshot':self.snapshot}}
+        self.proof={'checkpoint_sha256':digest(self.state),'outcome_proof':{'checkpoint_sha256':digest(self.state),'tasks':{}},'candidate_source':{'policy':self.policy,'snapshot':self.snapshot}}
         intent={'fixture':'already qualified real parent-reader prerequisite'}
         receipt={'intent_digest':digest(intent),'postimage_review_proof':self.proof}
         self.quiescence={'account':'fixture','empty':True};self.journal=SimpleNamespace(read=lambda:('journal-fixture',{}))
@@ -118,10 +118,13 @@ class FixtureController:
         self.store.create(self.contract_digest+'.parent-acceptance-intent.json',intent)
         self.active=True;self.owned=False
         self.workflow_gate=SimpleNamespace(_read=lambda:(self.store.read(self.contract_digest+'.workflow.json'),self.state,{}),
-                                           final_review_proof=lambda:copy.deepcopy(self.proof))
+                                           final_review_proof=lambda:copy.deepcopy(self.proof),
+                                           accepted_parent_image=lambda binding,state:state)
+    _parent_proof_at_checkpoint=staticmethod(PrivateController._parent_proof_at_checkpoint)
     def authenticate_workflow_parent_acceptance(self):
         self._workflow_mutation_authority();self._unowned();require_candidate_snapshot(self.policy,self.snapshot)
         return copy.deepcopy(self.cut)
+    def _contract(self):require_active(self.store,self.contract_digest)
     def _workflow_mutation_authority(self,**kwargs):
         require_active(self.store,self.contract_digest)
         if not self.active:raise ValueError('Original fixture window expired')

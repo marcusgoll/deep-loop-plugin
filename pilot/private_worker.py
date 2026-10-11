@@ -24,6 +24,7 @@ from delivery_artifact import DeliveryArtifact
 from pinned_helper import BoundPinnedHelper
 from workflow_gate import WorkflowGate
 from native_verifier import NativeVerifier
+from workflow_checkpoint import WorkflowCheckpoint
 from workflow_delivery import WorkflowDelivery
 from workflow_github_transport import WorkflowGitHubAPI
 from workflow_delivery_contract import validate_workflow_delivery
@@ -59,7 +60,7 @@ def run(store, factory, *, window=remaining, delivery_factory=None, workflow_del
 
 def build_workflow_delivery(store,key):
     controller=build_controller(store,key)
-    return WorkflowDelivery(controller,WorkflowGitHubAPI(controller))
+    return WorkflowCheckpoint(controller,WorkflowDelivery(controller,WorkflowGitHubAPI(controller)))
 
 
 def qualify_service(service_name='deep-loop-private-worker.service'):
@@ -129,7 +130,8 @@ def main():
                       'recovered_native_verifier_preparation_cleanup',
                       'submitted_native_workflow_verifier','recorded_workflow_task_proof',
                       'accepted_workflow_task','prepared_workflow_parent_acceptance',
-                      'recovered_workflow_parent_acceptance','wait_for_workflow_delivery'}:
+                      'recovered_workflow_parent_acceptance','wait_for_workflow_delivery',
+                      'prepared_workflow_delivery_checkpoint','recovered_workflow_delivery_checkpoint'}:
         subprocess.run(['/usr/bin/systemctl','stop',TIMER],check=True,timeout=5)
 
 

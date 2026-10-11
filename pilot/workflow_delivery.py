@@ -45,18 +45,25 @@ class WorkflowDelivery:
     def _locked_guard(self):
         # The aggregate reader takes its own non-reentrant locks. Its fresh
         # result is checked again under the credential lock before I/O/write.
-        c=self.controller;c._workflow_mutation_authority(parent_recovery=True);c._unowned()
+        c=self.controller;c._contract();c._workflow_mutation_authority(parent_recovery=True);c._unowned()
         c._require_no_pending_task_acceptance();c._require_no_pending_task_credit()
         binding,state,_=c.workflow_gate._read()
         proof=self.cut['parent_receipt']['postimage_review_proof']
-        if (digest(binding)!=self.cut['binding_sha256'] or digest(state)!=proof['checkpoint_sha256'] or
+        origin=c.workflow_gate.accepted_parent_image(binding,state)
+        current=c._parent_proof_at_checkpoint(c.workflow_gate.final_review_proof(),digest(origin))
+        if (digest(binding)!=self.cut['binding_sha256'] or digest(origin)!=proof['checkpoint_sha256'] or
                 c.journal.read()[0]!=self.cut['outcome']['journal_revision'] or
                 self.store.read(self.key+'.parent-acceptance.json')!=self.cut['parent_receipt'] or
                 digest(self.store.read(self.key+'.parent-acceptance-intent.json'))!=self.cut['parent_receipt']['intent_digest'] or
                 c._workflow_quiescence()!=self.cut['outcome']['quiescence'] or
-                c.workflow_gate.final_review_proof()!=proof):
+                current!=proof):
             raise ValueError('Workflow delivery authority changed before provider operation')
         c._workflow_source_guard(proof,parent_recovery=True)
+        if (c.workflow_gate._read()[:2]!=(binding,state) or
+                c.journal.read()[0]!=self.cut['outcome']['journal_revision'] or
+                c._workflow_quiescence()!=self.cut['outcome']['quiescence']):
+            raise ValueError('Workflow delivery cut changed during final source guard')
+        c._workflow_mutation_authority(parent_recovery=True)
 
     def _save(self, suffix, value):
         self._fresh()
@@ -70,6 +77,10 @@ class WorkflowDelivery:
             return True
 
     def _api(self, method, route, body=None):
+        if getattr(self,'_publication_lock',False):
+            if method!='GET':raise ValueError('Checkpoint readback cannot mutate provider')
+            self._locked_guard();response=self.api(method,route,body);self._locked_guard()
+            return response
         self._fresh()
         with self.store.lock():
             self._locked_guard()
@@ -200,7 +211,7 @@ class WorkflowDelivery:
             result.append({'required':required,'review':latest})
         return result
 
-    def step(self):
+    def _initialize(self):
         self.cut=self.controller.authenticate_workflow_parent_acceptance()
         binding=self.store.read(self.key+'.workflow.json')
         if binding.get('schema')!=4 or digest(binding)!=self.cut['binding_sha256']:
@@ -211,6 +222,11 @@ class WorkflowDelivery:
         exporter=GitCandidateExport(source['policy'],source['snapshot'],self.capability['export_rules'])
         export=exporter.plan();commit=commit_object(self.capability,export['tree_sha'])
         plan={'cut':self.cut,'capability':self.capability,'export':export,'commit':commit}
+        self.plan=plan;self.exporter=exporter
+        return plan,export
+
+    def step(self):
+        plan,export=self._initialize();commit=plan['commit']
         saved=self._read('plan')
         if saved is None:self._save('plan',plan);return WAIT
         if saved!=plan:raise ValueError('Saved workflow delivery plan drift')
@@ -223,7 +239,7 @@ class WorkflowDelivery:
                 continue
             observed=self._call('GET','git/blobs/'+sha)
             if observed is None:
-                data=exporter.read_blob(export,sha)
+                data=self.exporter.read_blob(export,sha)
                 response=self._call('POST','git/blobs',{'content':base64.b64encode(data).decode(),'encoding':'base64'})
                 if response.get('sha')!=sha:raise ValueError('Published workflow blob identity drift')
                 observed=self._call('GET','git/blobs/'+sha)
@@ -259,11 +275,20 @@ class WorkflowDelivery:
             self._pr(self._call('POST','pulls',body),head);return WAIT
         if len(matches)!=1:raise ValueError('Ambiguous workflow draft PR listing')
         number=self._pr(matches[0],head)
+        receipt=self._verified_receipt(plan,export,number)
+        if receipt is None:return WAIT
+        self._save('complete',receipt)
+        return 'workflow_delivery_verified'
+
+
+    def _verified_receipt(self,plan,export,number):
+        unique={row['sha']:row for row in export['files']}
+        head=plan['commit']['sha'];branch=self.capability['branch']
         # Reinspect every content-addressed object, including unchanged files.
         for sha,row in unique.items():self._blob(row,self._call('GET','git/blobs/'+sha))
         for tree in export['trees']:self._tree(tree,self._call('GET','git/trees/'+tree['sha']))
         checks=self._checks(head,number);reviews=self._reviews(head,number)
-        if checks is None or reviews is None:return WAIT
+        if checks is None or reviews is None:return None
         self._identities();self._pr(self._call('GET','pulls/'+str(number)),head)
         ref=self._call('GET','git/ref/heads/'+branch)
         if ref is None or ref.get('object',{}).get('sha')!=head:raise ValueError('Workflow final branch drift')
@@ -281,5 +306,24 @@ class WorkflowDelivery:
                  'journal_revision':self.cut['outcome']['journal_revision'],'head_sha':head,'base_sha':self.capability['base_sha'],
                  'pull_request':'https://github.com/'+self.capability['repository']+'/pull/'+str(number),
                  'checks':checks,'reviews':reviews,'delivery_verified':True,'complete':False}
-        self._save('complete',receipt)
-        return 'workflow_delivery_verified'
+        return receipt
+
+    def authenticate_delivery(self, *, locked=False):
+        """Fresh complete GET-only readback; never create a missing endpoint."""
+        if locked:
+            plan=self.plan;export=plan['export'];self._locked_guard()
+        else:plan,export=self._initialize()
+        if self._read('plan')!=plan:raise ValueError('Saved workflow delivery plan drift')
+        previous=getattr(self,'_publication_lock',False);self._publication_lock=locked
+        try:
+            self._identities();head=plan['commit']['sha'];branch=self.capability['branch']
+            self._commit(plan['commit'],self._call('GET','git/commits/'+head))
+            ref=self._call('GET','git/ref/heads/'+branch)
+            if ref is None or ref.get('object',{}).get('sha')!=head:
+                raise ValueError('Workflow read-only branch unavailable or changed')
+            matches=self._pages('pulls',{'state':'all','head':self.capability['repository'].split('/')[0]+':'+branch,
+                                        'base':self.capability['base_ref']})
+            if len(matches)!=1:raise ValueError('Workflow read-only PR unavailable or ambiguous')
+            number=self._pr(matches[0],head)
+            return self._verified_receipt(plan,export,number)
+        finally:self._publication_lock=previous

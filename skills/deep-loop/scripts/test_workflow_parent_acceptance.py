@@ -117,26 +117,29 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
     def test_model_free_worker_delivery_uses_actual_parent_authentication(self):
         import sys
         from workflow_delivery import WorkflowDelivery,WAIT
+        from workflow_checkpoint import WorkflowCheckpoint
         from test_workflow_delivery import Provider
         if sys.platform!='linux':
             mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
         self.prepared(delivery_capability=True)
         self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
         before=self.journal.read();checkpoint=self.graph.checkpoint.read_bytes()
+        accepted_cut=self.controller.authenticate_workflow_parent_acceptance()
         from private_worker import run
         self.graph.store.create('enabled-outcome.json',{'contract_digest':self.graph.key})
         provider=Provider(self.graph.binding['workflow_delivery'])
         def factory(key):
             self.assertEqual(key,self.graph.key)
-            return WorkflowDelivery(self.controller,provider.api)
+            return WorkflowCheckpoint(self.controller,WorkflowDelivery(self.controller,provider.api))
         for _ in range(20):
             result=run(self.graph.store,lambda key:self.controller,window=lambda *args:3600,
                        workflow_delivery_factory=factory)
-            if result=='workflow_delivery_verified':break
-            self.assertEqual(result,WAIT)
+            if result=='workflow_delivery_checkpoint_verified':break
+            self.assertIn(result,(WAIT,'prepared_workflow_delivery_checkpoint','recovered_workflow_delivery_checkpoint'))
         else:self.fail('Model-free provider adapter did not converge')
-        receipt=factory(self.graph.key)._read('complete');parent=self.controller.authenticate_workflow_parent_acceptance()
+        receipt=factory(self.graph.key).adapter._read('complete');parent=self.controller.authenticate_workflow_parent_acceptance()
         self.assertEqual(receipt['parent_receipt_sha256'],parent['parent_receipt_sha256'])
+        self.assertEqual(parent,accepted_cut)
         self.assertTrue(receipt['delivery_verified']);self.assertFalse(receipt['complete'])
         import deep_loop
         preimage=json.loads(checkpoint)
@@ -158,8 +161,31 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
                 deep_loop.verified_delivery_state(changed,receipt['head_sha'],receipt['pull_request'])
         with self.assertRaises(ValueError):
             deep_loop.verified_delivery_state(delivered,receipt['head_sha'],receipt['pull_request'])
-        self.assertEqual(self.journal.read(),before);self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint)
+        self.assertEqual(self.journal.read(),before);self.assertEqual(json.loads(self.graph.checkpoint.read_bytes()),delivered)
+        completed=self.graph.store.read(self.graph.key+'.workflow-delivery-checkpoint.json')
+        self.assertTrue(completed['delivery_verified']);self.assertFalse(completed['complete'])
         self.assertEqual(len(self.backend.submissions),3)
+    def test_locked_delivery_guard_rechecks_authenticated_enrollment(self):
+        import sys
+        from workflow_delivery import WorkflowDelivery,WAIT
+        from test_workflow_delivery import Provider
+        if sys.platform!='linux':
+            mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        before=self.graph.checkpoint.read_bytes();journal=self.journal.read()
+        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        self.assertEqual(adapter.step(),WAIT)
+        def changed(method,route,body,result):
+            if route=='user':
+                name=self.graph.key+'.approval.json';approval=self.graph.store.read(name)
+                self.graph.store.remove(name)
+                self.graph.store.create(name,{**approval,'contract':{**approval['contract'],'unexpected':'drift'}})
+        provider.hook=changed
+        with self.assertRaisesRegex(ValueError,'changed authenticated enrollment'):adapter.step()
+        self.assertEqual(self.graph.checkpoint.read_bytes(),before);self.assertEqual(self.journal.read(),journal)
+        self.assertEqual([method for method,_,_ in provider.calls],['GET'])
+
     def test_delivery_reader_cannot_finish_pending_parent(self):
         self.prepared();self.controller.prepare_workflow_parent_acceptance();before=self.graph.checkpoint.read_bytes()
         with self.assertRaises(FileNotFoundError):self.controller.authenticate_workflow_parent_acceptance()

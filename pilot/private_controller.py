@@ -966,6 +966,13 @@ class PrivateController:
             history['current_observation']['checkpoint_sha256'] = checkpoint_digest
         return result
 
+    @staticmethod
+    def _parent_proof_at_checkpoint(proof, checkpoint_digest):
+        result=copy.deepcopy(proof);result['checkpoint_sha256']=checkpoint_digest
+        outcome=result['outcome_proof'];outcome['checkpoint_sha256']=checkpoint_digest
+        for row in outcome['tasks'].values():row['observation']['checkpoint_sha256']=checkpoint_digest
+        return result
+
     def prepare_workflow_parent_acceptance(self):
         """Save explicit integrated review authority; never deliver or complete."""
         outcome = self.observe_workflow_outcome()
@@ -1056,7 +1063,8 @@ class PrivateController:
                 raise ValueError('Accepted parent intent identity drift')
             binding, state, _ = self.workflow_gate._read()
             transition = intent['transition']
-            if (binding.get('schema') not in (3, 4) or state != transition['after'] or
+            origin=self.workflow_gate.accepted_parent_image(binding,state)
+            if (binding.get('schema') not in (3, 4) or origin != transition['after'] or
                     transition['before'].get('phase') not in {'BUILD','REVIEW'} or
                     transition['after'] != {**transition['before'], 'phase':'SHIP'} or
                     self.journal.read() != (intent['journal_revision'], intent['journal']) or
@@ -1065,8 +1073,8 @@ class PrivateController:
                 raise ValueError('Accepted parent current delivery cut changed')
             proof = self.workflow_gate.final_review_proof()
             expected = {'contract_digest':self.contract_digest,'intent_digest':digest(intent),
-                        'journal_revision':intent['journal_revision'],'checkpoint_sha256':digest(state),
-                        'postimage_review_proof':proof,'parent_accepted':True,
+                        'journal_revision':intent['journal_revision'],'checkpoint_sha256':digest(origin),
+                        'postimage_review_proof':self._parent_proof_at_checkpoint(proof,digest(origin)),'parent_accepted':True,
                         'delivery_verified':False,'complete':False}
             if completed != expected:
                 raise ValueError('Accepted parent completion proof changed')
@@ -1078,7 +1086,7 @@ class PrivateController:
             self._workflow_mutation_authority(parent_recovery=True)
             return {'contract_digest':self.contract_digest,'binding_sha256':digest(binding),
                     'parent_receipt_sha256':digest(completed),'parent_receipt':completed,
-                    'outcome':outcome}
+                    'outcome':self._parent_outcome_at_checkpoint(outcome,digest(origin))}
 
     def advance_workflow_parent_acceptance(self):
         """Only explicitly enrolled parents may enter integrated review acceptance."""
@@ -1094,6 +1102,9 @@ class PrivateController:
             else: pending = True
             completed = (self.store.root / (self.contract_digest + '.parent-acceptance.json')).exists()
         if pending:
+            if completed and (self.store.root/(self.contract_digest+'.workflow-delivery-checkpoint-intent.json')).exists():
+                self.authenticate_workflow_parent_acceptance()
+                return 'workflow_delivery_pending'
             result = self.recover_workflow_parent_acceptance()
             return 'workflow_delivery_pending' if completed else result
         self.prepare_workflow_parent_acceptance()
