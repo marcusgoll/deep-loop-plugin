@@ -44,6 +44,31 @@ class CheckpointGate:
         return self.c._parent_proof_at_checkpoint(self.c.proof,digest(state))
 
 
+def late_history_mutation(case,terminal):
+    for mutation in ('checkpoint','window'):
+        with case.subTest(mutation=mutation):
+            case.setUp();intent=case.terminal() if terminal else case.intent()
+            provider_guard=case.wrapper._provider_guard;history_guard=case.adapter._locked_history_guard
+            in_provider=False;triggered=[]
+            def provider(receipt):
+                nonlocal in_provider
+                in_provider=True
+                try:return provider_guard(receipt)
+                finally:in_provider=False
+            def history():
+                history_guard()
+                state=json.loads(case.path.read_text())
+                if not in_provider and state==intent['after']:
+                    triggered.append(mutation)
+                    if mutation=='checkpoint':case.path.write_text(json.dumps(intent['before']))
+                    else:case.c.active=False
+            with patch.object(case.wrapper,'_provider_guard',side_effect=provider),patch.object(case.adapter,'_locked_history_guard',side_effect=history):
+                with case.assertRaises(ValueError):case.wrapper.step()
+            case.assertTrue(triggered)
+            suffix='.workflow-terminal-complete.json' if terminal else '.workflow-delivery-checkpoint.json'
+            case.assertFalse((case.c.store.root/(case.key+suffix)).exists())
+
+
 class WorkflowCheckpointTests(unittest.TestCase):
     def setUp(self):
         f=fixtures.WorkflowDeliveryTests();f.setUp();self.addCleanup(f.doCleanups)
@@ -72,6 +97,9 @@ class WorkflowCheckpointTests(unittest.TestCase):
         self.assertEqual(self.wrapper.step(),'prepared_workflow_delivery_checkpoint')
         return self.c.store.read(self.key+'.workflow-delivery-checkpoint-intent.json')
     def completion_exists(self):return (self.c.store.root/(self.key+'.workflow-delivery-checkpoint.json')).exists()
+    def test_history_guard_cannot_change_final_checkpoint_or_extend_window(self):
+        late_history_mutation(self,False)
+
     def test_exact_writer_and_repeat_recovery_preserve_history_and_never_provider_write(self):
         saved=self.intent();self.provider.calls.clear()
         self.assertEqual(self.wrapper.step(),'recovered_workflow_delivery_checkpoint')
@@ -180,6 +208,9 @@ class WorkflowCheckpointTests(unittest.TestCase):
 
 
 class WorkflowTerminalTests(unittest.TestCase):
+    def test_history_guard_cannot_change_terminal_checkpoint_or_extend_window(self):
+        late_history_mutation(self,True)
+
     setUp=WorkflowCheckpointTests.setUp
     intent=WorkflowCheckpointTests.intent
     def terminal(self):

@@ -189,6 +189,77 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         self.assertEqual(self.graph.checkpoint.read_bytes(),before);self.assertEqual(self.journal.read(),journal)
         self.assertEqual([method for method,_,_ in provider.calls],['GET'])
 
+    def test_history_corruption_during_get_cannot_publish_or_seal(self):
+        from workflow_delivery import WorkflowDelivery
+        from test_workflow_delivery import Provider
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        name='deep-loop-pilot-'+self.graph.key+'-1-1.invocation.json'
+        original=self.graph.store.read(name)
+        checkpoint=self.graph.checkpoint.read_bytes();journal=self.journal.read()
+        for corruption in ('deleted','substituted'):
+            with self.subTest(corruption=corruption):
+                def changed(method,route,body,result):
+                    self.graph.store.remove(name)
+                    if corruption=='substituted':
+                        altered=copy.deepcopy(original);altered['owner']['plan_digest']='0'*64
+                        self.graph.store.create(name,altered)
+                provider.hook=changed
+                # This GET is read-only. Current proof remains valid; retained
+                # ownership is inspected again before any durable mutation.
+                self.assertEqual(adapter._api('GET','user')['id'],provider.cap['publisher_id'])
+                provider.hook=None;calls=len(provider.calls)
+                for mutation in (lambda:adapter._api('POST','repos/'+provider.cap['repository']+'/git/refs',{}),
+                                 lambda:adapter._save('complete',{'delivery_verified':True})):
+                    with self.assertRaises((ValueError,FileNotFoundError)):mutation()
+                self.assertEqual(len(provider.calls),calls)
+                self.assertIsNone(adapter._read('complete'));self.assertIsNone(provider.ref)
+                self.assertEqual(self.graph.checkpoint.read_bytes(),checkpoint);self.assertEqual(self.journal.read(),journal)
+                if corruption=='substituted':self.graph.store.remove(name)
+                self.graph.store.create(name,original)
+
+    def test_direct_checkpoint_and_terminal_writers_reject_mid_get_history_corruption(self):
+        import sys
+        from workflow_delivery import WorkflowDelivery
+        from workflow_checkpoint import WorkflowCheckpoint,WorkflowTerminal
+        from test_workflow_delivery import Provider
+        if sys.platform!='linux':
+            mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        for _ in range(20):
+            if adapter.step()=='workflow_delivery_verified':break
+        else:self.fail('Provider fixture did not converge')
+        checkpoint=WorkflowCheckpoint(self.controller,adapter)
+        self.assertEqual(checkpoint.step(),'prepared_workflow_delivery_checkpoint')
+        name='deep-loop-pilot-'+self.graph.key+'-1-1.invocation.json';original=self.graph.store.read(name)
+        for endpoint in ('delivery','terminal'):
+            with self.subTest(endpoint=endpoint):
+                if endpoint=='terminal':
+                    self.assertEqual(checkpoint.step(),'recovered_workflow_delivery_checkpoint')
+                    writer=WorkflowTerminal(self.controller,adapter)
+                    self.assertEqual(writer.step(),'prepared_workflow_terminal_checkpoint')
+                else:writer=checkpoint
+                before=self.graph.checkpoint.read_bytes();journal=self.journal.read();triggered=[]
+                def changed(method,route,body,result):
+                    if adapter._publication_lock and route.endswith('/pulls/17') and not triggered:
+                        triggered.append(route);self.graph.store.remove(name)
+                        if endpoint=='terminal':
+                            altered=copy.deepcopy(original);altered['owner']['plan_digest']='0'*64
+                            self.graph.store.create(name,altered)
+                provider.hook=changed;provider.calls.clear()
+                with self.assertRaises((ValueError,FileNotFoundError)):writer.step()
+                self.assertTrue(triggered);self.assertTrue(all(row[0]=='GET' for row in provider.calls))
+                self.assertEqual(self.graph.checkpoint.read_bytes(),before);self.assertEqual(self.journal.read(),journal)
+                suffix='.workflow-'+('delivery-checkpoint' if endpoint=='delivery' else 'terminal-complete')+'.json'
+                self.assertFalse((self.graph.store.root/(self.graph.key+suffix)).exists())
+                provider.hook=None
+                if endpoint=='terminal':self.graph.store.remove(name)
+                self.graph.store.create(name,original)
+
     def test_delivery_reader_cannot_finish_pending_parent(self):
         self.prepared();self.controller.prepare_workflow_parent_acceptance();before=self.graph.checkpoint.read_bytes()
         with self.assertRaises(FileNotFoundError):self.controller.authenticate_workflow_parent_acceptance()

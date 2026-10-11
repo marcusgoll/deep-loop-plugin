@@ -112,7 +112,7 @@ class FixtureController:
         receipt={'intent_digest':digest(intent),'postimage_review_proof':self.proof}
         self.quiescence={'account':'fixture','empty':True};self.journal=SimpleNamespace(read=lambda:('journal-fixture',{}))
         self.cut={'binding_sha256':digest(self.binding),'parent_receipt':receipt,'parent_receipt_sha256':digest(receipt),
-                  'outcome':{'journal_revision':'journal-fixture','quiescence':self.quiescence}}
+                  'outcome':{'journal_revision':'journal-fixture','quiescence':self.quiescence,'task_histories':{}}}
         self.store.create(self.contract_digest+'.workflow.json',self.binding)
         self.store.create(self.contract_digest+'.parent-acceptance.json',receipt)
         self.store.create(self.contract_digest+'.parent-acceptance-intent.json',intent)
@@ -230,6 +230,27 @@ class WorkflowDeliveryTests(unittest.TestCase):
         self.provider.hook=mutate
         with self.assertRaises(ValueError):self.adapter.step()
         self.assertIsNone(self.adapter._read('complete'))
+    def test_get_response_rechecks_current_authority_and_proof(self):
+        for drift in ('journal','parent','checkpoint','native','revocation','window','proof','source'):
+            with self.subTest(drift=drift):
+                self.setUp();self.adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+                def changed(method,route,body,result):
+                    c=self.controller
+                    if drift=='journal':c.journal.read=lambda:('changed-journal',{})
+                    elif drift=='parent':
+                        name=c.contract_digest+'.parent-acceptance.json';value=c.store.read(name)
+                        c.store.remove(name);c.store.create(name,{**value,'unexpected':'changed'})
+                    elif drift=='checkpoint':c.state['blocker']='late requirement'
+                    elif drift=='native':c.owned=True
+                    elif drift=='revocation':c.store.create(c.contract_digest+'.revocation-intent.json',{})
+                    elif drift=='window':c.active=False
+                    elif drift=='proof':c.proof['outcome_proof']['tasks']={'substituted':{'observation':{'checkpoint_sha256':digest(c.state)}}}
+                    else:(c.candidate/'source.txt').write_text('changed during GET')
+                self.provider.hook=changed
+                with self.assertRaises(ValueError):self.adapter._api('GET','user')
+                self.assertEqual([c[0] for c in self.provider.calls],['GET'])
+                self.assertIsNone(self.adapter._read('complete'))
+
     def test_applied_and_unapplied_uncertain_mutable_writes_never_replay(self):
         for operation in ('git/refs','pulls'):
             for apply in (True,False):

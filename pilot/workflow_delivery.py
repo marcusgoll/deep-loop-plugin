@@ -3,7 +3,10 @@
 Uses the existing protected store and immutable-intent recovery discipline.
 No enrollment, worker activation, checkpoint transition or merge occurs here.
 The injected controller/API must be trusted host infrastructure, never candidate
-callbacks. Every request reauthenticates parent acceptance and current source.
+callbacks. Every request checks current authority, full review and source before
+and after I/O. Initialization, provider mutations and protected saves also
+authenticate the complete retained parent/native history. Read-only responses
+never grant durable acceptance on their own.
 """
 import base64
 from datetime import datetime, timezone
@@ -65,6 +68,21 @@ class WorkflowDelivery:
             raise ValueError('Workflow delivery cut changed during final source guard')
         c._workflow_mutation_authority(parent_recovery=True)
 
+    def _locked_history_guard(self):
+        """Reauthenticate retained chains before direct checkpoint mutations."""
+        self._locked_guard()
+        c=self.controller;checkpoint=digest(c.workflow_gate._read()[1])
+        for expected in self.cut['outcome']['task_histories'].values():
+            actual=c._workflow_task_provenance_locked(expected['owner'])
+            if actual['checkpoint_sha256']!=checkpoint:
+                raise ValueError('Workflow history checkpoint changed before publication')
+            projected={k:v for k,v in expected.items() if k!='current_observation'}
+            projected.update(kind='historical_workflow_task_provenance',final_proof_verified=False)
+            actual={**actual,'checkpoint_sha256':expected['checkpoint_sha256']}
+            if actual!=projected:
+                raise ValueError('Workflow retained history changed before publication')
+        self._locked_guard()
+
     def _save(self, suffix, value):
         self._fresh()
         with self.store.lock():
@@ -81,7 +99,10 @@ class WorkflowDelivery:
             if method!='GET':raise ValueError('Checkpoint readback cannot mutate provider')
             self._locked_guard();response=self.api(method,route,body);self._locked_guard()
             return response
-        self._fresh()
+        # GET cannot publish or seal progress. Its two fresh locked guards
+        # authenticate current authority/proof; full historical provenance is
+        # still required at initialization and every mutation/save boundary.
+        if method != 'GET':self._fresh()
         with self.store.lock():
             self._locked_guard()
             response=self.api(method,route,body)
