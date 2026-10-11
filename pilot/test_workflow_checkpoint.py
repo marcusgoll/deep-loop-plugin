@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 import test_workflow_delivery as fixtures
 from admission import digest
-from workflow_delivery import WorkflowDelivery
+from workflow_delivery import WorkflowDelivery,WAIT
 from workflow_checkpoint import WorkflowCheckpoint, WorkflowTerminal
 from workflow_gate import WorkflowGate
 
@@ -48,6 +48,7 @@ def late_history_mutation(case,terminal):
     for mutation in ('checkpoint','window'):
         with case.subTest(mutation=mutation):
             case.setUp();intent=case.terminal() if terminal else case.intent()
+            case.assertEqual(case.wrapper.step(),WAIT)
             provider_guard=case.wrapper._provider_guard;history_guard=case.adapter._locked_history_guard
             in_provider=False;triggered=[]
             def provider(receipt):
@@ -96,13 +97,50 @@ class WorkflowCheckpointTests(unittest.TestCase):
     def intent(self):
         self.assertEqual(self.wrapper.step(),'prepared_workflow_delivery_checkpoint')
         return self.c.store.read(self.key+'.workflow-delivery-checkpoint-intent.json')
+    def recover(self):
+        self.assertEqual(self.wrapper.step(),WAIT)
+        return self.wrapper.step()
+
     def completion_exists(self):return (self.c.store.root/(self.key+'.workflow-delivery-checkpoint.json')).exists()
     def test_history_guard_cannot_change_final_checkpoint_or_extend_window(self):
         late_history_mutation(self,False)
 
+    def test_writer_default_and_distinct_closing_callbacks_preserve_exact_adoption(self):
+        for separate in (False,True):
+            with self.subTest(separate=separate):
+                self.setUp();intent=self.intent();events=[]
+                kwargs={'before_write':lambda:events.append('before')}
+                if separate:kwargs['after_write']=lambda:events.append('after')
+                with self.c.store.lock():
+                    saved=self.c.workflow_gate._publish_checkpoint(intent,lambda row:row,lambda:[],**kwargs)
+                self.assertEqual(saved,intent['after'])
+                self.assertEqual(events,['before','after' if separate else 'before'])
+                events.clear()
+                with self.c.store.lock():
+                    self.c.workflow_gate._publish_checkpoint(intent,lambda row:{**row,'before':saved},lambda:[],**kwargs)
+                self.assertEqual(events,['after' if separate else 'before'])
+                self.assertFalse(self.completion_exists())
+
+    def test_post_write_failure_retains_exact_uncompleted_image_for_fresh_recovery(self):
+        intent=self.intent()
+        with patch.object(self.wrapper,'_post_publication_guard',side_effect=RuntimeError('post-write fault')):
+            with self.assertRaisesRegex(RuntimeError,'post-write fault'):self.wrapper.step()
+        self.assertEqual(json.loads(self.path.read_text()),intent['after']);self.assertFalse(self.completion_exists())
+        self.provider.ref['object']['sha']='f'*40
+        with self.assertRaises(ValueError):self.wrapper.step()
+        self.assertFalse(self.completion_exists())
+
+    def test_provider_drift_between_publication_and_completion_cannot_verify(self):
+        intent=self.intent();self.assertEqual(self.wrapper.step(),WAIT)
+        self.assertEqual(json.loads(self.path.read_text()),intent['after']);self.assertFalse(self.completion_exists())
+        self.provider.pr['head']['sha']='f'*40;self.provider.calls.clear()
+        with self.assertRaises(ValueError):self.wrapper.step()
+        self.assertTrue(self.provider.calls);self.assertTrue(all(row[0]=='GET' for row in self.provider.calls))
+        self.assertFalse(self.completion_exists())
+
     def test_exact_writer_and_repeat_recovery_preserve_history_and_never_provider_write(self):
         saved=self.intent();self.provider.calls.clear()
-        self.assertEqual(self.wrapper.step(),'recovered_workflow_delivery_checkpoint')
+        self.assertEqual(self.recover(),'recovered_workflow_delivery_checkpoint')
         self.assertEqual(json.loads(self.path.read_text()),saved['after'])
         after=self.path.read_bytes();self.assertEqual(self.wrapper.step(),'workflow_delivery_checkpoint_verified')
         self.assertEqual(self.path.read_bytes(),after);self.assertEqual(self.c.store.read(self.key+'.parent-acceptance.json'),self.parent)
@@ -173,10 +211,11 @@ class WorkflowCheckpointTests(unittest.TestCase):
                     result=original();self.c.active=False;return result
                 self.c.workflow_gate._read=read_then_expire
         with patch.object(self.c.workflow_gate,'_publish_checkpoint',side_effect=publish),                patch.object(self.wrapper,'_provider_guard',side_effect=guard_then_arm_expiry):
+            self.assertEqual(self.wrapper.step(),WAIT)
             with self.assertRaisesRegex(ValueError,'expired'):self.wrapper.step()
         self.assertEqual(json.loads(self.path.read_text()),intent['after']);self.assertFalse(self.completion_exists())
     def test_late_checkpoint_drift_in_source_guard_blocks_completion(self):
-        intent=self.intent();guard=self.c._workflow_source_guard
+        intent=self.intent();self.assertEqual(self.wrapper.step(),WAIT);guard=self.c._workflow_source_guard
         def changed(proof,**kwargs):
             guard(proof,**kwargs)
             state=json.loads(self.path.read_text())
@@ -213,15 +252,31 @@ class WorkflowTerminalTests(unittest.TestCase):
 
     setUp=WorkflowCheckpointTests.setUp
     intent=WorkflowCheckpointTests.intent
+    recover=WorkflowCheckpointTests.recover
     def terminal(self):
         self.intent()
-        self.assertEqual(self.wrapper.step(),'recovered_workflow_delivery_checkpoint')
+        self.assertEqual(self.recover(),'recovered_workflow_delivery_checkpoint')
         self.wrapper=WorkflowTerminal(self.c,self.adapter)
         self.assertEqual(self.wrapper.step(),'prepared_workflow_terminal_checkpoint')
         return self.c.store.read(self.key+'.workflow-terminal-intent.json')
+    def test_published_complete_image_without_receipt_is_pending_and_rechecked(self):
+        intent=self.terminal();self.assertEqual(self.wrapper.step(),WAIT)
+        self.assertTrue(json.loads(self.path.read_text())['complete'])
+        name=self.key+'.workflow-terminal-complete.json';self.assertFalse((self.c.store.root/name).exists())
+        self.provider.check_status='failure'
+        with self.assertRaisesRegex(ValueError,'check failed'):self.wrapper.step()
+        self.assertFalse((self.c.store.root/name).exists())
+
+    def test_forged_delivery_completion_cannot_prepare_terminal_intent(self):
+        self.intent();self.recover();name=self.key+'.workflow-delivery-checkpoint.json'
+        record=self.c.store.read(name);self.c.store.remove(name);self.c.store.create(name,{**record,'receipt_sha256':'0'*64})
+        self.wrapper=WorkflowTerminal(self.c,self.adapter)
+        with self.assertRaisesRegex(ValueError,'Verified delivery checkpoint'):self.wrapper.step()
+        self.assertFalse((self.c.store.root/(self.key+'.workflow-terminal-intent.json')).exists())
+
     def test_terminal_exact_recovery_and_immutable_parent(self):
         intent=self.terminal();self.provider.calls.clear()
-        self.assertEqual(self.wrapper.step(),'recovered_workflow_terminal_checkpoint')
+        self.assertEqual(self.recover(),'recovered_workflow_terminal_checkpoint')
         self.assertEqual(json.loads(self.path.read_text()),intent['after'])
         self.assertEqual(self.wrapper.step(),'workflow_complete_verified')
         self.assertEqual(self.c.store.read(self.key+'.parent-acceptance.json'),self.parent)
@@ -264,6 +319,7 @@ class WorkflowTerminalTests(unittest.TestCase):
             source(proof,**kwargs)
             if published:self.c.active=False
         with patch.object(self.c.workflow_gate,'_publish_checkpoint',side_effect=published_call),patch.object(self.c,'_workflow_source_guard',side_effect=expire):
+            self.assertEqual(self.wrapper.step(),WAIT)
             with self.assertRaisesRegex(ValueError,'expired'):self.wrapper.step()
         self.assertEqual(json.loads(self.path.read_text()),intent['after'])
         self.assertFalse((self.c.store.root/(self.key+'.workflow-terminal-complete.json')).exists())
@@ -278,7 +334,7 @@ class WorkflowTerminalTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(),before)
     def test_terminal_process_crash_at_each_protected_boundary(self):
         if not hasattr(os,'fork'):self.skipTest('Requires POSIX')
-        self.intent();self.wrapper.step();self.wrapper=WorkflowTerminal(self.c,self.adapter)
+        self.intent();self.recover();self.wrapper=WorkflowTerminal(self.c,self.adapter)
         for boundary in ('intent','checkpoint','completion'):
             child=os.fork()
             if child==0:

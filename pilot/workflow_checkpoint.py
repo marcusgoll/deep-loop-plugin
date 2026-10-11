@@ -6,6 +6,7 @@ can be recognized by the existing gate and checkpoint writer.
 """
 from pathlib import Path
 from admission import digest
+from workflow_delivery import WAIT
 
 FIELDS={'contract_digest','binding_sha256','parent_receipt_sha256','plan_sha256',
         'receipt_sha256','before','after','observation'}
@@ -59,15 +60,25 @@ class WorkflowCheckpoint:
         if current!=receipt:raise ValueError('Current provider acceptance changed before checkpoint publication')
         self.adapter._locked_history_guard()
 
+    def _post_publication_guard(self,binding,expected):
+        # Provider acceptance is freshly reinspected by the later completion
+        # wake. This publication remains an incomplete recovery stage.
+        self.adapter._locked_history_guard()
+        if self.controller.workflow_gate._read()[:2]!=(binding,expected):
+            raise ValueError('Workflow published checkpoint changed at history guard')
+        self.controller._workflow_mutation_authority(parent_recovery=True)
+
     def step(self):
         name=self.key+'.workflow-delivery-checkpoint-intent.json'
         try:self.store.read(name)
         except FileNotFoundError:
-            result=self.adapter.step()
-            if result!='workflow_delivery_verified':return result
             receipt=self.adapter._read('complete')
-            current=self.adapter.authenticate_delivery()
-            if current!=receipt:raise ValueError('Provider acceptance changed before delivery intent')
+            if receipt is None:
+                # The protected delivery receipt ends this wake. It is a
+                # recovery locator, never authority for the next publication.
+                result=self.adapter.step()
+                return WAIT if result=='workflow_delivery_verified' else result
+            self.adapter._initialize()
             with self.store.lock():
                 self._provider_guard(receipt)
                 binding,state,_=self.controller.workflow_gate._read()
@@ -87,8 +98,7 @@ class WorkflowCheckpoint:
                     raise ValueError('Workflow delivery checkpoint intent readback differs')
             return 'prepared_workflow_delivery_checkpoint'
         receipt=self.adapter._read('complete')
-        if self.adapter.authenticate_delivery()!=receipt:
-            raise ValueError('Current provider acceptance changed during delivery recovery')
+        self.adapter._initialize()
         with self.store.lock():
             gate=self.controller.workflow_gate;binding,state,_=gate._read()
             intent=checked_delivery_intent(self.store,self.key,binding,gate.helper)
@@ -115,7 +125,13 @@ class WorkflowCheckpoint:
                 actual=gate._read()[1]
                 archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in actual else None
                 return gate.helper.validation_issues(actual,'delivery',archive)
-            saved=gate._publish_checkpoint(intent,checked,postcheck,before_write=lambda:self._provider_guard(receipt))
+            if state==intent['before']:
+                saved=gate._publish_checkpoint(intent,checked,postcheck,
+                    before_write=lambda:self._provider_guard(receipt),
+                    after_write=lambda:self._post_publication_guard(binding,intent['after']))
+                if saved!=intent['after']:raise ValueError('Delivery checkpoint publication differs')
+                return WAIT
+            saved=state
             self._provider_guard(receipt)
             if saved!=intent['after'] or gate._read()[1]!=saved:
                 raise ValueError('Workflow delivery checkpoint changed before completion receipt')
@@ -165,14 +181,20 @@ class WorkflowTerminal(WorkflowCheckpoint):
         name=self.key+'.workflow-terminal-intent.json'
         try:self.store.read(name)
         except FileNotFoundError:
-            result=super().step()
-            if result!='workflow_delivery_checkpoint_verified':return result
+            try:self.store.read(self.key+'.workflow-delivery-checkpoint.json')
+            except FileNotFoundError:return super().step()
+            self.adapter._initialize()
             receipt=self.adapter._read('complete')
             with self.store.lock():
                 self._provider_guard(receipt)
                 gate=self.controller.workflow_gate;binding,state,_=gate._read()
                 delivery=checked_delivery_intent(self.store,self.key,binding,gate.helper)
                 checkpoint=self.store.read(self.key+'.workflow-delivery-checkpoint.json')
+                expected={'contract_digest':self.key,'intent_sha256':digest(delivery),
+                          'checkpoint_sha256':digest(delivery['after']),'receipt_sha256':digest(receipt),
+                          'delivery_verified':True,'complete':False}
+                if checkpoint!=expected or state!=delivery['after']:
+                    raise ValueError('Verified delivery checkpoint required before terminal intent')
                 archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
                 after=gate.helper.completed_state(state,archive)
                 proof=gate.final_review_proof()
@@ -189,8 +211,7 @@ class WorkflowTerminal(WorkflowCheckpoint):
                     raise ValueError('Workflow terminal intent readback differs')
             return 'prepared_workflow_terminal_checkpoint'
         receipt=self.adapter._read('complete')
-        if self.adapter.authenticate_delivery()!=receipt:
-            raise ValueError('Current provider acceptance changed during terminal recovery')
+        self.adapter._initialize()
         with self.store.lock():
             gate=self.controller.workflow_gate;binding,state,_=gate._read()
             intent=checked_terminal_intent(self.store,self.key,binding,gate.helper)
@@ -218,7 +239,13 @@ class WorkflowTerminal(WorkflowCheckpoint):
                 issues=gate.helper.validation_issues(current,'ship',archive)
                 if issues:raise ValueError('Workflow terminal SHIP validation blocked: '+'; '.join(issues))
                 return gate.final_review_proof()
-            saved=gate._publish_checkpoint(intent,checked,postcheck,before_write=lambda:self._provider_guard(receipt))
+            if state==intent['before']:
+                saved=gate._publish_checkpoint(intent,checked,postcheck,
+                    before_write=lambda:self._provider_guard(receipt),
+                    after_write=lambda:self._post_publication_guard(binding,intent['after']))
+                if saved!=intent['after']:raise ValueError('Terminal checkpoint publication differs')
+                return WAIT
+            saved=state
             self._provider_guard(receipt)
             self.controller._workflow_source_guard(intent['observation'],parent_recovery=True)
             if gate._read()[:2]!=(binding,saved) or saved!=intent['after']:

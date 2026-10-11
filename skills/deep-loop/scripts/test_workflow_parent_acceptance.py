@@ -239,6 +239,7 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         for endpoint in ('delivery','terminal'):
             with self.subTest(endpoint=endpoint):
                 if endpoint=='terminal':
+                    self.assertEqual(checkpoint.step(),'wait_for_workflow_delivery')
                     self.assertEqual(checkpoint.step(),'recovered_workflow_delivery_checkpoint')
                     writer=WorkflowTerminal(self.controller,adapter)
                     self.assertEqual(writer.step(),'prepared_workflow_terminal_checkpoint')
@@ -259,6 +260,46 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
                 provider.hook=None
                 if endpoint=='terminal':self.graph.store.remove(name)
                 self.graph.store.create(name,original)
+
+    def test_history_drift_between_wakes_blocks_completion_and_worker_recovers_exact_stage(self):
+        import sys
+        from workflow_delivery import WorkflowDelivery,WAIT
+        from workflow_checkpoint import WorkflowCheckpoint,WorkflowTerminal
+        from test_workflow_delivery import Provider
+        from private_worker import run
+        if sys.platform!='linux':
+            mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        for _ in range(20):
+            if adapter.step()=='workflow_delivery_verified':break
+        else:self.fail('Provider fixture did not converge')
+        checkpoint=WorkflowCheckpoint(self.controller,adapter)
+        self.assertEqual(checkpoint.step(),'prepared_workflow_delivery_checkpoint')
+        self.assertEqual(checkpoint.step(),WAIT)
+        name='deep-loop-pilot-'+self.graph.key+'-1-1.invocation.json';original=self.graph.store.read(name)
+        self.graph.store.remove(name)
+        with self.assertRaises(FileNotFoundError):checkpoint.step()
+        self.assertFalse((self.graph.store.root/(self.graph.key+'.workflow-delivery-checkpoint.json')).exists())
+        self.graph.store.create(name,original)
+        self.assertEqual(checkpoint.step(),'recovered_workflow_delivery_checkpoint')
+        terminal=WorkflowTerminal(self.controller,adapter)
+        self.assertEqual(terminal.step(),'prepared_workflow_terminal_checkpoint')
+        self.assertEqual(terminal.step(),WAIT)
+        self.assertTrue(json.loads(self.graph.checkpoint.read_text())['complete'])
+        receipt=self.graph.key+'.workflow-terminal-complete.json'
+        self.assertFalse((self.graph.store.root/receipt).exists())
+        self.graph.store.create('enabled-outcome.json',{'contract_digest':self.graph.key})
+        self.graph.store.remove(name)
+        wake=lambda:run(self.graph.store,lambda key:self.controller,window=lambda *args:3600,
+            workflow_delivery_factory=lambda key:WorkflowTerminal(self.controller,WorkflowDelivery(self.controller,provider.api)))
+        with self.assertRaises(FileNotFoundError):wake()
+        self.assertFalse((self.graph.store.root/receipt).exists())
+        self.graph.store.create(name,original)
+        self.assertEqual(wake(),'recovered_workflow_terminal_checkpoint')
+        self.assertEqual(wake(),'workflow_complete_verified')
+        self.assertTrue(self.graph.store.read(receipt)['complete'])
 
     def test_delivery_reader_cannot_finish_pending_parent(self):
         self.prepared();self.controller.prepare_workflow_parent_acceptance();before=self.graph.checkpoint.read_bytes()
