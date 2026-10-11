@@ -86,6 +86,17 @@ def validation_issues(state,stage,archive=None):
             self.assertEqual(verify.call_count,1)
         self.assertEqual(set(cut),{str(contract),str(receipt),str(artifact)})
         self.assertEqual(cut[str(artifact)]['sha256'],hashlib.sha256(b'passed').hexdigest())
+        wrapped=self.helper.review_observation_with_dependencies(state,[['V1']],self.root)
+        self.assertEqual(set(wrapped),{'observation','dependencies'})
+        self.assertEqual(wrapped['dependencies'],cut)
+        self.assertEqual(wrapped['observation'],self.helper.review_observation(state,[['V1']],self.root))
+        p.write_text(p.read_text()+"\ndef verified_delivery_state(state,revision,evidence,archive=None):\n proof.sha(state['image_input']);return {'image':'derived'}\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        image=self.root/'image-input';image.write_bytes(b'image-bound proof')
+        derivation={'before':{'image_input':str(image)},'revision':'a'*40,'evidence':'fixture','terminal':False}
+        combined=self.helper.checkpoint_observation_with_dependencies(state,'review_observation',[['V1']],self.root,derivation)
+        self.assertEqual(combined['observation'],self.helper.checkpoint_observation(state,'review_observation',[['V1']],self.root,derivation))
+        self.assertEqual(set(combined['dependencies']),set(cut)|{str(image)})
         with self.assertRaisesRegex(ValueError,'unavailable or failed'):
             self.helper.review_dependency_cut({**state,'drift':True},[['V1']],self.root)
 

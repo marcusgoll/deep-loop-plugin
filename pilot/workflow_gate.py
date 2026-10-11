@@ -52,7 +52,8 @@ class WorkflowGate:
     def __init__(self, store, contract_digest, helper):
         self.store, self.contract_digest, self.helper = store, contract_digest, helper
 
-    def _read(self, *, review=False, outcome=False, authority=False):
+    def _read(self, *, review=False, outcome=False, authority=False, dependencies=False):
+        if dependencies and not (review and authority):raise ValueError('Dependencies require authenticated full review')
         if authority and not review:raise ValueError('Authority origin requires full review')
         require_active(self.store, self.contract_digest)
         binding = self.store.read(self.contract_digest + '.workflow.json')
@@ -67,10 +68,11 @@ class WorkflowGate:
                     intent.get('binding_digest') != digest(binding) or
                     intent.get('approval_ref') != binding.get('approval_ref')):
                 raise ValueError('Workflow binding completion identity drift')
-        return self.validate_binding(binding,review=review,outcome=outcome,authority=authority)
+        return self.validate_binding(binding,review=review,outcome=outcome,authority=authority,dependencies=dependencies)
 
-    def validate_binding(self, binding, *, review=False, outcome=False, authority=False):
+    def validate_binding(self, binding, *, review=False, outcome=False, authority=False, dependencies=False):
         """Inspect a proposed binding before its protected publication."""
+        if dependencies and not (review and authority):raise ValueError('Dependencies require authenticated full review')
         if authority and not review:raise ValueError('Authority origin requires full review')
         legacy_fields = {
                 'contract_digest', 'approval_ref', 'checkpoint_path', 'session_id',
@@ -128,14 +130,18 @@ class WorkflowGate:
         if (state.get('sessionId') != binding['session_id'] or
                 state.get('verificationContract') != binding['verification_contract']):
             raise ValueError('Checkpoint parent identity drift')
-        groups=None
+        groups=None;dependency_cut=None
         if review or outcome:
             mapping=binding['task_verifiers'];tasks={t['id']:t for t in state.get('tasks',[])}
             groups=self._review_groups(mapping,tasks)
             archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
             if image_cut is not None:
-                observation=self._image_observation(binding,state,payload,image_cut,
-                    'review_observation' if review else 'outcome_observation',groups,archive)
+                observed=self._image_observation(binding,state,payload,image_cut,
+                    'review_observation' if review else 'outcome_observation',groups,archive,dependencies=dependencies)
+                observation,dependency_cut=observed if dependencies else (observed,None)
+            elif dependencies:
+                wrapped=self.helper.review_observation_with_dependencies(state,groups,archive)
+                observation,dependency_cut=self._dependency_observation(wrapped)
             else:observation=self.helper.review_observation(state,groups,archive) if review else self.helper.outcome_observation(state,groups)
             if (not isinstance(observation,dict) or set(observation)!=({'records','issues','contract','prerequisites','review_issues'} if review else {'records','issues','contract','prerequisites'}) or
                     not isinstance(observation['prerequisites'],list) or len(observation['prerequisites'])!=len(groups) or
@@ -185,7 +191,7 @@ class WorkflowGate:
             # Expose origin only after the helper and protected image closure
             # above succeeded. This value belongs to this read invocation.
             origin=image_cut[0]['before'] if image_cut is not None else self.accepted_parent_image(binding,state)
-            return binding,state,by_id,observation,origin
+            return (binding,state,by_id,observation,origin,dependency_cut) if dependencies else (binding,state,by_id,observation,origin)
         if review or outcome:return binding,state,by_id,observation
         return binding, state, by_id
 
@@ -213,10 +219,11 @@ class WorkflowGate:
                 'evidence':receipt['pull_request'],'terminal':terminal is not None}
         return delivery,terminal,inputs
 
-    def _image_observation(self,binding,state,payload,cut,mode,groups,archive):
+    def _image_observation(self,binding,state,payload,cut,mode,groups,archive,*,dependencies=False):
         # Derivations and observation share only this isolated invocation.
         # Authenticate all protected records and exact checkpoint again after it.
-        result=self.helper.checkpoint_observation(state,mode,groups,archive,cut[2])
+        wrapped=self.helper.checkpoint_observation_with_dependencies(state,mode,groups,archive,cut[2]) if dependencies else None
+        result,dependency_cut=self._dependency_observation(wrapped) if dependencies else (self.helper.checkpoint_observation(state,mode,groups,archive,cut[2]),None)
         images={'delivery_image'}|({'terminal_image'} if cut[1] is not None else set())
         fields={'records','issues','contract'}
         if mode!='definition_observation':fields.add('prerequisites')
@@ -230,7 +237,28 @@ class WorkflowGate:
         if (self._image_derivation(binding,state)!=cut or
                 checkpoint_bytes(Path(binding['checkpoint_path']))!=payload):
             raise ValueError('Workflow protected image changed during observation')
-        return {key:result[key] for key in fields}
+        observation={key:result[key] for key in fields}
+        return (observation,dependency_cut) if dependencies else observation
+
+    @staticmethod
+    def _dependency_observation(wrapped):
+        if (not isinstance(wrapped,dict) or set(wrapped)!={'observation','dependencies'} or
+                not isinstance(wrapped['dependencies'],dict) or not wrapped['dependencies'] or
+                len(wrapped['dependencies'])>512):
+            raise ValueError('Malformed dependency-bearing review observation')
+        total=0
+        for name,row in wrapped['dependencies'].items():
+            if (not isinstance(name,str) or os.path.abspath(name)!=name or
+                    not isinstance(row,dict) or set(row)!={'physical_path','sha256','size','device','inode','mode'} or
+                    not isinstance(row['physical_path'],str) or os.path.abspath(row['physical_path'])!=row['physical_path'] or
+                    not isinstance(row['sha256'],str) or len(row['sha256'])!=64 or
+                    any(c not in '0123456789abcdef' for c in row['sha256']) or
+                    any(type(row[key]) is not int or row[key]<0 for key in ('size','device','inode','mode')) or
+                    row['size']>67108864 or row['mode']>0o7777):
+                raise ValueError('Malformed review dependency file identity')
+            total+=row['size']
+        if total>268435456:raise ValueError('Review dependency cut exceeds total bound')
+        return wrapped['observation'],wrapped['dependencies']
 
     def accepted_parent_image(self,binding,state):
         """Admit only the protected exact delivery image, preserving its origin."""
@@ -423,7 +451,19 @@ class WorkflowGate:
         """Fresh full review and authenticated origin; never a cross-call cache."""
         return self._final_review_cut(authority=True)
 
-    def _final_review_cut(self, *, authority=False):
+    def supports_review_authority_dependencies(self):
+        """Pure bounded capability selection; no helper I/O or cached proof."""
+        binding=self.store.read(self.contract_digest+'.workflow.json')
+        return (isinstance(binding.get('task_verifiers'),dict) and len(binding['task_verifiers'])<=128 and
+                all(callable(getattr(self.helper,name,None)) for name in
+                    ('review_observation','review_observation_with_dependencies','checkpoint_observation_with_dependencies')))
+
+    def final_review_authority_dependency_cut(self):
+        """Closing-call file cut, returned only with its authenticated review."""
+        if not self.supports_review_authority_dependencies():return None
+        return self._final_review_cut(authority=True,dependencies=True)
+
+    def _final_review_cut(self, *, authority=False, dependencies=False):
         binding=self.store.read(self.contract_digest+'.workflow.json')
         method=getattr(self.helper,'review_observation',None)
         if (not callable(method) or not isinstance(binding.get('task_verifiers'),dict) or
@@ -433,7 +473,7 @@ class WorkflowGate:
         binding,state,by_id,observation=opening[:4]
         source=self.candidate_snapshot(binding)
         outcome=self._review_outcome_at(binding,state,by_id,observation)
-        ending=self._read(review=True,authority=True) if authority else self._read(review=True)
+        ending=self._read(review=True,authority=True,dependencies=True) if dependencies else self._read(review=True,authority=True) if authority else self._read(review=True)
         again,after,tasks,closing=ending[:4]
         if (again!=binding or after!=state or
                 (authority and ending[4]!=opening[4]) or
@@ -445,6 +485,7 @@ class WorkflowGate:
                'outcome_proof':outcome,'review_issues':[],
                'parent_accepted':False,'delivery_verified':False}
         if source is not None:proof['candidate_source']=source
+        if dependencies:return binding,state,proof,opening[4],ending[5]
         return (binding,state,proof,opening[4]) if authority else (binding,state,proof)
 
     def _review_outcome_at(self,binding,state,by_id,observation):

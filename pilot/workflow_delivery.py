@@ -45,14 +45,16 @@ class WorkflowDelivery:
         if self.controller.authenticate_workflow_parent_acceptance() != self.cut:
             raise ValueError('Workflow delivery accepted-parent cut changed')
 
-    def _locked_guard(self):
+    def _locked_guard(self,*,dependencies=False):
         # The aggregate reader takes its own non-reentrant locks. Its fresh
         # result is checked again under the credential lock before I/O/write.
         c=self.controller;c._contract();c._workflow_mutation_authority(parent_recovery=True);c._unowned()
         c._require_no_pending_task_acceptance();c._require_no_pending_task_credit()
-        authority_reader=getattr(c.workflow_gate,'final_review_authority_cut',None)
+        authority_reader=getattr(c.workflow_gate,'final_review_authority_dependency_cut' if dependencies else 'final_review_authority_cut',None)
         authority_cut=authority_reader() if callable(authority_reader) else None
-        if authority_cut is not None and (not isinstance(authority_cut,tuple) or len(authority_cut)!=4):
+        if dependencies and authority_cut is None:
+            raise ValueError('Required closing review dependency capability unavailable')
+        if authority_cut is not None and (not isinstance(authority_cut,tuple) or len(authority_cut)!=(5 if dependencies else 4)):
             raise ValueError('Malformed workflow review authority cut')
         reader=getattr(c.workflow_gate,'final_review_cut',None)
         reviewed=authority_cut[:3] if authority_cut is not None else reader() if callable(reader) else None
@@ -77,6 +79,7 @@ class WorkflowDelivery:
                 c._workflow_quiescence()!=self.cut['outcome']['quiescence']):
             raise ValueError('Workflow delivery cut changed during final source guard')
         c._workflow_mutation_authority(parent_recovery=True)
+        return authority_cut[4] if dependencies else None
 
     def _locked_history_guard(self):
         """Reauthenticate retained chains before direct checkpoint mutations."""
@@ -94,9 +97,13 @@ class WorkflowDelivery:
             actual={**actual,'checkpoint_sha256':expected['checkpoint_sha256']}
             if actual!=projected:
                 raise ValueError('Workflow retained history changed before publication')
-        inspection=c._workflow_inspection_cut()
+        capability=getattr(c.workflow_gate,'supports_review_authority_dependencies',None)
+        composed=(callable(getattr(c.workflow_gate,'final_review_authority_dependency_cut',None)) and
+                  callable(capability) and capability() is True)
+        inspection=c._workflow_inspection_cut(proof_files={}) if composed else c._workflow_inspection_cut()
         c._workflow_close_retained_histories(retained,histories)
-        self._locked_guard()
+        dependencies=self._locked_guard(dependencies=True) if composed else self._locked_guard()
+        if composed:inspection={**inspection,'proof_files':dependencies}
         if c._workflow_retained_record_cut(owners)!=retained:
             raise ValueError('Retained records changed during closing publication proof')
         c._workflow_close_inspection_cut(inspection,retained,histories,self.cut['outcome']['quiescence'])

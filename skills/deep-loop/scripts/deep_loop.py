@@ -854,6 +854,17 @@ def checkpoint_observation(state,mode,groups,archive,derivation):
     return {**observation,**images}
 
 
+def review_observation_with_dependencies(state,groups,archive=None):
+    with proof_binding.dependency_context() as records:
+        observation=review_observation(state,groups,archive)
+        return {'observation':observation,'dependencies':proof_binding.close_dependency_cut(records)}
+
+def checkpoint_observation_with_dependencies(state,mode,groups,archive,derivation):
+    with proof_binding.dependency_context() as records:
+        observation=checkpoint_observation(state,mode,groups,archive,derivation)
+        return {'observation':observation,'dependencies':proof_binding.close_dependency_cut(records)}
+
+
 def validation_issues(state, stage, archive=None):
     """Read current recorded evidence without selecting or mutating a session."""
     if not isinstance(state, dict) or type(state.get('schemaVersion')) is not int or state['schemaVersion'] not in (2, 3, 4):

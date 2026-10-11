@@ -384,6 +384,66 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
                         self.assertTrue(changed)
                     finally:path.write_bytes(original)
 
+    def test_private_review_dependency_wrapper_matches_existing_observation(self):
+        self.prepared(delivery_capability=True)
+        binding,state,_=self.graph.gate._read()
+        ids=sorted({identifier for group in binding['task_verifiers'].values() for identifier in group})
+        helper=self.graph.gate.helper
+        wrapped=helper.review_observation_with_dependencies(state,[ids])
+        self.assertEqual(set(wrapped),{'observation','dependencies'})
+        self.assertEqual(wrapped['observation'],helper.review_observation(state,[ids]))
+        self.assertEqual(wrapped['dependencies'],helper.review_dependency_cut(state,[ids]))
+        self.assertTrue(wrapped['dependencies'])
+
+    def test_private_gate_returns_only_closing_review_dependency_cut(self):
+        self.prepared(delivery_capability=True)
+        gate=self.graph.gate;helper=gate.helper
+        expected=gate.final_review_authority_cut()
+        original=helper.review_observation_with_dependencies
+        with patch.object(helper,'review_observation',wraps=helper.review_observation) as ordinary,patch.object(helper,'review_observation_with_dependencies',wraps=original) as closing:
+            result=gate.final_review_authority_dependency_cut()
+            self.assertEqual(result[:4],expected)
+            self.assertEqual(closing.call_count,1)
+            # Module-level wrapper also invokes the ordinary readers internally.
+            self.assertGreaterEqual(ordinary.call_count,1)
+        self.assertTrue(result[4])
+        for bad in ({},None,{'observation':{},'dependencies':{}},
+                    {'observation':{},'dependencies':{'/fixture':{}}}):
+            with self.subTest(bad=bad),patch.object(helper,'review_observation_with_dependencies',return_value=bad):
+                with self.assertRaisesRegex(ValueError,'Malformed'):gate.final_review_authority_dependency_cut()
+        with patch.object(helper,'review_observation_with_dependencies',None):
+            self.assertIsNone(gate.final_review_authority_dependency_cut())
+
+    def test_history_guard_uses_closing_call_files_and_keeps_legacy_collector(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('No provider calls permitted'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        helper=self.graph.gate.helper
+        with patch.object(helper,'review_dependency_cut',side_effect=AssertionError('No separate collector in modern history guard')):
+            adapter._locked_history_guard()
+        with patch.object(self.graph.gate,'final_review_authority_dependency_cut',None),patch.object(helper,'review_dependency_cut',wraps=helper.review_dependency_cut) as collector:
+            adapter._locked_history_guard();self.assertEqual(collector.call_count,1)
+        self.assertNotIn('dependencies',vars(adapter))
+
+    def test_large_mapping_selects_legacy_before_closing_review(self):
+        from workflow_delivery import WorkflowDelivery
+        self.prepared(delivery_capability=True)
+        gate=self.graph.gate;name=self.graph.key+'.workflow.json';original=self.graph.store.read(name)
+        large={**original,'task_verifiers':{'task-'+str(i):['V1'] for i in range(129)}}
+        self.graph.store.remove(name);self.graph.store.create(name,large)
+        try:
+            self.assertFalse(gate.supports_review_authority_dependencies())
+            self.assertIsNone(gate.final_review_authority_dependency_cut())
+        finally:
+            self.graph.store.remove(name);self.graph.store.create(name,original)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        adapter=WorkflowDelivery(self.controller,lambda *args:self.fail('No provider calls permitted'))
+        adapter.cut=self.controller.authenticate_workflow_parent_acceptance()
+        with patch.object(gate,'supports_review_authority_dependencies',return_value=False),patch.object(gate,'final_review_authority_dependency_cut',side_effect=AssertionError('Ineligible mapping must select legacy before guard')),patch.object(gate.helper,'review_dependency_cut',wraps=gate.helper.review_dependency_cut) as collector:
+            adapter._locked_history_guard();self.assertEqual(collector.call_count,1)
+
     def test_missing_dependency_collector_cannot_authorize_history_closure(self):
         self.prepared(delivery_capability=True)
         with patch.object(self.controller.workflow_gate.helper,'review_dependency_cut',None):
