@@ -1112,6 +1112,7 @@ class PrivateController:
 
     def observe_workflow_outcome(self):
         """Authenticate every task's current proof and historical credit; read only."""
+        from workflow_gate import task_progress_identity
         with self.store.lock():
             self._contract();self._unowned()
             self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
@@ -1139,7 +1140,7 @@ class PrivateController:
                 raise ValueError('Every workflow outcome task requires durable credited acceptance')
         # Public readers take their own credential locks. Revalidate the entire
         # cut after sequential inspection; unlocked snapshots grant no mutation.
-        histories={task_id:self.authenticate_workflow_task_history(owner)
+        histories={task_id:self.authenticate_workflow_task_provenance(owner)
                    for task_id,owner in owners.items()}
         with self.store.lock():
             self._contract();self._unowned()
@@ -1147,11 +1148,20 @@ class PrivateController:
             if (gate.outcome_proof()!=outcome or self.journal.read()!=snapshot or
                     any(h['journal_revision']!=snapshot[0] or
                         h['progress_identity']!=credits_by_task[task_id]['progress_receipt'] or
-                        h['current_observation']!=outcome['tasks'][task_id]['observation']
+                        h['current_selection']!=outcome['tasks'][task_id]['observation']['selection'] or
+                        h['progress_identity']!=task_progress_identity(outcome['tasks'][task_id]['observation']) or
+                        h['checkpoint_sha256']!=outcome['tasks'][task_id]['observation']['checkpoint_sha256']
                         for task_id,h in histories.items())):
                 raise ValueError('Workflow outcome acceptance cut changed during inspection')
             if self._workflow_quiescence()!=quiescence:
                 raise ValueError('Workflow account identity changed during outcome inspection')
+            # The opening and closing aggregate proofs authenticate these exact
+            # current observations. Provenance above still independently checks
+            # every retained chain and stopped native owner. Reuse is confined
+            # to this checked cut; no proof survives a later reader invocation.
+            histories={task_id:{**history,'kind':'historical_workflow_task_acceptance',
+                'current_observation':outcome['tasks'][task_id]['observation'],
+                'final_proof_verified':True} for task_id,history in histories.items()}
             return {'kind':'authenticated_workflow_outcome_observation',
                     'outcome_proof':outcome,'task_histories':histories,
                     'journal_revision':snapshot[0],'quiescence':quiescence,'parent_accepted':False,'delivery_verified':False}

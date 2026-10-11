@@ -524,6 +524,27 @@ class TaskExecutionTests(WorkflowDispatchTests):
             self.assertEqual(self.journal.read(),before)
             self.assertEqual(self.graph.checkpoint.read_bytes(),state)
 
+    def test_outcome_histories_equal_public_reader_without_repeating_task_proofs(self):
+        from unittest.mock import patch
+        self.completed_outcome_fixture()
+        expected=self.controller.observe_workflow_outcome()
+        for history in expected['task_histories'].values():
+            self.assertEqual(history,self.controller.authenticate_workflow_task_history(history['owner']))
+        with patch.object(self.graph.gate,'task_acceptance',side_effect=AssertionError('duplicate task proof')):
+            self.assertEqual(self.controller.observe_workflow_outcome(),expected)
+
+    def test_outcome_rejects_provenance_cut_substitution(self):
+        from unittest.mock import patch
+        self.completed_outcome_fixture()
+        original=self.controller.authenticate_workflow_task_provenance
+        for field,value in (('checkpoint_sha256','0'*64),('progress_identity','0'*64),
+                            ('current_selection',{'task_id':'substituted'})):
+            with self.subTest(field=field):
+                def changed(owner):return {**original(owner),field:value}
+                with patch.object(self.controller,'authenticate_workflow_task_provenance',side_effect=changed):
+                    with self.assertRaisesRegex(ValueError,'cut changed'):
+                        self.controller.observe_workflow_outcome()
+
     def test_done_graph_without_credited_task_attribution_cannot_accept_outcome(self):
         self.graph.outcome_ready();self.journal.state=initialize(self.graph.key,workflow=True)
         from admission import reserve,finish
