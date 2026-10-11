@@ -52,7 +52,7 @@ class WorkflowGate:
     def __init__(self, store, contract_digest, helper):
         self.store, self.contract_digest, self.helper = store, contract_digest, helper
 
-    def _read(self):
+    def _read(self, *, review=False):
         require_active(self.store, self.contract_digest)
         binding = self.store.read(self.contract_digest + '.workflow.json')
         try:
@@ -66,9 +66,9 @@ class WorkflowGate:
                     intent.get('binding_digest') != digest(binding) or
                     intent.get('approval_ref') != binding.get('approval_ref')):
                 raise ValueError('Workflow binding completion identity drift')
-        return self.validate_binding(binding)
+        return self.validate_binding(binding,review=review)
 
-    def validate_binding(self, binding):
+    def validate_binding(self, binding, *, review=False):
         """Inspect a proposed binding before its protected publication."""
         legacy_fields = {
                 'contract_digest', 'approval_ref', 'checkpoint_path', 'session_id',
@@ -122,9 +122,23 @@ class WorkflowGate:
         if (state.get('sessionId') != binding['session_id'] or
                 state.get('verificationContract') != binding['verification_contract']):
             raise ValueError('Checkpoint parent identity drift')
-        observe=getattr(self.helper,'definition_observation',None)
-        definition=observe(state) if callable(observe) else None
-        if callable(observe):
+        groups=None
+        if review:
+            mapping=binding['task_verifiers'];tasks={t['id']:t for t in state.get('tasks',[])}
+            groups=self._review_groups(mapping,tasks)
+            archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
+            observation=self.helper.review_observation(state,groups,archive)
+            if (not isinstance(observation,dict) or set(observation)!={'records','issues','contract','prerequisites','review_issues'} or
+                    not isinstance(observation['prerequisites'],list) or len(observation['prerequisites'])!=len(groups) or
+                    any(not isinstance(issues,list) or any(not isinstance(i,str) for i in issues)
+                        for issues in observation['prerequisites']+[observation['review_issues']])):
+                raise ValueError('Malformed bounded workflow review observation')
+            definition={key:observation[key] for key in ('records','issues','contract')}
+            observe=True
+        else:
+            observe=getattr(self.helper,'definition_observation',None)
+            definition=observe(state) if callable(observe) else None
+        if review or callable(observe):
             if (not isinstance(definition,dict) or set(definition)!={'records','issues','contract'} or
                     not isinstance(definition['records'],(list,tuple)) or len(definition['records'])!=2 or
                     not isinstance(definition['issues'],list) or
@@ -154,7 +168,19 @@ class WorkflowGate:
         mapped = {i for ids in mapping.values() for i in ids}
         if mapped != blocking:
             raise ValueError('Task mapping must cover every parent blocking verifier exactly by ID')
+        if review:return binding,state,by_id,observation
         return binding, state, by_id
+
+    def _review_groups(self,mapping,by_id):
+        groups=[sorted({i for ids in mapping.values() for i in ids})]
+        for task_id in sorted(by_id):
+            covered={task_id}
+            def visit(identifier):
+                for parent in by_id[identifier].get('dependsOn',[]):
+                    if parent not in covered:covered.add(parent);visit(parent)
+            visit(task_id)
+            groups.append(sorted({i for task in covered for i in mapping[task]}))
+        return groups
 
     def accepted_parent_image(self,binding,state):
         """Admit only the protected exact delivery image, preserving its origin."""
@@ -317,6 +343,50 @@ class WorkflowGate:
                 'parent_accepted':False,'delivery_verified':False}
 
     def final_review_proof(self):
+        """Fresh opening/closing helper batches; no cross-call proof cache."""
+        binding=self.store.read(self.contract_digest+'.workflow.json')
+        method=getattr(self.helper,'review_observation',None)
+        if (not callable(method) or not isinstance(binding.get('task_verifiers'),dict) or
+                len(binding['task_verifiers'])>128):
+            return self._legacy_final_review_proof()
+        binding,state,by_id,observation=self._read(review=True)
+        source=self.candidate_snapshot(binding)
+        outcome=self._review_outcome_at(binding,state,by_id,observation)
+        again,after,tasks,closing=self._read(review=True)
+        if (again!=binding or after!=state or
+                self._review_outcome_at(again,after,tasks,closing)!=outcome or
+                self.candidate_snapshot(binding)!=source):
+            raise ValueError('Final workflow review cut changed during validation')
+        proof={'kind':'workflow_final_review_proof','contract_digest':self.contract_digest,
+               'binding_digest':digest(binding),'checkpoint_sha256':digest(state),
+               'outcome_proof':outcome,'review_issues':[],
+               'parent_accepted':False,'delivery_verified':False}
+        if source is not None:proof['candidate_source']=source
+        return proof
+
+    def _review_outcome_at(self,binding,state,by_id,observation):
+        if any(task['status']!='done' for task in by_id.values()):
+            raise ValueError('Workflow outcome has unfinished tasks')
+        if observation['review_issues']:
+            raise ValueError('Full workflow review blocked: '+'; '.join(observation['review_issues']))
+        prerequisites=observation['prerequisites']
+        if prerequisites[0]:raise ValueError('Workflow outcome proof blocked: '+'; '.join(prerequisites[0]))
+        tasks={}
+        for index,task_id in enumerate(sorted(by_id),1):
+            selection={'task_id':task_id,'binding_digest':digest(binding),
+                       'session_id':state['sessionId'],
+                       'prompt_sha256':hashlib.sha256(binding['task_prompts'][task_id].encode()).hexdigest()}
+            proof=self._task_acceptance_at(selection,binding,state,by_id,prerequisites[index])
+            tasks[task_id]={'evidence':by_id[task_id].get('evidence'),'observation':proof}
+        ids=sorted({i for mapped in binding['task_verifiers'].values() for i in mapped})
+        checks={c.get('verifierId'):c for c in state.get('checks',[])}
+        return {'kind':'workflow_outcome_proof','contract_digest':self.contract_digest,
+                'binding_digest':digest(binding),'session_id':state['sessionId'],
+                'checkpoint_sha256':digest(state),'verifier_ids':ids,
+                'proof_receipts':{i:checks[i]['receipt'] for i in ids},'tasks':tasks,
+                'parent_accepted':False,'delivery_verified':False}
+
+    def _legacy_final_review_proof(self):
         """Inspect full helper review gates, not merely mapped task receipts."""
         binding,state,_=self._read()
         source = self.candidate_snapshot(binding)
@@ -391,7 +461,7 @@ class WorkflowGate:
             raise ValueError('Task acceptance checkpoint changed during inspection')
         return result
 
-    def _task_acceptance_at(self,selection,binding,state,by_id):
+    def _task_acceptance_at(self,selection,binding,state,by_id,prerequisites=None):
         """Evaluate one task inside a caller's checked aggregate input.
 
         The caller must reread the protected binding/checkpoint before returning.
@@ -420,7 +490,7 @@ class WorkflowGate:
             raise ValueError('Task acceptance has unfinished prerequisites')
         ids = sorted({v for i in ancestors | {task_id}
                       for v in binding['task_verifiers'][i]})
-        failures = self.helper.prerequisite_issues(state, ids)
+        failures = self.helper.prerequisite_issues(state, ids) if prerequisites is None else prerequisites
         if failures:
             raise ValueError('Task acceptance proof blocked: ' + '; '.join(failures))
         source = self._candidate_receipts(binding,state,ids)

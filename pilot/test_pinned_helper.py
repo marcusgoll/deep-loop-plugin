@@ -70,6 +70,18 @@ class PinnedHelperTests(unittest.TestCase):
         p.write_text('source drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.definition_observation(state)
 
+    def test_fixed_review_batch_composes_legacy_readers_and_rechecks_pins(self):
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("from pathlib import Path\ndef task_records(state):return [state['tasks'],{}]\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):return {'verifiers':[]}\ndef prerequisite_issues(state,ids):return ['bad'] if ids==['bad'] else []\ndef validation_issues(state,stage,archive=None):\n assert isinstance(archive,Path) and stage=='review'\n return []\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        state={'tasks':[],'verificationContract':{'path':'/fixture'}}
+        with patch.object(self.helper,'_verify',wraps=self.helper._verify) as verify:
+            result=self.helper.review_observation(state,[['good'],['bad']],self.root)
+            self.assertEqual(verify.call_count,1)
+        self.assertEqual(result['prerequisites'],[[],['bad']]);self.assertEqual(result['review_issues'],[])
+        p.write_text('drift')
+        with self.assertRaisesRegex(ValueError,'source drift'):self.helper.review_observation(state,[['good']],self.root)
+
     def test_definition_batch_preserves_individual_result_capacity(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py'
         p.write_text("def task_records(state):return 'r'*600000\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):return 'c'*600000\n")

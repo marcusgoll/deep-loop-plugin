@@ -809,6 +809,16 @@ def definition_observation(state):
             'contract':contract_data(Path(state['verificationContract']['path']),verify_files=False)}
 
 
+def review_observation(state,groups,archive=None):
+    """Compose current readers for one bounded host review observation."""
+    if not isinstance(groups,list) or not 1<=len(groups)<=129:
+        raise ValueError('Bounded review prerequisite groups required')
+    result=definition_observation(state)
+    result['prerequisites']=[prerequisite_issues(state,ids) for ids in groups]
+    result['review_issues']=validation_issues(state,'ship' if state.get('complete') is True else 'review',archive)
+    return result
+
+
 def validation_issues(state, stage, archive=None):
     """Read current recorded evidence without selecting or mutating a session."""
     if not isinstance(state, dict) or type(state.get('schemaVersion')) is not int or state['schemaVersion'] not in (2, 3, 4):

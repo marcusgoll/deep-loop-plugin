@@ -602,6 +602,24 @@ class WorkflowGateTests(unittest.TestCase):
         self.f.source.write_text('drift')
         with self.assertRaisesRegex(ValueError,'proof blocked'):self.gate.outcome_proof()
 
+    def test_review_batch_matches_legacy_and_rejects_changed_receipt(self):
+        from unittest.mock import patch
+        self.outcome_ready()
+        with patch.object(deep_loop,'review_observation',None):legacy=self.gate.final_review_proof()
+        with patch.object(deep_loop,'review_observation',wraps=deep_loop.review_observation) as observe:
+            self.assertEqual(self.gate.final_review_proof(),legacy)
+            self.assertEqual(observe.call_count,2)
+        receipt=Path(self.f.state['checks'][0]['receipt']['path'])
+        receipt.write_text('substituted proof')
+        with self.assertRaisesRegex(ValueError,'blocked'):self.gate.final_review_proof()
+
+    def test_review_batch_malformed_result_never_falls_back(self):
+        from unittest.mock import patch
+        self.outcome_ready()
+        for observation in (None,{}, {'records':[[],{}],'issues':[],'contract':{},'prerequisites':[],'review_issues':[]}):
+            with self.subTest(observation=observation),patch.object(deep_loop,'review_observation',return_value=observation):
+                with self.assertRaisesRegex(ValueError,'Malformed'):self.gate.final_review_proof()
+
     def test_aggregate_task_observations_equal_fresh_public_checks(self):
         from unittest.mock import patch
         self.outcome_ready()
