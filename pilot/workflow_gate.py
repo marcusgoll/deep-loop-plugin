@@ -122,7 +122,17 @@ class WorkflowGate:
         if (state.get('sessionId') != binding['session_id'] or
                 state.get('verificationContract') != binding['verification_contract']):
             raise ValueError('Checkpoint parent identity drift')
-        tasks, by_id = self.helper.task_records(state)
+        observe=getattr(self.helper,'definition_observation',None)
+        definition=observe(state) if callable(observe) else None
+        if callable(observe):
+            if (not isinstance(definition,dict) or set(definition)!={'records','issues','contract'} or
+                    not isinstance(definition['records'],(list,tuple)) or len(definition['records'])!=2 or
+                    not isinstance(definition['issues'],list) or
+                    any(not isinstance(issue,str) for issue in definition['issues']) or
+                    not isinstance(definition['contract'],dict)):
+                raise ValueError('Malformed bounded workflow definition observation')
+            tasks,by_id=definition['records']
+        else:tasks, by_id = self.helper.task_records(state)
         if not tasks or graph_identity(tasks) != binding['graph']:
             raise ValueError('Approved task graph drift')
         mapping = binding['task_verifiers']
@@ -136,10 +146,10 @@ class WorkflowGate:
                 any(not isinstance(prompt, str) or not prompt.strip() or
                     len(prompt.encode('utf-8')) > 65536 for prompt in prompts.values())):
             raise ValueError('Complete bounded approved task prompts required')
-        failures = self.helper.contract_definition_issues(state)
+        failures = definition['issues'] if definition is not None else self.helper.contract_definition_issues(state)
         if failures:
             raise ValueError('Parent contract definitions blocked: ' + '; '.join(failures))
-        contract = self.helper.contract_data(Path(binding['verification_contract']['path']), verify_files=False)
+        contract = definition['contract'] if definition is not None else self.helper.contract_data(Path(binding['verification_contract']['path']), verify_files=False)
         blocking = {v['id'] for v in contract['verifiers'] if v['gate'] == 'blocking'}
         mapped = {i for ids in mapping.values() for i in ids}
         if mapped != blocking:

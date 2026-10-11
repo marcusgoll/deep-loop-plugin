@@ -799,6 +799,16 @@ def graph(state):
     return 0
 
 
+def definition_observation(state):
+    """Compose existing definition readers in one bounded isolated operation.
+
+    No proof is cached, selected or published. Existing callers retain the
+    same records, definition issues and contract view at every observation.
+    """
+    return {'records':task_records(state),'issues':contract_definition_issues(state),
+            'contract':contract_data(Path(state['verificationContract']['path']),verify_files=False)}
+
+
 def validation_issues(state, stage, archive=None):
     """Read current recorded evidence without selecting or mutating a session."""
     if not isinstance(state, dict) or type(state.get('schemaVersion')) is not int or state['schemaVersion'] not in (2, 3, 4):

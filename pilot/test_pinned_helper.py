@@ -57,6 +57,19 @@ class PinnedHelperTests(unittest.TestCase):
         self.assertEqual(self.helper.completed_state({'fixture':True},self.root),[{'fixture':True},str(self.root)])
         self.assertEqual(self.helper.verified_delivery_state({},'a'*40,'readback',self.root),[{},'a'*40,'readback',str(self.root)])
 
+    def test_fixed_definition_batch_uses_unchanged_legacy_functions_and_rechecks_pins(self):
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("from pathlib import Path\ndef task_records(state):return [state['tasks'],{'task':state['tasks'][0]}]\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):\n assert isinstance(path,Path) and verify_files is False\n return {'path':str(path),'verifiers':[]}\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        state={'tasks':[{'id':'task'}],'verificationContract':{'path':str(self.root/'contract.json')}}
+        with patch.object(self.helper,'_verify',wraps=self.helper._verify) as verify:
+            result=self.helper.definition_observation(state)
+            self.assertEqual(verify.call_count,1)
+        self.assertEqual(result,{'records':[[{'id':'task'}],{'task':{'id':'task'}}],
+                                 'issues':[],'contract':{'path':state['verificationContract']['path'],'verifiers':[]}})
+        p.write_text('source drift')
+        with self.assertRaisesRegex(ValueError,'source drift'):self.helper.definition_observation(state)
+
     def test_drift_unpinned_dependency_and_oversize_request_fail_closed(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py';p.write_text('drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.task_queue({})

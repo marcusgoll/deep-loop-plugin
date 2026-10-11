@@ -62,6 +62,21 @@ class WorkflowGateTests(unittest.TestCase):
         self.replace_contract()
         return candidate,output
 
+    def test_definition_batch_preserves_read_result_and_current_contract_drift(self):
+        from unittest.mock import patch
+        # Compare the exact old three-call semantics with the composed reader.
+        with patch.object(deep_loop,'definition_observation',None):old=self.gate._read()
+        self.assertEqual(self.gate._read(),old)
+        changed=copy.deepcopy(self.f.contract);changed['verifiers'][0]['gate']='non_blocking'
+        save(self.f.path,changed)
+        with self.assertRaises(ValueError):self.gate._read()
+    def test_malformed_definition_batch_cannot_fall_back_to_legacy_reader(self):
+        from unittest.mock import patch
+        for observation in (None,{}, {'records':[],'issues':[],'contract':{}},
+                            {'records':[[],{}],'issues':[],'contract':{},'extra':True}):
+            with self.subTest(observation=observation),patch.object(deep_loop,'definition_observation',return_value=observation):
+                with self.assertRaisesRegex(ValueError,'Malformed'):self.gate._read()
+
     def test_version_two_plan_binds_mutable_candidate_without_repinning_manifest(self):
         candidate,_=self.modern_binding()
         selection=self.accepted_selection('portable')
