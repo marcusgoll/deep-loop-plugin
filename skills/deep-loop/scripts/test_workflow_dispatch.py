@@ -484,6 +484,20 @@ class TaskExecutionTests(WorkflowDispatchTests):
         self.graph.store.create(name,{**original,'intent_digest':'0'*64})
         with self.assertRaisesRegex(ValueError,'completion.*drift'):self.controller.authenticate_workflow_task_provenance(owner)
 
+    def test_provenance_rejects_checkpoint_drift_during_native_ownership_readback(self):
+        import json
+        from unittest.mock import patch
+        owner=self.historical_credited_task();original=self.backend.observe_owned
+        def changed(*args):
+            observed=original(*args)
+            self.graph.f.state=json.loads(self.graph.checkpoint.read_text())
+            self.graph.f.state['blocker']='new independent review requirement'
+            self.graph.select()
+            return observed
+        with patch.object(self.backend,'observe_owned',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'attribution cut changed'):
+                self.controller.authenticate_workflow_task_provenance(owner)
+
     def test_current_history_rejects_checkpoint_change_after_provenance_cut(self):
         from unittest.mock import patch
         owner=self.historical_credited_task();original=self.controller.authenticate_workflow_task_provenance

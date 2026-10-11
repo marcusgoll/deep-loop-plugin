@@ -1258,11 +1258,14 @@ class PrivateController:
                     recovery_action(reserved,self.contract_digest,owned)!='reconcile_without_refund'):
                 raise ValueError('Historical stopped task ownership proof required')
             expected_path=str(self.store.root/(unit+'.task-proof.json'))
-            _,state,by_id=gate._read()
+            closing_binding,state,by_id=gate._read()
             if (by_id[selection['task_id']]['status']!='done' or
                     by_id[selection['task_id']].get('evidence')!=expected_path):
                 raise ValueError('Historical accepted task evidence identity drift')
-            if gate._read()[:2]!=(binding,checkpoint) or self.journal.read()!=latest:
+            # Evidence attribution and checkpoint equality use the same fresh
+            # closing observation under the credential lock. No external call
+            # intervenes between inspecting its task row and comparing its cut.
+            if (closing_binding,state)!=(binding,checkpoint) or self.journal.read()!=latest:
                 raise ValueError('Historical task attribution cut changed during inspection')
             return {'kind':'historical_workflow_task_provenance','owner':owner,
                     'invocation_id':invocation['invocation_id'],'native':native,
