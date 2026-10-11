@@ -87,7 +87,44 @@ def completion_guard_order(case,terminal):
     case.assertEqual(events,['provider','history'])
 
 
+
+def late_quiescence(case,terminal):
+    for boundary in ('intent','publication','completion'):
+        for fault in ('owner','revocation'):
+            with case.subTest(boundary=boundary,fault=fault):
+                case.setUp()
+                if terminal:
+                    case.intent();case.assertEqual(case.recover(),'recovered_workflow_delivery_checkpoint')
+                    case.wrapper=WorkflowTerminal(case.c,case.adapter)
+                if boundary!='intent':case.wrapper.step()
+                if boundary=='completion':case.assertEqual(case.wrapper.step(),WAIT)
+                # Establish the writer's empty coordination lock before the cut.
+                lock=case.path.parent/'.deep-task-acceptance.lock'
+                lock.touch(mode=0o600,exist_ok=True)
+                case.assertEqual(lock.read_bytes(),b'')
+                before=case.path.read_bytes()
+                protected={p.name:p.read_bytes() for p in case.c.store.root.iterdir() if p.is_file()}
+                candidate={str(p.relative_to(case.c.candidate)):p.read_bytes() for p in case.c.candidate.rglob('*') if p.is_file()}
+                method='_provider_readback_guard' if boundary=='completion' else '_provider_guard'
+                original=getattr(case.wrapper,method);triggered=[]
+                def inject(receipt):
+                    result=original(receipt);triggered.append(fault)
+                    if fault=='owner':case.c.owned=True
+                    else:case.c.store.create(case.key+'.revocation-intent.json',{'fixture':'revoked'})
+                    return result
+                case.provider.calls.clear()
+                with patch.object(case.wrapper,method,side_effect=inject):
+                    with case.assertRaisesRegex(ValueError,'not quiescent' if fault=='owner' else 'revoked'):case.wrapper.step()
+                case.assertEqual(triggered,[fault]);case.assertEqual(case.path.read_bytes(),before)
+                case.assertEqual({p.name:p.read_bytes() for p in case.c.store.root.iterdir() if p.is_file() and p.name!=case.key+'.revocation-intent.json'},protected)
+                case.assertEqual({str(p.relative_to(case.c.candidate)):p.read_bytes() for p in case.c.candidate.rglob('*') if p.is_file()},candidate)
+                case.assertTrue(all(row[0]=='GET' for row in case.provider.calls))
+
+
 class WorkflowCheckpointTests(unittest.TestCase):
+    def test_late_owner_and_revocation_block_each_write(self):
+        late_quiescence(self,False)
+
     def setUp(self):
         f=fixtures.WorkflowDeliveryTests();f.setUp();self.addCleanup(f.doCleanups)
         self.c=f.controller;self.provider=f.provider;self.key=self.c.contract_digest
@@ -278,6 +315,9 @@ class WorkflowCheckpointTests(unittest.TestCase):
 
 
 class WorkflowTerminalTests(unittest.TestCase):
+    def test_late_owner_and_revocation_block_each_write(self):
+        late_quiescence(self,True)
+
     def test_history_guard_cannot_change_terminal_checkpoint_or_extend_window(self):
         late_history_mutation(self,True)
 

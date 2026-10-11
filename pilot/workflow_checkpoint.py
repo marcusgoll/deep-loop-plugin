@@ -71,13 +71,23 @@ class WorkflowCheckpoint:
         self._provider_readback_guard(receipt)
         self.adapter._locked_history_guard()
 
+    def _checkpoint_mutation_authority(self):
+        # Parent recovery is quiescent: task ownership must remain absent at
+        # the write cut, including after provider/history callbacks return.
+        self.controller._unowned()
+        self.controller._workflow_mutation_authority(parent_recovery=True)
+
+    def _publication_guard(self,receipt):
+        self._provider_guard(receipt)
+        self._checkpoint_mutation_authority()
+
     def _post_publication_guard(self,binding,expected):
         # Provider acceptance is freshly reinspected by the later completion
         # wake. This publication remains an incomplete recovery stage.
         self.adapter._locked_history_guard()
         if self.controller.workflow_gate._read()[:2]!=(binding,expected):
             raise ValueError('Workflow published checkpoint changed at history guard')
-        self.controller._workflow_mutation_authority(parent_recovery=True)
+        self._checkpoint_mutation_authority()
 
     def step(self):
         name=self.key+'.workflow-delivery-checkpoint-intent.json'
@@ -104,7 +114,7 @@ class WorkflowCheckpoint:
                 self._provider_guard(receipt)
                 if self.controller.workflow_gate._read()[:2]!=(binding,state):
                     raise ValueError('Delivery intent checkpoint changed during history guard')
-                self.controller._workflow_mutation_authority(parent_recovery=True)
+                self._checkpoint_mutation_authority()
                 self.store.create(name,intent)
                 if checked_delivery_intent(self.store,self.key,binding,self.controller.workflow_gate.helper)!=intent:
                     raise ValueError('Workflow delivery checkpoint intent readback differs')
@@ -139,7 +149,7 @@ class WorkflowCheckpoint:
                 return gate.helper.validation_issues(actual,'delivery',archive)
             if state==intent['before']:
                 saved=gate._publish_checkpoint(intent,checked,postcheck,
-                    before_write=lambda:self._provider_guard(receipt),
+                    before_write=lambda:self._publication_guard(receipt),
                     after_write=lambda:self._post_publication_guard(binding,intent['after']))
                 if saved!=intent['after']:raise ValueError('Delivery checkpoint publication differs')
                 return WAIT
@@ -150,11 +160,11 @@ class WorkflowCheckpoint:
                 raise ValueError('Workflow delivery checkpoint changed before completion receipt')
             self.controller._workflow_source_guard(intent['observation'],parent_recovery=True)
             if gate._read()[1]!=saved:raise ValueError('Workflow delivery checkpoint changed at final source guard')
-            self.controller._workflow_mutation_authority(parent_recovery=True)
+            self._checkpoint_mutation_authority()
             self.adapter._locked_history_guard()
             if gate._read()[:2]!=(binding,saved) or saved!=intent['after']:
                 raise ValueError('Workflow completion checkpoint changed during history guard')
-            self.controller._workflow_mutation_authority(parent_recovery=True)
+            self._checkpoint_mutation_authority()
             self.store.create(result_name,completion)
             if self.store.read(result_name)!=completion:raise ValueError('Workflow delivery checkpoint completion readback differs')
             return 'recovered_workflow_delivery_checkpoint'
@@ -224,7 +234,7 @@ class WorkflowTerminal(WorkflowCheckpoint):
                         'delivery_checkpoint_sha256':digest(checkpoint),'delivery_intent_sha256':digest(delivery)}
                 self._provider_guard(receipt)
                 if gate._read()[:2]!=(binding,state):raise ValueError('Terminal intent changed during history guard')
-                self.controller._workflow_mutation_authority(parent_recovery=True)
+                self._checkpoint_mutation_authority()
                 self.store.create(name,intent)
                 if checked_terminal_intent(self.store,self.key,binding,gate.helper)!=intent:
                     raise ValueError('Workflow terminal intent readback differs')
@@ -260,7 +270,7 @@ class WorkflowTerminal(WorkflowCheckpoint):
                 return gate.final_review_proof()
             if state==intent['before']:
                 saved=gate._publish_checkpoint(intent,checked,postcheck,
-                    before_write=lambda:self._provider_guard(receipt),
+                    before_write=lambda:self._publication_guard(receipt),
                     after_write=lambda:self._post_publication_guard(binding,intent['after']))
                 if saved!=intent['after']:raise ValueError('Terminal checkpoint publication differs')
                 return WAIT
@@ -270,11 +280,11 @@ class WorkflowTerminal(WorkflowCheckpoint):
             self.controller._workflow_source_guard(intent['observation'],parent_recovery=True)
             if gate._read()[:2]!=(binding,saved) or saved!=intent['after']:
                 raise ValueError('Workflow terminal checkpoint changed at final source guard')
-            self.controller._workflow_mutation_authority(parent_recovery=True)
+            self._checkpoint_mutation_authority()
             self.adapter._locked_history_guard()
             if gate._read()[:2]!=(binding,saved) or saved!=intent['after']:
                 raise ValueError('Workflow completion checkpoint changed during history guard')
-            self.controller._workflow_mutation_authority(parent_recovery=True)
+            self._checkpoint_mutation_authority()
             self.store.create(result_name,completion)
             if self.store.read(result_name)!=completion:raise ValueError('Workflow terminal completion readback differs')
             return 'recovered_workflow_terminal_checkpoint'
