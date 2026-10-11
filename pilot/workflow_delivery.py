@@ -257,12 +257,20 @@ class WorkflowDelivery:
                 if response.get('sha')!=tree['sha']:raise ValueError('Published workflow tree identity drift')
                 observed=self._call('GET','git/trees/'+tree['sha'])
             self._tree(tree,observed);self._save('tree-'+tree['sha'],tree);return WAIT
+        sealed=self._read('commit')
+        if sealed is not None and sealed!=commit:
+            raise ValueError('Protected workflow commit record drift')
         head=commit['sha'];observed=self._call('GET','git/commits/'+head)
         if observed is None:
             response=self._call('POST','git/commits',commit['body'])
             if response.get('sha')!=head:raise ValueError('Published workflow commit identity drift')
             observed=self._call('GET','git/commits/'+head)
         self._commit(commit,observed)
+        if sealed is None:
+            # Finish immutable commit publication in its own durable wake.
+            # Later wakes still read and authenticate the provider commit;
+            # this record never substitutes for fresh remote verification.
+            self._save('commit',commit);return WAIT
         branch=self.capability['branch'];ref=self._call('GET','git/ref/heads/'+branch)
         if ref is None:
             if not self._save('ref-intent',{'ref':'refs/heads/'+branch,'sha':head,'plan_sha256':digest(plan)}):return WAIT

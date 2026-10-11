@@ -155,6 +155,40 @@ class WorkflowDeliveryTests(unittest.TestCase):
             self.adapter.step()
             if self.provider.pr is not None:return
         self.fail('PR preparation failed')
+    def ready_commit(self):
+        for _ in range(20):
+            self.assertEqual(self.adapter.step(),WAIT)
+            if self.adapter._read('commit') is not None:return
+        self.fail('Commit publication failed')
+
+    def test_commit_seal_stops_before_ref_and_requires_fresh_remote_commit(self):
+        self.ready_commit()
+        self.assertIsNone(self.provider.ref)
+        self.assertIsNone(self.adapter._read('ref-intent'))
+        sealed=self.adapter._read('commit')
+        self.assertEqual(sealed,self.adapter.plan['commit'])
+        self.provider.commits[sealed['sha']]['message']='substituted remote commit'
+        with self.assertRaisesRegex(ValueError,'commit differs'):self.adapter.step()
+        self.assertIsNone(self.adapter._read('ref-intent'))
+
+    def test_substituted_commit_seal_blocks_ref_publication(self):
+        self.ready_commit();name=self.controller.contract_digest+'.workflow-delivery-commit.json'
+        original=self.adapter._read('commit');self.controller.store.remove(name)
+        self.controller.store.create(name,{**original,'sha':'0'*40})
+        with self.assertRaisesRegex(ValueError,'commit record drift'):self.adapter.step()
+        self.assertIsNone(self.provider.ref)
+
+    def test_uncertain_commit_response_reconciles_once_without_ref_in_same_wake(self):
+        self.provider.lost='git/commits'
+        with self.assertRaises(OSError):self.complete()
+        self.assertIsNone(self.adapter._read('commit'))
+        self.provider.lost=None
+        self.assertEqual(self.adapter.step(),WAIT)
+        self.assertIsNotNone(self.adapter._read('commit'));self.assertIsNone(self.adapter._read('ref-intent'))
+        writes=[c for c in self.provider.calls if c[0]=='POST' and c[1].endswith('/git/commits')]
+        self.assertEqual(len(writes),1)
+        self.assertTrue(self.complete()['delivery_verified'])
+
     def test_complete_tree_and_verified_draft_preserve_checkpoint_and_source(self):
         before=copy.deepcopy(self.controller.state);receipt=self.complete()
         self.assertTrue(receipt['delivery_verified']);self.assertFalse(receipt['complete'])
