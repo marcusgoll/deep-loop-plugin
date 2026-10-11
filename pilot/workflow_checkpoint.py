@@ -12,7 +12,7 @@ FIELDS={'contract_digest','binding_sha256','parent_receipt_sha256','plan_sha256'
         'receipt_sha256','before','after','observation'}
 
 
-def checked_delivery_intent(store,key,binding,helper):
+def delivery_intent_records(store,key,binding,*,with_receipt=False):
     intent=store.read(key+'.workflow-delivery-checkpoint-intent.json')
     parent=store.read(key+'.parent-acceptance.json')
     plan=store.read(key+'.workflow-delivery-plan.json')
@@ -42,9 +42,16 @@ def checked_delivery_intent(store,key,binding,helper):
     import re
     if re.fullmatch(r'https://github\.com/'+re.escape(cap['repository'])+r'/pull/[1-9][0-9]*',receipt['pull_request']) is None:
         raise ValueError('Workflow delivery intent endpoint drift')
+    return (intent,receipt) if with_receipt else intent
+
+
+def checked_delivery_intent(store,key,binding,helper):
+    intent,receipt=delivery_intent_records(store,key,binding,with_receipt=True)
     archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in intent['before'] else None
     after=helper.verified_delivery_state(intent['before'],receipt['head_sha'],receipt['pull_request'],archive)
     if intent['after']!=after:raise ValueError('Substituted workflow delivery checkpoint postimage')
+    if delivery_intent_records(store,key,binding,with_receipt=True)!=(intent,receipt):
+        raise ValueError('Workflow delivery records changed during derivation')
     return intent
 
 
@@ -151,9 +158,11 @@ class WorkflowCheckpoint:
 TERMINAL_FIELDS=FIELDS|{'delivery_checkpoint_sha256','delivery_intent_sha256'}
 
 
-def checked_terminal_intent(store,key,binding,helper):
+def terminal_intent_records(store,key,binding,*,expected_delivery=None):
     """Authenticate a closed image against both independently derived transitions."""
-    delivery=checked_delivery_intent(store,key,binding,helper)
+    delivery=delivery_intent_records(store,key,binding)
+    if expected_delivery is not None and delivery!=expected_delivery:
+        raise ValueError('Workflow delivery records changed during terminal derivation')
     checkpoint=store.read(key+'.workflow-delivery-checkpoint.json')
     receipt=store.read(key+'.workflow-delivery-complete.json')
     expected={'contract_digest':key,'intent_sha256':digest(delivery),
@@ -170,9 +179,17 @@ def checked_terminal_intent(store,key,binding,helper):
     from private_controller import PrivateController
     proof=PrivateController._parent_proof_at_checkpoint(delivery['observation'],digest(intent['before']))
     if intent['observation']!=proof:raise ValueError('Workflow terminal observation drift')
+    return intent
+
+
+def checked_terminal_intent(store,key,binding,helper):
+    delivery=checked_delivery_intent(store,key,binding,helper)
+    intent=terminal_intent_records(store,key,binding,expected_delivery=delivery)
     archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in intent['before'] else None
     if intent['after']!=helper.completed_state(intent['before'],archive):
         raise ValueError('Substituted workflow terminal checkpoint postimage')
+    if terminal_intent_records(store,key,binding,expected_delivery=delivery)!=intent:
+        raise ValueError('Workflow terminal records changed during derivation')
     return intent
 
 

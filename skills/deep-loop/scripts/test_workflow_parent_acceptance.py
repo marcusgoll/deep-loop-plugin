@@ -301,6 +301,62 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         self.assertEqual(wake(),'workflow_complete_verified')
         self.assertTrue(self.graph.store.read(receipt)['complete'])
 
+    def test_composed_checkpoint_images_reject_substitution_and_midread_drift(self):
+        import sys,deep_loop
+        from workflow_delivery import WorkflowDelivery,WAIT
+        from workflow_checkpoint import WorkflowCheckpoint,WorkflowTerminal
+        from test_workflow_delivery import Provider
+        if sys.platform!='linux':
+            mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
+        self.prepared(delivery_capability=True)
+        self.controller.prepare_workflow_parent_acceptance();self.controller.recover_workflow_parent_acceptance()
+        provider=Provider(self.graph.binding['workflow_delivery']);adapter=WorkflowDelivery(self.controller,provider.api)
+        for _ in range(20):
+            if adapter.step()=='workflow_delivery_verified':break
+        else:self.fail('Provider fixture did not converge')
+        writer=WorkflowCheckpoint(self.controller,adapter)
+        self.assertEqual(writer.step(),'prepared_workflow_delivery_checkpoint')
+        self.assertEqual(writer.step(),WAIT)
+        gate=self.graph.gate;checkpoint=self.graph.checkpoint;baseline=checkpoint.read_bytes()
+        method=deep_loop.checkpoint_observation
+        protected=self.graph.key+'.workflow-delivery-complete.json';receipt=self.graph.store.read(protected)
+        for mode in ('definition_observation','outcome_observation','review_observation'):
+            call=lambda:gate._read(review=mode=='review_observation',outcome=mode=='outcome_observation')
+            expected=call()
+            with patch.object(deep_loop,'checkpoint_observation',None):
+                self.assertEqual(call(),expected)
+            for mutation in ('image','malformed','receipt','checkpoint'):
+                with self.subTest(mode=mode,mutation=mutation):
+                    def changed(*args):
+                        result=method(*args)
+                        if mutation=='image':result['delivery_image']['complete']=True
+                        elif mutation=='malformed':result.pop('delivery_image')
+                        elif mutation=='receipt':
+                            altered=copy.deepcopy(receipt);altered['head_sha']='0'*40
+                            self.graph.store.remove(protected);self.graph.store.create(protected,altered)
+                        else:
+                            altered=json.loads(baseline);altered['blocker']='late drift';checkpoint.write_text(json.dumps(altered))
+                        return result
+                    with patch.object(deep_loop,'checkpoint_observation',side_effect=changed):
+                        with self.assertRaises(ValueError):call()
+                    if mutation=='receipt':
+                        self.graph.store.remove(protected);self.graph.store.create(protected,receipt)
+                    checkpoint.write_bytes(baseline)
+                    self.assertEqual(call()[:2],(self.graph.binding,json.loads(baseline)))
+        self.assertEqual(writer.step(),'recovered_workflow_delivery_checkpoint')
+        terminal=WorkflowTerminal(self.controller,adapter)
+        self.assertEqual(terminal.step(),'prepared_workflow_terminal_checkpoint');self.assertEqual(terminal.step(),WAIT)
+        terminal_baseline=checkpoint.read_bytes()
+        def forged(*args):
+            result=method(*args);result['terminal_image']['complete']=False;return result
+        with patch.object(deep_loop,'checkpoint_observation',side_effect=forged):
+            with self.assertRaisesRegex(ValueError,'terminal checkpoint postimage'):gate._read()
+        self.assertEqual(checkpoint.read_bytes(),terminal_baseline)
+        with patch.object(deep_loop,'completed_state',side_effect=ValueError('completion blocked')):
+            with self.assertRaisesRegex(ValueError,'completion blocked'):gate._read()
+        self.assertEqual(terminal.step(),'recovered_workflow_terminal_checkpoint')
+        self.assertEqual(len(self.backend.submissions),3)
+
     def test_native_history_drift_during_intent_derivation_rejects_before_write(self):
         import sys
         from workflow_delivery import WorkflowDelivery,WAIT

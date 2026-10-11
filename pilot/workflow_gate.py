@@ -104,6 +104,7 @@ class WorkflowGate:
         if not path.is_absolute() or path.resolve() != path:
             raise ValueError('Canonical checkpoint path required')
         payload = checkpoint_bytes(path)
+        image_cut=None
         state = json.loads(payload)
         if binding.get('schema') == 4:
             capability = binding['workflow_delivery']
@@ -118,7 +119,10 @@ class WorkflowGate:
                     delivery.get('endpointDecision') != {'status':'settled','source':'contract',
                                                         'evidence':capability['approval_ref']}):
                 raise ValueError('Checkpoint delivery endpoint differs from explicit workflow authority')
-            if delivery['status']=='verified':self.accepted_parent_image(binding,state)
+            if delivery['status']=='verified':
+                if callable(getattr(self.helper,'checkpoint_observation',None)):
+                    image_cut=self._image_derivation(binding,state)
+                else:self.accepted_parent_image(binding,state)
         if (state.get('sessionId') != binding['session_id'] or
                 state.get('verificationContract') != binding['verification_contract']):
             raise ValueError('Checkpoint parent identity drift')
@@ -127,7 +131,10 @@ class WorkflowGate:
             mapping=binding['task_verifiers'];tasks={t['id']:t for t in state.get('tasks',[])}
             groups=self._review_groups(mapping,tasks)
             archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
-            observation=self.helper.review_observation(state,groups,archive) if review else self.helper.outcome_observation(state,groups)
+            if image_cut is not None:
+                observation=self._image_observation(binding,state,payload,image_cut,
+                    'review_observation' if review else 'outcome_observation',groups,archive)
+            else:observation=self.helper.review_observation(state,groups,archive) if review else self.helper.outcome_observation(state,groups)
             if (not isinstance(observation,dict) or set(observation)!=({'records','issues','contract','prerequisites','review_issues'} if review else {'records','issues','contract','prerequisites'}) or
                     not isinstance(observation['prerequisites'],list) or len(observation['prerequisites'])!=len(groups) or
                     any(not isinstance(issues,list) or any(not isinstance(i,str) for i in issues)
@@ -137,8 +144,12 @@ class WorkflowGate:
             observe=True
         else:
             observe=getattr(self.helper,'definition_observation',None)
-            definition=observe(state) if callable(observe) else None
-        if review or outcome or callable(observe):
+            if image_cut is not None:
+                archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
+                definition=self._image_observation(binding,state,payload,image_cut,'definition_observation',None,archive)
+                observe=True
+            else:definition=observe(state) if callable(observe) else None
+        if review or outcome or image_cut is not None or callable(observe):
             if (not isinstance(definition,dict) or set(definition)!={'records','issues','contract'} or
                     not isinstance(definition['records'],(list,tuple)) or len(definition['records'])!=2 or
                     not isinstance(definition['issues'],list) or
@@ -181,6 +192,38 @@ class WorkflowGate:
             visit(task_id)
             groups.append(sorted({i for task in covered for i in mapping[task]}))
         return groups
+
+    def _image_derivation(self,binding,state):
+        """Fresh protected records only; helper correctness remains mandatory."""
+        from workflow_checkpoint import delivery_intent_records,terminal_intent_records
+        delivery,receipt=delivery_intent_records(self.store,self.contract_digest,binding,with_receipt=True)
+        terminal=None
+        if state!=delivery['after']:
+            try:terminal=terminal_intent_records(self.store,self.contract_digest,binding,expected_delivery=delivery)
+            except FileNotFoundError as exc:raise ValueError('Unapproved workflow terminal checkpoint postimage') from exc
+            if state!=terminal['after']:raise ValueError('Unapproved workflow terminal checkpoint postimage')
+        inputs={'before':delivery['before'],'revision':receipt['head_sha'],
+                'evidence':receipt['pull_request'],'terminal':terminal is not None}
+        return delivery,terminal,inputs
+
+    def _image_observation(self,binding,state,payload,cut,mode,groups,archive):
+        # Derivations and observation share only this isolated invocation.
+        # Authenticate all protected records and exact checkpoint again after it.
+        result=self.helper.checkpoint_observation(state,mode,groups,archive,cut[2])
+        images={'delivery_image'}|({'terminal_image'} if cut[1] is not None else set())
+        fields={'records','issues','contract'}
+        if mode!='definition_observation':fields.add('prerequisites')
+        if mode=='review_observation':fields.add('review_issues')
+        if not isinstance(result,dict) or set(result)!=fields|images:
+            raise ValueError('Malformed bounded checkpoint image observation')
+        if result['delivery_image']!=cut[0]['after']:
+            raise ValueError('Substituted workflow delivery checkpoint postimage')
+        if cut[1] is not None and result['terminal_image']!=cut[1]['after']:
+            raise ValueError('Substituted workflow terminal checkpoint postimage')
+        if (self._image_derivation(binding,state)!=cut or
+                checkpoint_bytes(Path(binding['checkpoint_path']))!=payload):
+            raise ValueError('Workflow protected image changed during observation')
+        return {key:result[key] for key in fields}
 
     def accepted_parent_image(self,binding,state):
         """Admit only the protected exact delivery image, preserving its origin."""

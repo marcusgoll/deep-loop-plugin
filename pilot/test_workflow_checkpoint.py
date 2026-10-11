@@ -298,6 +298,24 @@ class WorkflowTerminalTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Verified delivery checkpoint'):self.wrapper.step()
         self.assertFalse((self.c.store.root/(self.key+'.workflow-terminal-intent.json')).exists())
 
+    def test_standalone_terminal_reader_rejects_records_changed_during_derivation(self):
+        from workflow_checkpoint import checked_terminal_intent
+        for method,suffix in (('verified_delivery_state','.workflow-delivery-checkpoint-intent.json'),
+                              ('completed_state','.workflow-terminal-intent.json')):
+            with self.subTest(method=method):
+                self.setUp();self.terminal();before=self.path.read_bytes()
+                helper=self.c.workflow_gate.helper;original=getattr(helper,method)
+                def changed(*args,**kwargs):
+                    result=original(*args,**kwargs)
+                    name=self.key+suffix;record=self.c.store.read(name)
+                    record['after']['unexpected']='substituted after helper derivation'
+                    self.c.store.remove(name);self.c.store.create(name,record)
+                    return result
+                with patch.object(helper,method,side_effect=changed):
+                    with self.assertRaisesRegex(ValueError,'records changed during derivation'):
+                        checked_terminal_intent(self.c.store,self.key,self.c.binding,helper)
+                self.assertEqual(self.path.read_bytes(),before)
+
     def test_terminal_exact_recovery_and_immutable_parent(self):
         intent=self.terminal();self.provider.calls.clear()
         self.assertEqual(self.recover(),'recovered_workflow_terminal_checkpoint')

@@ -95,6 +95,37 @@ class PinnedHelperTests(unittest.TestCase):
         p.write_text('drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.outcome_observation(state,[['good']])
 
+    def test_checkpoint_composition_keeps_existing_readers_and_exact_images(self):
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("from pathlib import Path\ndef task_records(state):return [state['tasks'],{}]\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):return {'verifiers':[]}\ndef prerequisite_issues(state,ids):return []\ndef validation_issues(state,stage,archive=None):return []\ndef verified_delivery_state(state,revision,evidence,archive=None):\n assert isinstance(archive,Path)\n return {**state,'revision':revision,'evidence':evidence}\ndef completed_state(state,archive=None):return {**state,'complete':True}\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        state={'tasks':[],'verificationContract':{'path':'/fixture'}}
+        derivation={'before':{'pending':True},'revision':'a'*40,'evidence':'readback','terminal':False}
+        for mode in ('definition_observation','outcome_observation','review_observation'):
+            expected=(self.helper.definition_observation(state) if mode=='definition_observation' else
+                      self.helper.outcome_observation(state,[['V1']]) if mode=='outcome_observation' else
+                      self.helper.review_observation(state,[['V1']],self.root))
+            with patch.object(self.helper,'_verify',wraps=self.helper._verify) as verify:
+                actual=self.helper.checkpoint_observation(state,mode,[['V1']],self.root,derivation)
+                self.assertEqual(verify.call_count,1)
+            image=actual.pop('delivery_image');self.assertEqual(actual,expected)
+            self.assertEqual(image,self.helper.verified_delivery_state(derivation['before'],'a'*40,'readback',self.root))
+        terminal={**derivation,'terminal':True}
+        actual=self.helper.checkpoint_observation(state,'definition_observation',None,self.root,terminal)
+        self.assertEqual(actual['terminal_image'],self.helper.completed_state(actual['delivery_image'],self.root))
+        large_state={**state,'payload':'s'*300000}
+        large_derivation={**derivation,'before':{'payload':'b'*300000}}
+        result=self.helper.checkpoint_observation(large_state,'definition_observation',None,self.root,large_derivation)
+        self.assertEqual(result['delivery_image']['payload'],'b'*300000)
+        oversized={**derivation,'before':{'payload':'b'*524288}}
+        with self.assertRaisesRegex(ValueError,'unavailable or failed'):
+            self.helper.checkpoint_observation(state,'definition_observation',None,self.root,oversized)
+        for bad in ({**derivation,'terminal':1},{**derivation,'extra':True}):
+            with self.assertRaises(ValueError):self.helper.checkpoint_observation(state,'definition_observation',None,self.root,bad)
+        p.write_text('source drift')
+        with self.assertRaisesRegex(ValueError,'source drift'):
+            self.helper.checkpoint_observation(state,'definition_observation',None,self.root,derivation)
+
     def test_definition_batch_preserves_individual_result_capacity(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py'
         p.write_text("def task_records(state):return 'r'*600000\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):return 'c'*600000\n")

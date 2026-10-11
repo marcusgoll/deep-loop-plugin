@@ -828,6 +828,25 @@ def review_observation(state,groups,archive=None):
     return result
 
 
+def checkpoint_observation(state,mode,groups,archive,derivation):
+    """Exact image readers composed with one fresh bounded observation.
+
+    Host callers authenticate these inputs and compare the outputs; this
+    read-only composition grants no authority and retains no result.
+    """
+    if (mode not in {'definition_observation','outcome_observation','review_observation'} or
+            not isinstance(derivation,dict) or set(derivation)!={'before','revision','evidence','terminal'} or
+            type(derivation['terminal']) is not bool):
+        raise ValueError('Fixed checkpoint observation required')
+    delivered=verified_delivery_state(derivation['before'],derivation['revision'],derivation['evidence'],archive)
+    images={'delivery_image':delivered}
+    if derivation['terminal']:images['terminal_image']=completed_state(delivered,archive)
+    observation=(definition_observation(state) if mode=='definition_observation' else
+                 outcome_observation(state,groups) if mode=='outcome_observation' else
+                 review_observation(state,groups,archive))
+    return {**observation,**images}
+
+
 def validation_issues(state, stage, archive=None):
     """Read current recorded evidence without selecting or mutating a session."""
     if not isinstance(state, dict) or type(state.get('schemaVersion')) is not int or state['schemaVersion'] not in (2, 3, 4):
