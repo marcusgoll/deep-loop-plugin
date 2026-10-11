@@ -318,10 +318,19 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         self.assertEqual(writer.step(),'prepared_workflow_delivery_checkpoint')
         self.assertEqual(writer.step(),WAIT)
         gate=self.graph.gate;checkpoint=self.graph.checkpoint;baseline=checkpoint.read_bytes()
+        cut=gate.final_review_authority_cut()
+        self.assertEqual(cut[:3],gate.final_review_cut())
+        self.assertEqual(cut[3],gate.accepted_parent_image(cut[0],cut[1]))
+        read=gate._read;reads=[]
+        def differing_origin(**kwargs):
+            value=read(**kwargs);reads.append(True)
+            return value if len(reads)==1 else (*value[:4],{**value[4],'unexpected':'origin drift'})
+        with patch.object(gate,'_read',side_effect=differing_origin):
+            with self.assertRaisesRegex(ValueError,'review cut changed'):gate.final_review_authority_cut()
         method=deep_loop.checkpoint_observation
         protected=self.graph.key+'.workflow-delivery-complete.json';receipt=self.graph.store.read(protected)
         for mode in ('definition_observation','outcome_observation','review_observation'):
-            call=lambda:gate._read(review=mode=='review_observation',outcome=mode=='outcome_observation')
+            call=lambda:gate._read(review=mode=='review_observation',outcome=mode=='outcome_observation',authority=mode=='review_observation')
             expected=call()
             with patch.object(deep_loop,'checkpoint_observation',None):
                 self.assertEqual(call(),expected)
@@ -347,6 +356,9 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         terminal=WorkflowTerminal(self.controller,adapter)
         self.assertEqual(terminal.step(),'prepared_workflow_terminal_checkpoint');self.assertEqual(terminal.step(),WAIT)
         terminal_baseline=checkpoint.read_bytes()
+        cut=gate.final_review_authority_cut()
+        self.assertEqual(cut[:3],gate.final_review_cut())
+        self.assertEqual(cut[3],gate.accepted_parent_image(cut[0],cut[1]))
         def forged(*args):
             result=method(*args);result['terminal_image']['complete']=False;return result
         with patch.object(deep_loop,'checkpoint_observation',side_effect=forged):

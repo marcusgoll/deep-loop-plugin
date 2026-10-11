@@ -161,6 +161,31 @@ class WorkflowDeliveryTests(unittest.TestCase):
             if self.adapter._read('commit') is not None:return
         self.fail('Commit publication failed')
 
+    def test_authority_cut_uses_only_invocation_local_origin_and_rejects_get_drift(self):
+        c=self.controller;calls=[]
+        def authority():
+            calls.append(True)
+            return (c.store.read(c.contract_digest+'.workflow.json'),copy.deepcopy(c.state),
+                    copy.deepcopy(c.proof),copy.deepcopy(c.state))
+        c.workflow_gate.final_review_authority_cut=authority
+        self.adapter._initialize()
+        with patch.object(c.workflow_gate,'accepted_parent_image',side_effect=AssertionError('duplicate derivation')):
+            self.adapter._api('GET','user')
+            self.assertEqual(len(calls),2)
+            original=self.adapter.api
+            def changed(*args):
+                result=original(*args);c.state['unverified']='drift';return result
+            self.adapter.api=changed
+            with self.assertRaises(ValueError):self.adapter._api('GET','user')
+        self.assertEqual(len(calls),4)
+        self.assertIsNone(self.adapter._read('complete'))
+
+    def test_malformed_authority_cut_rejects_before_provider_call(self):
+        self.adapter._initialize()
+        self.controller.workflow_gate.final_review_authority_cut=lambda:('invalid',)
+        with self.assertRaisesRegex(ValueError,'Malformed'):self.adapter._api('GET','user')
+        self.assertFalse(self.provider.calls)
+
     def test_review_cut_guard_still_rejects_drift_during_get(self):
         c=self.controller
         c.workflow_gate.final_review_cut=lambda:(c.store.read(c.contract_digest+'.workflow.json'),copy.deepcopy(c.state),copy.deepcopy(c.proof))

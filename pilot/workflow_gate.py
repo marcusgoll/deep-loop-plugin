@@ -52,7 +52,8 @@ class WorkflowGate:
     def __init__(self, store, contract_digest, helper):
         self.store, self.contract_digest, self.helper = store, contract_digest, helper
 
-    def _read(self, *, review=False, outcome=False):
+    def _read(self, *, review=False, outcome=False, authority=False):
+        if authority and not review:raise ValueError('Authority origin requires full review')
         require_active(self.store, self.contract_digest)
         binding = self.store.read(self.contract_digest + '.workflow.json')
         try:
@@ -66,10 +67,11 @@ class WorkflowGate:
                     intent.get('binding_digest') != digest(binding) or
                     intent.get('approval_ref') != binding.get('approval_ref')):
                 raise ValueError('Workflow binding completion identity drift')
-        return self.validate_binding(binding,review=review,outcome=outcome)
+        return self.validate_binding(binding,review=review,outcome=outcome,authority=authority)
 
-    def validate_binding(self, binding, *, review=False, outcome=False):
+    def validate_binding(self, binding, *, review=False, outcome=False, authority=False):
         """Inspect a proposed binding before its protected publication."""
+        if authority and not review:raise ValueError('Authority origin requires full review')
         legacy_fields = {
                 'contract_digest', 'approval_ref', 'checkpoint_path', 'session_id',
                 'verification_contract', 'graph', 'task_verifiers', 'task_prompts', 'boundary'}
@@ -179,6 +181,11 @@ class WorkflowGate:
         mapped = {i for ids in mapping.values() for i in ids}
         if mapped != blocking:
             raise ValueError('Task mapping must cover every parent blocking verifier exactly by ID')
+        if authority:
+            # Expose origin only after the helper and protected image closure
+            # above succeeded. This value belongs to this read invocation.
+            origin=image_cut[0]['before'] if image_cut is not None else self.accepted_parent_image(binding,state)
+            return binding,state,by_id,observation,origin
         if review or outcome:return binding,state,by_id,observation
         return binding, state, by_id
 
@@ -410,16 +417,26 @@ class WorkflowGate:
         None selects the existing legacy proof reader. The returned cut is
         local to this invocation; it never authorizes a later operation.
         """
+        return self._final_review_cut()
+
+    def final_review_authority_cut(self):
+        """Fresh full review and authenticated origin; never a cross-call cache."""
+        return self._final_review_cut(authority=True)
+
+    def _final_review_cut(self, *, authority=False):
         binding=self.store.read(self.contract_digest+'.workflow.json')
         method=getattr(self.helper,'review_observation',None)
         if (not callable(method) or not isinstance(binding.get('task_verifiers'),dict) or
                 len(binding['task_verifiers'])>128):
             return None
-        binding,state,by_id,observation=self._read(review=True)
+        opening=self._read(review=True,authority=True) if authority else self._read(review=True)
+        binding,state,by_id,observation=opening[:4]
         source=self.candidate_snapshot(binding)
         outcome=self._review_outcome_at(binding,state,by_id,observation)
-        again,after,tasks,closing=self._read(review=True)
+        ending=self._read(review=True,authority=True) if authority else self._read(review=True)
+        again,after,tasks,closing=ending[:4]
         if (again!=binding or after!=state or
+                (authority and ending[4]!=opening[4]) or
                 self._review_outcome_at(again,after,tasks,closing)!=outcome or
                 self.candidate_snapshot(binding)!=source):
             raise ValueError('Final workflow review cut changed during validation')
@@ -428,7 +445,7 @@ class WorkflowGate:
                'outcome_proof':outcome,'review_issues':[],
                'parent_accepted':False,'delivery_verified':False}
         if source is not None:proof['candidate_source']=source
-        return binding,state,proof
+        return (binding,state,proof,opening[4]) if authority else (binding,state,proof)
 
     def _review_outcome_at(self,binding,state,by_id,observation):
         if any(task['status']!='done' for task in by_id.values()):

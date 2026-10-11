@@ -50,15 +50,19 @@ class WorkflowDelivery:
         # result is checked again under the credential lock before I/O/write.
         c=self.controller;c._contract();c._workflow_mutation_authority(parent_recovery=True);c._unowned()
         c._require_no_pending_task_acceptance();c._require_no_pending_task_credit()
+        authority_reader=getattr(c.workflow_gate,'final_review_authority_cut',None)
+        authority_cut=authority_reader() if callable(authority_reader) else None
+        if authority_cut is not None and (not isinstance(authority_cut,tuple) or len(authority_cut)!=4):
+            raise ValueError('Malformed workflow review authority cut')
         reader=getattr(c.workflow_gate,'final_review_cut',None)
-        reviewed=reader() if callable(reader) else None
+        reviewed=authority_cut[:3] if authority_cut is not None else reader() if callable(reader) else None
         if reviewed is None:
             binding,state,_=c.workflow_gate._read()
             current_proof=c.workflow_gate.final_review_proof()
         else:
             binding,state,current_proof=reviewed
         proof=self.cut['parent_receipt']['postimage_review_proof']
-        origin=c.workflow_gate.accepted_parent_image(binding,state)
+        origin=authority_cut[3] if authority_cut is not None else c.workflow_gate.accepted_parent_image(binding,state)
         current=c._parent_proof_at_checkpoint(current_proof,digest(origin))
         if (digest(binding)!=self.cut['binding_sha256'] or digest(origin)!=proof['checkpoint_sha256'] or
                 c.journal.read()[0]!=self.cut['outcome']['journal_revision'] or

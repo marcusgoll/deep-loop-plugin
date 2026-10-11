@@ -15,6 +15,11 @@ from workflow_gate import WorkflowGate, graph_identity, task_progress_identity
 
 
 class WorkflowGateTests(unittest.TestCase):
+    def test_authority_origin_requires_full_review_on_both_reader_entries(self):
+        gate=WorkflowGate(None,'unused',None)
+        for call in (lambda:gate._read(authority=True),lambda:gate.validate_binding({},authority=True)):
+            with self.assertRaisesRegex(ValueError,'requires full review'):call()
+
     def setUp(self):
         self.f = f = test_receipt_recovery.GenericReceiptTests()
         f.setUp();self.addCleanup(f.doCleanups)
