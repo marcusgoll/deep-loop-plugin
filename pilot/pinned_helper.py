@@ -8,14 +8,67 @@ adapter does not install a snapshot or grant workflow execution authority.
 """
 import hashlib
 import json
+import errno
 import os
 from pathlib import Path
 import stat
 import subprocess
 import sys
 import tempfile
+import time
+import select
 
 from admission import digest, initialize
+
+
+def _pidfd_wait_available():
+    """Choose the wait mechanism before launching a helper."""
+    if not callable(getattr(os,'pidfd_open',None)):return False
+    try:fd=os.pidfd_open(os.getpid())
+    except OSError as failure:
+        if failure.errno in {errno.ENOSYS,errno.EINVAL,errno.EPERM,errno.EACCES}:return False
+        raise
+    try:select.select([fd],[],[],0)
+    finally:os.close(fd)
+    return True
+
+
+def _run_helper(args,encoded,output,errors,environment,timeout):
+    """Fresh child, bounded file-backed input/output, exact deadline and reap.
+
+    pidfd readiness avoids timeout polling delay. Unsupported hosts keep the
+    legacy wait on the same single child; no failure can relaunch a helper.
+    """
+    if not isinstance(encoded,bytes) or len(encoded)>1572864:
+        raise ValueError('Bounded helper input required')
+    event_wait=_pidfd_wait_available()
+    with tempfile.TemporaryFile() as input_file:
+        input_file.write(encoded);input_file.seek(0)
+        deadline=time.monotonic()+timeout
+        process=subprocess.Popen(args,stdin=input_file,stdout=output,stderr=errors,env=environment)
+        fd=None
+        try:
+            if event_wait:
+                try:fd=os.pidfd_open(process.pid)
+                except ProcessLookupError:
+                    if process.poll() is None:raise
+                if fd is not None:
+                    while True:
+                        remaining=deadline-time.monotonic()
+                        if remaining<=0:raise subprocess.TimeoutExpired(args,timeout)
+                        try:ready=select.select([fd],[],[],remaining)[0]
+                        except InterruptedError:continue
+                        if ready:break
+                process.wait()
+            else:
+                process.wait(timeout=max(0,deadline-time.monotonic()))
+            return subprocess.CompletedProcess(args,process.returncode)
+        except BaseException:
+            if process.poll() is None:process.kill()
+            process.wait()
+            raise
+        finally:
+            if fd is not None:os.close(fd)
 
 METHODS = {'task_records','task_queue','contract_definition_issues','contract_data',
            'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state','definition_observation','review_observation','outcome_observation','checkpoint_observation','review_dependency_cut','review_observation_with_dependencies','checkpoint_observation_with_dependencies'}
@@ -220,8 +273,8 @@ class PinnedHelper:
         limit=count*1048576+(1024 if method in {'definition_observation','review_observation','outcome_observation'} else 0)+(1048576 if dependency_wrapped else 0)
         environment={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'}
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-            result=subprocess.run([str(python),'-I','-S','-B','-c',DRIVER,str(root)],input=encoded,
-                                  stdout=output,stderr=errors,env=environment,timeout=count*8,check=False)
+            result=_run_helper([str(python),'-I','-S','-B','-c',DRIVER,str(root)],encoded,
+                               output,errors,environment,count*8)
             if result.returncode!=0:raise ValueError('Pinned helper operation unavailable or failed')
             output.seek(0);payload=output.read(limit+1)
         if len(payload)>limit:raise ValueError('Pinned helper result exceeds bound')
