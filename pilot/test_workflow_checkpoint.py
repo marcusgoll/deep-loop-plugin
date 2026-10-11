@@ -10,7 +10,7 @@ from unittest.mock import patch
 import test_workflow_delivery as fixtures
 from admission import digest
 from workflow_delivery import WorkflowDelivery
-from workflow_checkpoint import WorkflowCheckpoint
+from workflow_checkpoint import WorkflowCheckpoint, WorkflowTerminal
 from workflow_gate import WorkflowGate
 
 
@@ -21,6 +21,10 @@ class LiteralHelper:
         result['delivery'].update(status='verified',revision=revision,evidence=evidence,
             branchDisposition={'status':'verified','kind':'pull_request','revision':revision,'evidence':evidence})
         return result
+    def completed_state(self,state,archive=None):
+        if state.get("complete") or state["delivery"]["status"]!="verified":raise ValueError("Delivered open fixture required")
+        if state.get("blocked_ship"):raise ValueError("SHIP fixture blocked")
+        return {**copy.deepcopy(state),"active":False,"complete":True,"phase":"COMPLETE"}
     def validation_issues(self,*args):return []
 
 
@@ -172,4 +176,94 @@ class WorkflowCheckpointTests(unittest.TestCase):
                 finally:os._exit(3)
             _,status=os.waitpid(child,0);self.assertTrue(os.WIFSIGNALED(status));self.assertEqual(os.WTERMSIG(status),9)
         self.assertEqual(self.wrapper.step(),'workflow_delivery_checkpoint_verified')
+        self.assertEqual(self.c.store.read(self.key+'.parent-acceptance.json'),self.parent)
+
+
+class WorkflowTerminalTests(unittest.TestCase):
+    setUp=WorkflowCheckpointTests.setUp
+    intent=WorkflowCheckpointTests.intent
+    def terminal(self):
+        self.intent()
+        self.assertEqual(self.wrapper.step(),'recovered_workflow_delivery_checkpoint')
+        self.wrapper=WorkflowTerminal(self.c,self.adapter)
+        self.assertEqual(self.wrapper.step(),'prepared_workflow_terminal_checkpoint')
+        return self.c.store.read(self.key+'.workflow-terminal-intent.json')
+    def test_terminal_exact_recovery_and_immutable_parent(self):
+        intent=self.terminal();self.provider.calls.clear()
+        self.assertEqual(self.wrapper.step(),'recovered_workflow_terminal_checkpoint')
+        self.assertEqual(json.loads(self.path.read_text()),intent['after'])
+        self.assertEqual(self.wrapper.step(),'workflow_complete_verified')
+        self.assertEqual(self.c.store.read(self.key+'.parent-acceptance.json'),self.parent)
+        self.assertEqual(self.c.workflow_gate.accepted_parent_image(self.c.binding,intent['after']),json.loads(self.before))
+        self.assertTrue(all(method=='GET' for method,_,_ in self.provider.calls))
+    def test_terminal_forgery_and_receipt_drift(self):
+        intent=self.terminal();before=self.path.read_bytes()
+        name=self.key+'.workflow-terminal-intent.json'
+        for forged in ({**intent,'unexpected':True},{**intent,'after':{**intent['after'],'extra':True}},
+                       {**intent,'delivery_checkpoint_sha256':'f'*64}):
+            self.c.store.remove(name);self.c.store.create(name,forged)
+            with self.assertRaises(ValueError):self.wrapper.step()
+            self.assertEqual(self.path.read_bytes(),before)
+        self.c.store.remove(name);self.c.store.create(name,intent)
+        checkpoint=self.key+'.workflow-delivery-checkpoint.json'
+        self.c.store.remove(checkpoint)
+        with self.assertRaises(FileNotFoundError):self.wrapper.step()
+        self.assertEqual(self.path.read_bytes(),before)
+    def test_terminal_provider_drift_never_closes(self):
+        self.terminal();before=self.path.read_bytes();self.provider.check_status='failure'
+        with self.assertRaises(ValueError):self.wrapper.step()
+        self.assertEqual(self.path.read_bytes(),before)
+        self.assertFalse((self.c.store.root/(self.key+'.workflow-terminal-complete.json')).exists())
+    def test_terminal_competing_writer_blocks(self):
+        import fcntl
+        self.terminal();before=self.path.read_bytes()
+        fd=os.open(self.path.parent/'.deep-task-acceptance.lock',os.O_RDWR|os.O_CREAT,0o600)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            with self.assertRaises(BlockingIOError):self.wrapper.step()
+        finally:os.close(fd)
+        self.assertEqual(self.path.read_bytes(),before)
+    def test_terminal_late_expiry_blocks_receipt(self):
+        intent=self.terminal();publish=self.c.workflow_gate._publish_checkpoint;source=self.c._workflow_source_guard
+        published=False
+        def published_call(*args,**kwargs):
+            nonlocal published
+            result=publish(*args,**kwargs);published=True;return result
+        def expire(proof,**kwargs):
+            source(proof,**kwargs)
+            if published:self.c.active=False
+        with patch.object(self.c.workflow_gate,'_publish_checkpoint',side_effect=published_call),patch.object(self.c,'_workflow_source_guard',side_effect=expire):
+            with self.assertRaisesRegex(ValueError,'expired'):self.wrapper.step()
+        self.assertEqual(json.loads(self.path.read_text()),intent['after'])
+        self.assertFalse((self.c.store.root/(self.key+'.workflow-terminal-complete.json')).exists())
+    def test_terminal_revocation_and_source_drift(self):
+        self.terminal();before=self.path.read_bytes();self.provider.calls.clear()
+        self.c.store.create(self.key+'.revocation-intent.json',{'fixture':'revoked'})
+        with self.assertRaisesRegex(ValueError,'revoked'):self.wrapper.step()
+        self.assertFalse(self.provider.calls);self.assertEqual(self.path.read_bytes(),before)
+        self.c.store.remove(self.key+'.revocation-intent.json')
+        (self.c.candidate/'extra.txt').write_text('unapproved source')
+        with self.assertRaises(ValueError):self.wrapper.step()
+        self.assertEqual(self.path.read_bytes(),before)
+    def test_terminal_process_crash_at_each_protected_boundary(self):
+        if not hasattr(os,'fork'):self.skipTest('Requires POSIX')
+        self.intent();self.wrapper.step();self.wrapper=WorkflowTerminal(self.c,self.adapter)
+        for boundary in ('intent','checkpoint','completion'):
+            child=os.fork()
+            if child==0:
+                create=self.c.store.create;publish=self.c.workflow_gate._publish_checkpoint
+                def crash_create(name,value):
+                    create(name,value)
+                    if (boundary=='intent' and name.endswith('.workflow-terminal-intent.json') or
+                            boundary=='completion' and name.endswith('.workflow-terminal-complete.json')):os.kill(os.getpid(),9)
+                def crash_publish(*args,**kwargs):
+                    result=publish(*args,**kwargs)
+                    if boundary=='checkpoint':os.kill(os.getpid(),9)
+                    return result
+                self.c.store.create=crash_create;self.c.workflow_gate._publish_checkpoint=crash_publish
+                try:self.wrapper.step()
+                finally:os._exit(3)
+            _,status=os.waitpid(child,0)
+            self.assertTrue(os.WIFSIGNALED(status));self.assertEqual(os.WTERMSIG(status),9)
+        self.assertEqual(self.wrapper.step(),'workflow_complete_verified')
         self.assertEqual(self.c.store.read(self.key+'.parent-acceptance.json'),self.parent)

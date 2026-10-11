@@ -117,7 +117,7 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
     def test_model_free_worker_delivery_uses_actual_parent_authentication(self):
         import sys
         from workflow_delivery import WorkflowDelivery,WAIT
-        from workflow_checkpoint import WorkflowCheckpoint
+        from workflow_checkpoint import WorkflowTerminal
         from test_workflow_delivery import Provider
         if sys.platform!='linux':
             mount=patch('git_candidate_export._mount_id',return_value=1);mount.start();self.addCleanup(mount.stop)
@@ -130,12 +130,13 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
         provider=Provider(self.graph.binding['workflow_delivery'])
         def factory(key):
             self.assertEqual(key,self.graph.key)
-            return WorkflowCheckpoint(self.controller,WorkflowDelivery(self.controller,provider.api))
+            return WorkflowTerminal(self.controller,WorkflowDelivery(self.controller,provider.api))
         for _ in range(20):
             result=run(self.graph.store,lambda key:self.controller,window=lambda *args:3600,
                        workflow_delivery_factory=factory)
-            if result=='workflow_delivery_checkpoint_verified':break
-            self.assertIn(result,(WAIT,'prepared_workflow_delivery_checkpoint','recovered_workflow_delivery_checkpoint'))
+            if result=='workflow_complete_verified':break
+            self.assertIn(result,(WAIT,'prepared_workflow_delivery_checkpoint','recovered_workflow_delivery_checkpoint',
+                                      'prepared_workflow_terminal_checkpoint','recovered_workflow_terminal_checkpoint'))
         else:self.fail('Model-free provider adapter did not converge')
         receipt=factory(self.graph.key).adapter._read('complete');parent=self.controller.authenticate_workflow_parent_acceptance()
         self.assertEqual(receipt['parent_receipt_sha256'],parent['parent_receipt_sha256'])
@@ -161,9 +162,11 @@ class WorkflowParentAcceptanceTests(unittest.TestCase):
                 deep_loop.verified_delivery_state(changed,receipt['head_sha'],receipt['pull_request'])
         with self.assertRaises(ValueError):
             deep_loop.verified_delivery_state(delivered,receipt['head_sha'],receipt['pull_request'])
-        self.assertEqual(self.journal.read(),before);self.assertEqual(json.loads(self.graph.checkpoint.read_bytes()),delivered)
+        self.assertEqual(self.journal.read(),before);self.assertEqual(json.loads(self.graph.checkpoint.read_bytes()),deep_loop.completed_state(delivered))
         completed=self.graph.store.read(self.graph.key+'.workflow-delivery-checkpoint.json')
         self.assertTrue(completed['delivery_verified']);self.assertFalse(completed['complete'])
+        terminal=self.graph.store.read(self.graph.key+'.workflow-terminal-complete.json')
+        self.assertTrue(terminal['complete']);self.assertTrue(terminal['delivery_verified'])
         self.assertEqual(len(self.backend.submissions),3)
     def test_locked_delivery_guard_rechecks_authenticated_enrollment(self):
         import sys

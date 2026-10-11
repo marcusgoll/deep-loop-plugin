@@ -1,8 +1,8 @@
 """Protected exact draft-delivery checkpoint publication and recovery.
 
-No enrollment, dispatch, refunds, merge or terminal completion. Historical
-parent acceptance remains immutable; only an independently derived delivery
-postimage can be recognized by the existing gate and checkpoint writer.
+No enrollment, dispatch, refunds or merge. Historical parent acceptance
+remains immutable; only independently derived delivery and terminal images
+can be recognized by the existing gate and checkpoint writer.
 """
 from pathlib import Path
 from admission import digest
@@ -121,3 +121,98 @@ class WorkflowCheckpoint:
             self.store.create(result_name,completion)
             if self.store.read(result_name)!=completion:raise ValueError('Workflow delivery checkpoint completion readback differs')
             return 'recovered_workflow_delivery_checkpoint'
+
+
+TERMINAL_FIELDS=FIELDS|{'delivery_checkpoint_sha256','delivery_intent_sha256'}
+
+
+def checked_terminal_intent(store,key,binding,helper):
+    """Authenticate a closed image against both independently derived transitions."""
+    delivery=checked_delivery_intent(store,key,binding,helper)
+    checkpoint=store.read(key+'.workflow-delivery-checkpoint.json')
+    receipt=store.read(key+'.workflow-delivery-complete.json')
+    expected={'contract_digest':key,'intent_sha256':digest(delivery),
+              'checkpoint_sha256':digest(delivery['after']),'receipt_sha256':digest(receipt),
+              'delivery_verified':True,'complete':False}
+    intent=store.read(key+'.workflow-terminal-intent.json')
+    if (checkpoint!=expected or set(intent)!=TERMINAL_FIELDS or
+            any(intent[field]!=delivery[field] for field in
+                ('contract_digest','binding_sha256','parent_receipt_sha256','plan_sha256','receipt_sha256')) or
+            intent['delivery_checkpoint_sha256']!=digest(checkpoint) or
+            intent['delivery_intent_sha256']!=digest(delivery) or intent['before']!=delivery['after']):
+        raise ValueError('Protected workflow terminal intent identity drift')
+    # The proof is the same historical cut at the delivered checkpoint hash.
+    from private_controller import PrivateController
+    proof=PrivateController._parent_proof_at_checkpoint(delivery['observation'],digest(intent['before']))
+    if intent['observation']!=proof:raise ValueError('Workflow terminal observation drift')
+    archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in intent['before'] else None
+    if intent['after']!=helper.completed_state(intent['before'],archive):
+        raise ValueError('Substituted workflow terminal checkpoint postimage')
+    return intent
+
+
+class WorkflowTerminal(WorkflowCheckpoint):
+    """Separate helper-owned closeout, retaining exact delivery recovery semantics."""
+    def step(self):
+        name=self.key+'.workflow-terminal-intent.json'
+        try:self.store.read(name)
+        except FileNotFoundError:
+            result=super().step()
+            if result!='workflow_delivery_checkpoint_verified':return result
+            receipt=self.adapter._read('complete')
+            with self.store.lock():
+                self._provider_guard(receipt)
+                gate=self.controller.workflow_gate;binding,state,_=gate._read()
+                delivery=checked_delivery_intent(self.store,self.key,binding,gate.helper)
+                checkpoint=self.store.read(self.key+'.workflow-delivery-checkpoint.json')
+                archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
+                after=gate.helper.completed_state(state,archive)
+                proof=gate.final_review_proof()
+                intent={**delivery,'before':state,'after':after,'observation':proof,
+                        'delivery_checkpoint_sha256':digest(checkpoint),'delivery_intent_sha256':digest(delivery)}
+                self.adapter._locked_guard()
+                if gate._read()[:2]!=(binding,state):raise ValueError('Terminal intent checkpoint drift')
+                self.controller._workflow_mutation_authority(parent_recovery=True)
+                self.store.create(name,intent)
+                if checked_terminal_intent(self.store,self.key,binding,gate.helper)!=intent:
+                    raise ValueError('Workflow terminal intent readback differs')
+            return 'prepared_workflow_terminal_checkpoint'
+        receipt=self.adapter._read('complete')
+        if self.adapter.authenticate_delivery()!=receipt:
+            raise ValueError('Current provider acceptance changed during terminal recovery')
+        with self.store.lock():
+            gate=self.controller.workflow_gate;binding,state,_=gate._read()
+            intent=checked_terminal_intent(self.store,self.key,binding,gate.helper)
+            if state not in (intent['before'],intent['after']):raise ValueError('Workflow terminal recovery drift')
+            completion={'contract_digest':self.key,'intent_sha256':digest(intent),
+                        'checkpoint_sha256':digest(intent['after']),'receipt_sha256':digest(receipt),
+                        'delivery_verified':True,'complete':True}
+            result_name=self.key+'.workflow-terminal-complete.json'
+            try:existing=self.store.read(result_name)
+            except FileNotFoundError:existing=None
+            if existing is not None:
+                if existing!=completion or state!=intent['after']:raise ValueError('Workflow terminal completion drift')
+                self._provider_guard(receipt)
+                return 'workflow_complete_verified'
+            def checked(saved):
+                if checked_terminal_intent(self.store,self.key,binding,gate.helper)!=saved:
+                    raise ValueError('Workflow terminal transition changed')
+                current_binding,current,_=gate._read()
+                if current_binding!=binding or current not in (saved['before'],saved['after']):
+                    raise ValueError('Workflow terminal exact preimage changed')
+                return {**saved,'before':current}
+            def postcheck():
+                current=gate._read()[1]
+                archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in current else None
+                issues=gate.helper.validation_issues(current,'ship',archive)
+                if issues:raise ValueError('Workflow terminal SHIP validation blocked: '+'; '.join(issues))
+                return gate.final_review_proof()
+            saved=gate._publish_checkpoint(intent,checked,postcheck,before_write=lambda:self._provider_guard(receipt))
+            self._provider_guard(receipt)
+            self.controller._workflow_source_guard(intent['observation'],parent_recovery=True)
+            if gate._read()[:2]!=(binding,saved) or saved!=intent['after']:
+                raise ValueError('Workflow terminal checkpoint changed at final source guard')
+            self.controller._workflow_mutation_authority(parent_recovery=True)
+            self.store.create(result_name,completion)
+            if self.store.read(result_name)!=completion:raise ValueError('Workflow terminal completion readback differs')
+            return 'recovered_workflow_terminal_checkpoint'

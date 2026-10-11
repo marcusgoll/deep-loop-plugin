@@ -151,7 +151,11 @@ class WorkflowGate:
         if binding.get('schema')!=4 or state.get('delivery',{}).get('status')=='pending':return state
         from workflow_checkpoint import checked_delivery_intent
         intent=checked_delivery_intent(self.store,self.contract_digest,binding,self.helper)
-        if state!=intent['after']:raise ValueError('Unapproved workflow delivery checkpoint postimage')
+        if state!=intent['after']:
+            from workflow_checkpoint import checked_terminal_intent
+            try:terminal=checked_terminal_intent(self.store,self.contract_digest,binding,self.helper)
+            except FileNotFoundError as exc:raise ValueError('Unapproved workflow terminal checkpoint postimage') from exc
+            if state!=terminal['after']:raise ValueError('Unapproved workflow terminal checkpoint postimage')
         return intent['before']
 
     def candidate_policy(self, binding):
@@ -310,7 +314,8 @@ class WorkflowGate:
         if outcome['checkpoint_sha256']!=digest(state):
             raise ValueError('Final workflow review checkpoint changed')
         archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
-        issues=self.helper.validation_issues(state,'review',archive)
+        stage='ship' if state.get('complete') is True else 'review'
+        issues=self.helper.validation_issues(state,stage,archive)
         if not isinstance(issues,list) or any(not isinstance(issue,str) for issue in issues):
             raise ValueError('Malformed full workflow review validation')
         if issues:
