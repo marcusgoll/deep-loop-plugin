@@ -70,6 +70,16 @@ class PinnedHelperTests(unittest.TestCase):
         p.write_text('source drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.definition_observation(state)
 
+    def test_definition_batch_preserves_individual_result_capacity(self):
+        p=self.root/'skills/deep-loop/scripts/deep_loop.py'
+        p.write_text("def task_records(state):return 'r'*600000\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):return 'c'*600000\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        result=self.helper.definition_observation({'verificationContract':{'path':'/fixture'}})
+        self.assertEqual(len(result['records']),600000);self.assertEqual(len(result['contract']),600000)
+        p.write_text("def task_records(state):return 'r'*1100000\ndef contract_definition_issues(state):return []\ndef contract_data(path,verify_files=True):return {}\n")
+        self.files[str(p.relative_to(self.root))]=hashlib.sha256(p.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError,'unavailable or failed'):self.helper.definition_observation({'verificationContract':{'path':'/fixture'}})
+
     def test_drift_unpinned_dependency_and_oversize_request_fail_closed(self):
         p=self.root/'skills/deep-loop/scripts/deep_loop.py';p.write_text('drift')
         with self.assertRaisesRegex(ValueError,'source drift'):self.helper.task_queue({})

@@ -21,17 +21,18 @@ METHODS = {'task_records','task_queue','contract_definition_issues','contract_da
            'prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state','definition_observation'}
 DRIVER = '''import json,os,resource,sys
 from pathlib import Path
-resource.setrlimit(resource.RLIMIT_FSIZE,(1048576,1048576))
-resource.setrlimit(resource.RLIMIT_CPU,(5,5))
 resource.setrlimit(resource.RLIMIT_AS,(536870912,536870912))
 sys.dont_write_bytecode=True
 root=Path(sys.argv[1])
 os.environ['DEEP_LOOP_SKILLS_ROOT']=str(root/'skills')
 sys.path[:0]=[str(root/'skills/deep-loop/scripts')]
-import deep_loop
 request=json.loads(sys.stdin.buffer.read(524289))
 method=request['method']
 assert method in {'task_records','task_queue','contract_definition_issues','contract_data','prerequisite_issues','accepted_task_state','verification_definitions','verified_check_state','contract_semantics_sha256','validation_issues','completed_state','verified_delivery_state','definition_observation'}
+batch=method=='definition_observation'
+resource.setrlimit(resource.RLIMIT_FSIZE,((3146752,3146752) if batch else (1048576,1048576)))
+resource.setrlimit(resource.RLIMIT_CPU,((15,15) if batch else (5,5)))
+import deep_loop
 args=request['args']
 if method=='contract_data':args[0]=Path(args[0])
 if method=='validation_issues' and len(args)>2 and args[2] is not None:args[2]=Path(args[2])
@@ -41,8 +42,16 @@ if method=='definition_observation':
  assert len(args)==1 and not request['kwargs']
  state=args[0]
  # Fixed composition preserves older pinned packages without changing them.
- result={'records':deep_loop.task_records(state),'issues':deep_loop.contract_definition_issues(state),
-         'contract':deep_loop.contract_data(Path(state['verificationContract']['path']),verify_files=False)}
+ result={}
+ for name,reader in (('records',lambda:deep_loop.task_records(state)),
+                     ('issues',lambda:deep_loop.contract_definition_issues(state)),
+                     ('contract',lambda:deep_loop.contract_data(Path(state['verificationContract']['path']),verify_files=False))):
+  usage=resource.getrusage(resource.RUSAGE_SELF);before=usage.ru_utime+usage.ru_stime
+  resource.setrlimit(resource.RLIMIT_CPU,(min(15,__import__('math').ceil(before)+5),15))
+  value=reader();usage=resource.getrusage(resource.RUSAGE_SELF)
+  assert usage.ru_utime+usage.ru_stime-before<=5
+  assert len(json.dumps(value,allow_nan=False).encode())<=1048576
+  result[name]=value
 else:result=getattr(deep_loop,method)(*args,**request['kwargs'])
 sys.stdout.write(json.dumps(result,allow_nan=False))
 '''
@@ -138,10 +147,11 @@ class PinnedHelper:
         environment={'PATH':'/usr/bin:/bin','HOME':'/nonexistent','LANG':'C.UTF-8'}
         with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
             result=subprocess.run([str(python),'-I','-S','-B','-c',DRIVER,str(root)],input=encoded,
-                                  stdout=output,stderr=errors,env=environment,timeout=8,check=False)
+                                  stdout=output,stderr=errors,env=environment,timeout=24 if method=='definition_observation' else 8,check=False)
             if result.returncode!=0:raise ValueError('Pinned helper operation unavailable or failed')
-            output.seek(0);payload=output.read(1048577)
-        if len(payload)>1048576:raise ValueError('Pinned helper result exceeds bound')
+            limit=3146752 if method=='definition_observation' else 1048576
+            output.seek(0);payload=output.read(limit+1)
+        if len(payload)>limit:raise ValueError('Pinned helper result exceeds bound')
         return json.loads(payload)
 
     def validation_issues(self,state,stage,archive=None):
