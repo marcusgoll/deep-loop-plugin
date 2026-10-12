@@ -1,11 +1,13 @@
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 import copy
+import hashlib
 import os
 import subprocess
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 from admission import credit_task, digest, finish, initialize, reserve
 from git_journal import GitJournal
@@ -30,6 +32,64 @@ class GitJournalTests(unittest.TestCase):
     def reserved(self, state):
         return reserve(state, self.contract, run_id=1, run_attempt=1,
                        model_seconds=600, active_seconds=1200)
+
+    def test_blob_batch_preserves_exact_utf8_bytes_and_duplicate_objects(self):
+        body = '{"fixture":"☃"}\n'.encode()
+        for algorithm in ('sha1', 'sha256'):
+            oid = hashlib.new(algorithm, b'blob '+str(len(body)).encode()+b'\0'+body).hexdigest()
+            frame = oid.encode()+b' blob '+str(len(body)).encode()+b'\n'+body+b'\n'
+            self.assertEqual(GitJournal._decode_blobs(frame*2, 2), [body, body])
+            with self.assertRaisesRegex(ValueError, 'formats differ'):
+                GitJournal._decode_blobs(frame, 1, object_width=64 if algorithm=='sha1' else 40)
+
+    def test_blob_transport_bounds_output_and_reaps_child(self):
+        root = Path(self.temp.name)
+        binary = root/'bin'
+        binary.mkdir()
+        executable = binary/'git'
+        pidfile = root/'transport.pid'
+        for descriptor, size in ((1, 5*1048576), (2, 65537)):
+            with self.subTest(descriptor=descriptor):
+                executable.write_text('#!/usr/bin/python3\nimport os,time\n'
+                    f'open({str(pidfile)!r}, "w").write(str(os.getpid()))\n'
+                    f'os.write({descriptor}, b"x"*{size})\ntime.sleep(60)\n')
+                executable.chmod(0o700)
+                with patch.dict(os.environ, {'PATH':str(binary)+os.pathsep+os.environ['PATH']}):
+                    with self.assertRaisesRegex(ValueError, 'transport output exceeds bound'):
+                        self.clients[0]._git_bytes('cat-file', '--batch', data=b'fixture\n')
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(int(pidfile.read_text()), 0)
+
+    def test_blob_batch_rejects_invalid_framing_digest_type_and_size(self):
+        body = b'{}\n'
+        oid = hashlib.sha1(b'blob 3\0'+body).hexdigest().encode()
+        frame = oid+b' blob 3\n'+body+b'\n'
+        invalid = [frame[:-1], frame+b'garbage', frame.replace(b' blob ', b' tree '),
+                   frame.replace(b' blob 3', b' blob 03'),
+                   frame.replace(b' blob 3', b' blob -1'),
+                   frame.replace(b' blob 3', b' blob 1048577'),
+                   frame.replace(b'{}', b'[]'), b'a'*40+b' missing\n',
+                   oid.upper()+frame[len(oid):], frame*2]
+        for raw in invalid:
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                GitJournal._decode_blobs(raw, 1)
+        for count in (0, 5, True):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                GitJournal._decode_blobs(frame, count)
+
+    def test_history_blob_requests_use_immutable_opening_revision(self):
+        controller, histories = self.credited_controller()
+        journal = self.clients[1]
+        original = journal._git_bytes
+        observed = []
+        def inspect(*args, **kwargs):
+            observed.append((args, kwargs['data']))
+            return original(*args, **kwargs)
+        journal._git_bytes = inspect
+        self.assertEqual(journal.verify_histories(histories), histories[-1])
+        self.assertEqual(observed, [(('cat-file', '--batch'),
+            ('\n'.join([histories[-1][0]+':journal.json']+
+                        [r+':journal.json' for r, _ in histories])+'\n').encode())])
 
     def test_batch_authenticates_saved_states_against_current_remote(self):
         first, restarted = self.clients

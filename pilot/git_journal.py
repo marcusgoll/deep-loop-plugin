@@ -6,9 +6,12 @@ its credentials to the candidate/model. Network uncertainty raises; no retry.
 """
 
 import copy
+import hashlib
 import json
 import os
+import selectors
 import subprocess
+import time
 import uuid
 
 from admission import LIMITS, _validate, credit_task, finish, initialize, reserve
@@ -38,6 +41,86 @@ class GitJournal:
         state = json.loads(self._git("show", revision + ":journal.json"))
         _validate(state, self.contract_digest)
         return revision, state
+
+    def _git_bytes(self, *args, data):
+        """Bound binary batch output while draining both pipes and reaping Git."""
+        command = ['git', '-C', self.workspace, *args]
+        limit = (LIMITS['attempts']+1)*(1048576+100)
+        output, error = bytearray(), bytearray()
+        deadline = time.monotonic()+30
+        with subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE) as process:
+            try:
+                process.stdin.write(data)
+                process.stdin.close()
+                with selectors.DefaultSelector() as selector:
+                    selector.register(process.stdout, selectors.EVENT_READ, (output, limit))
+                    selector.register(process.stderr, selectors.EVENT_READ, (error, 65536))
+                    while selector.get_map():
+                        remaining = deadline-time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(command, 30)
+                        for key, _ in selector.select(remaining):
+                            target, maximum = key.data
+                            chunk = os.read(key.fileobj.fileno(), min(65536, maximum-len(target)+1))
+                            if not chunk:
+                                selector.unregister(key.fileobj)
+                            else:
+                                target.extend(chunk)
+                                if len(target) > maximum:
+                                    raise ValueError('Journal batch transport output exceeds bound')
+                remaining = deadline-time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, 30)
+                process.wait(timeout=remaining)
+                if process.returncode:
+                    raise subprocess.CalledProcessError(process.returncode, command,
+                                                        bytes(output), bytes(error))
+                return bytes(output)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.wait()
+
+    @staticmethod
+    def _decode_blobs(raw, count, *, object_width=None):
+        """Decode exact ordered Git blob frames without stripping payload bytes."""
+        if type(count) is not int or not 1 <= count <= LIMITS['attempts']+1:
+            raise ValueError('Bounded journal blob group required')
+        if not isinstance(raw, bytes) or len(raw) > count*(1048576+100):
+            raise ValueError('Journal blob bytes exceed bound')
+        if object_width not in (None, 40, 64):
+            raise ValueError('Canonical journal object format required')
+        offset, blobs, width = 0, [], object_width
+        for _ in range(count):
+            end = raw.find(b'\n', offset, offset+101)
+            if end < 0:
+                raise ValueError('Journal blob header missing')
+            fields = raw[offset:end].split(b' ')
+            if (len(fields) != 3 or len(fields[0]) not in (40, 64) or
+                    any(c not in b'0123456789abcdef' for c in fields[0]) or
+                    fields[1] != b'blob' or not fields[2].isdigit() or
+                    fields[2].startswith(b'0')):
+                raise ValueError('Canonical journal blob header required')
+            if width is not None and width != len(fields[0]):
+                raise ValueError('Journal blob object formats differ')
+            width = len(fields[0])
+            size = int(fields[2])
+            if not 1 <= size <= 1048576:
+                raise ValueError('Journal blob size exceeds bound')
+            start = end+1
+            body = raw[start:start+size]
+            if len(body) != size or raw[start+size:start+size+1] != b'\n':
+                raise ValueError('Journal blob frame truncated')
+            algorithm = 'sha1' if width == 40 else 'sha256'
+            actual = hashlib.new(algorithm, b'blob '+fields[2]+b'\0'+body).hexdigest().encode()
+            if actual != fields[0]:
+                raise ValueError('Journal blob digest differs')
+            blobs.append(body)
+            offset = start+size+1
+        if offset != len(raw):
+            raise ValueError('Journal blob trailing data')
+        return blobs
 
     def verify_history(self, revision, expected):
         """Authenticate a saved revision and its retained append-only history."""
@@ -74,9 +157,19 @@ class GitJournal:
                     any(c not in '0123456789abcdef' for c in revision)):
                 raise ValueError('Canonical journal commit revision required')
             _validate(expected, self.contract_digest)
-        current, state = self.read()
-        for revision, expected in selected:
-            saved = json.loads(self._git('show', revision + ':journal.json'))
+        self._git('fetch', '--no-tags', '--', self.remote, self.ref)
+        current = self._git('rev-parse', 'FETCH_HEAD')
+        if (len(current) not in (40, 64) or
+                any(c not in '0123456789abcdef' for c in current)):
+            raise ValueError('Canonical current journal revision required')
+        expressions = [current+':journal.json']+[r+':journal.json' for r, _ in selected]
+        blobs = self._decode_blobs(self._git_bytes('cat-file', '--batch',
+            data=('\n'.join(expressions)+'\n').encode()), len(expressions),
+            object_width=len(current))
+        state = json.loads(blobs[0].decode('utf-8'))
+        _validate(state, self.contract_digest)
+        for (revision, expected), blob in zip(selected, blobs[1:]):
+            saved = json.loads(blob.decode('utf-8'))
             _validate(saved, self.contract_digest)
             if saved != expected:
                 raise ValueError('Journal historical revision differs')
