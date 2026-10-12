@@ -5,12 +5,13 @@ and protected journal refs are caller obligations. Never expose this adapter or
 its credentials to the candidate/model. Network uncertainty raises; no retry.
 """
 
+import copy
 import json
 import os
 import subprocess
 import uuid
 
-from admission import _validate, credit_task, finish, initialize, reserve
+from admission import LIMITS, _validate, credit_task, finish, initialize, reserve
 
 
 class GitJournal:
@@ -53,6 +54,39 @@ class GitJournal:
                 state['attempts'][:len(saved['attempts'])] != saved['attempts'] or
                 state.get('task_credits', [])[:len(saved.get('task_credits', []))] != saved.get('task_credits', [])):
             raise ValueError('Journal credited history missing or rewritten')
+        return current, state
+
+    def verify_histories(self, histories):
+        """Authenticate this guard's credits between two fresh remote reads.
+
+        No cut survives this call. Every saved state and ancestor is checked;
+        remote advancement during the inspection rejects the entire group.
+        """
+        if (not isinstance(histories, (list, tuple)) or
+                not 1 <= len(histories) <= LIMITS['attempts']):
+            raise ValueError('Bounded journal history group required')
+        selected = copy.deepcopy(histories)
+        for row in selected:
+            if not isinstance(row, (list, tuple)) or len(row) != 2:
+                raise ValueError('Journal revision and exact state required')
+            revision, expected = row
+            if (not isinstance(revision, str) or len(revision) not in (40, 64) or
+                    any(c not in '0123456789abcdef' for c in revision)):
+                raise ValueError('Canonical journal commit revision required')
+            _validate(expected, self.contract_digest)
+        current, state = self.read()
+        for revision, expected in selected:
+            saved = json.loads(self._git('show', revision + ':journal.json'))
+            _validate(saved, self.contract_digest)
+            if saved != expected:
+                raise ValueError('Journal historical revision differs')
+            self._git('merge-base', '--is-ancestor', revision, current)
+            if (state['schema'] != saved['schema'] or
+                    state['attempts'][:len(saved['attempts'])] != saved['attempts'] or
+                    state.get('task_credits', [])[:len(saved.get('task_credits', []))] != saved.get('task_credits', [])):
+                raise ValueError('Journal credited history missing or rewritten')
+        if self.read() != (current, state):
+            raise ValueError('Journal changed during batch history inspection')
         return current, state
 
     def publish(self, expected_revision, state, *, before_publish=None):

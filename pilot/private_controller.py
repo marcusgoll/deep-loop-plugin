@@ -322,9 +322,12 @@ class PrivateController:
                 raise ValueError('Task acceptance completion identity drift')
 
     def _require_no_pending_task_credit(self):
-        for path in self.store.root.glob('deep-loop-pilot-' + self.contract_digest + '-*.task-credit-intent.json'):
-            intent = self.store.read(path.name)
-            try:result = self.store.read(path.name.removesuffix('-intent.json') + '.json')
+        pattern = 'deep-loop-pilot-' + self.contract_digest + '-*.task-credit-intent.json'
+        names = sorted(path.name for path in self.store.root.glob(pattern))
+        records, histories = {}, []
+        for name in names:
+            intent = self.store.read(name)
+            try:result = self.store.read(name.removesuffix('-intent.json') + '.json')
             except FileNotFoundError:
                 raise ValueError('Pending task credit must reconcile before dispatch')
             if (set(result) != {'owner','intent_digest','journal_revision','progress_identity',
@@ -335,7 +338,19 @@ class PrivateController:
                     not isinstance(result['journal_revision'],str) or len(result['journal_revision']) not in (40,64) or
                     any(c not in '0123456789abcdef' for c in result['journal_revision'])):
                 raise ValueError('Task credit completion identity drift')
-            self.journal.verify_history(result['journal_revision'], intent['after'])
+            records[name] = copy.deepcopy((intent, result))
+            histories.append((result['journal_revision'], copy.deepcopy(intent['after'])))
+        batch = getattr(self.journal, 'verify_histories', None)
+        if len(histories) > 1 and callable(batch):
+            batch(histories)
+        else:
+            for revision, expected in histories:
+                self.journal.verify_history(revision, expected)
+        if sorted(path.name for path in self.store.root.glob(pattern)) != names:
+            raise ValueError('Task credit records changed during inspection')
+        for name, expected in records.items():
+            if (self.store.read(name), self.store.read(name.removesuffix('-intent.json') + '.json')) != expected:
+                raise ValueError('Task credit records changed during inspection')
 
     def _workflow_selection(self, task_id):
         self._require_no_pending_parent_acceptance()
