@@ -88,6 +88,23 @@ def launch_plan(owned,candidate,index):
     return {**core,'unit':'deep-loop-pilot-'+digest(core)+'-1-1'}
 
 
+def _property_cut(unit,names):
+    """One fresh bounded property snapshot; no cached native observations."""
+    raw=subprocess.run(['/usr/bin/systemctl','show',unit+'.service',
+                        *['--property='+name for name in names]],
+                       capture_output=True,text=True,check=True,timeout=5).stdout
+    if not isinstance(raw,str) or len(raw.encode())>1048576:
+        raise ValueError('Native verifier property snapshot exceeds bound')
+    values={}
+    for line in raw.splitlines():
+        if '=' not in line:raise ValueError('Malformed native verifier property snapshot')
+        name,value=line.split('=',1)
+        if name not in names or name in values:raise ValueError('Unexpected or duplicate native verifier property')
+        values[name]=value.strip()
+    if set(values)!=set(names):raise ValueError('Incomplete native verifier property snapshot')
+    return values
+
+
 class NativeVerifier:
     def __init__(self,store,contract_digest):self.store,self.key=store,contract_digest
 
@@ -241,18 +258,22 @@ class NativeVerifier:
         prefix=self._intent(plan)
         if self.store.read(prefix+'.submit-intent.json')!={'plan_digest':digest(plan)}:
             raise ValueError('Verifier submission authority changed')
-        invocation=subprocess.run(['/usr/bin/systemctl','show',plan['unit']+'.service','--property=InvocationID','--value'],capture_output=True,text=True,check=True,timeout=5).stdout.strip()
-        native=observe_unit(plan['unit'],invocation)
         properties=self._properties(plan,prefix)
-        for name in ('Description','WorkingDirectory','PrivateNetwork','ProtectSystem','ReadOnlyPaths','ReadWritePaths',
-                     'InaccessiblePaths','NoNewPrivileges','PrivateTmp','PrivateDevices','RestrictAddressFamilies',
-                     'CapabilityBoundingSet','ProtectKernelTunables','ProtectKernelModules','ProtectControlGroups',
-                     'RestrictSUIDSGID','Environment','UnsetEnvironment','LimitAS','LimitCPU','LimitFSIZE'):
-            value=subprocess.run(['/usr/bin/systemctl','show',plan['unit']+'.service','--property='+name,'--value'],capture_output=True,text=True,check=True,timeout=5).stdout.strip()
-            if value!=str(properties[name]):raise ValueError('Native verifier isolation drift: '+name)
-        for name,expected in [('RuntimeMaxUSec','15s'),('TimeoutStartUSec','5s'),('TimeoutStopUSec','5s'),('SystemCallErrorNumber','1')]:
-            value=subprocess.run(['/usr/bin/systemctl','show',plan['unit']+'.service','--property='+name,'--value'],capture_output=True,text=True,check=True,timeout=5).stdout.strip()
-            if value!=expected:raise ValueError('Native verifier deadline drift')
+        isolation=('Description','WorkingDirectory','PrivateNetwork','ProtectSystem','ReadOnlyPaths','ReadWritePaths',
+                   'InaccessiblePaths','NoNewPrivileges','PrivateTmp','PrivateDevices','RestrictAddressFamilies',
+                   'CapabilityBoundingSet','ProtectKernelTunables','ProtectKernelModules','ProtectControlGroups',
+                   'RestrictSUIDSGID','Environment','UnsetEnvironment','LimitAS','LimitCPU','LimitFSIZE')
+        deadlines={'RuntimeMaxUSec':'15s','TimeoutStartUSec':'5s','TimeoutStopUSec':'5s','SystemCallErrorNumber':'1'}
+        names=(*isolation,*deadlines,'InvocationID','Result')
+        def validate(cut):
+            for name in isolation:
+                if cut[name]!=str(properties[name]):raise ValueError('Native verifier isolation drift: '+name)
+            if any(cut[name]!=expected for name,expected in deadlines.items()):
+                raise ValueError('Native verifier deadline drift')
+            if not cut['Result']:raise ValueError('Native verifier unit result unavailable')
+        opening=_property_cut(plan['unit'],names);validate(opening)
+        invocation=opening['InvocationID']
+        native=observe_unit(plan['unit'],invocation)
         buspath='/org/freedesktop/systemd1/unit/'+''.join(c if c.isalnum() else '_'+format(ord(c),'02x') for c in plan['unit']+'.service')
         for name,expected in [('SystemCallFilter',{'type':'(bas)','data':[False,list(NETWORK_SYSCALLS)]}),
                               ('SystemCallArchitectures',{'type':'as','data':['native']})]:
@@ -263,8 +284,15 @@ class NativeVerifier:
         if (command.get('type')!='a(sasbttttuii)' or len(command.get('data',[]))!=1 or
                 command['data'][0][0]!=plan['command'][0] or command['data'][0][1]!=plan['command']):
             raise ValueError('Native verifier argv changed')
-        unit_result=subprocess.run(['/usr/bin/systemctl','show',plan['unit']+'.service','--property=Result','--value'],capture_output=True,text=True,check=True,timeout=5).stdout.strip()
-        if not unit_result:raise ValueError('Native verifier unit result unavailable')
+        closing=_property_cut(plan['unit'],names);validate(closing)
+        if closing['InvocationID']!=invocation:raise ValueError('Native verifier generation changed during observation')
+        closing_native=observe_unit(plan['unit'],invocation)
+        # Preserve a conservative running observation across completion, while
+        # rejecting any regression of the quiescence used by earlier evidence.
+        if any(native[field] and not closing_native[field]
+               for field in ('execution_finished','cgroup_empty')):
+            raise ValueError('Native verifier quiescence changed during observation')
+        unit_result=closing['Result']
         return {'plan_digest':digest(plan),'invocation_id':invocation,'native':native,'unit_result':unit_result,
                 'exit_code':command['data'][0][-1] if native['execution_finished'] and command['data'][0][-2]==1 else None,
                 'execution_interval':dict(zip(('start_wall_us','start_monotonic_us','end_wall_us','end_monotonic_us'),command['data'][0][3:7]))}

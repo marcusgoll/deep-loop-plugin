@@ -101,9 +101,9 @@ class VerifierPlanTests(unittest.TestCase):
                 if argv[-1]=='SystemCallArchitectures':return type('Result',(),{'stdout':json.dumps({'type':'as','data':['native']})})()
                 row=[self.plan['command'][0],self.plan['command'],False,0,0,1,1,999,1,0]
                 return type('Result',(),{'stdout':json.dumps({'type':'a(sasbttttuii)','data':[row]})})()
-            name=next(a.removeprefix('--property=') for a in argv if a.startswith('--property='))
-            value={'Result':'success','InvocationID':'e'*32,'RuntimeMaxUSec':'15s','TimeoutStartUSec':'5s','TimeoutStopUSec':'5s','SystemCallErrorNumber':'1'}.get(name,properties.get(name))
-            return type('Result',(),{'stdout':str(value)})()
+            names=[a.removeprefix('--property=') for a in argv if a.startswith('--property=')]
+            values={**properties,'Result':'success','InvocationID':'e'*32,'RuntimeMaxUSec':'15s','TimeoutStartUSec':'5s','TimeoutStopUSec':'5s','SystemCallErrorNumber':'1'}
+            return type('Result',(),{'stdout':'\n'.join(name+'='+str(values[name]) for name in names)+'\n'})()
         native={'execution_finished':True,'cgroup_empty':True,'ownership_verified':True}
         return backend,run,native
     def test_adoption_checks_exact_argv_and_native_limits_without_resubmission(self):
@@ -114,7 +114,7 @@ class VerifierPlanTests(unittest.TestCase):
         self.assertFalse(any(c.args[0][0]=='/usr/bin/systemd-run' for c in process.call_args_list))
         def changed(argv,**kwargs):
             result=run(argv,**kwargs)
-            if '--property=RuntimeMaxUSec' in argv:result.stdout='infinity'
+            if '--property=RuntimeMaxUSec' in argv:result.stdout=result.stdout.replace('RuntimeMaxUSec=15s','RuntimeMaxUSec=infinity')
             return result
         with patch('native_verifier.subprocess.run',side_effect=changed),patch('native_verifier.observe_unit',return_value=native):
             with self.assertRaisesRegex(ValueError,'deadline drift'):backend.adopt(self.plan)
@@ -130,6 +130,80 @@ class VerifierPlanTests(unittest.TestCase):
         with patch.object(backend,'adopt',return_value={'invocation_id':'f'*32}),patch('native_verifier.subprocess.run') as process:
             with self.assertRaisesRegex(ValueError,'generation changed'):backend.stop(self.plan,'e'*32)
             process.assert_not_called()
+
+    def test_batched_adoption_uses_fresh_opening_and_closing_cuts(self):
+        backend,run,native=self.backend_fixture()
+        with patch('native_verifier.subprocess.run',side_effect=run) as process,patch('native_verifier.observe_unit',return_value=native) as observe:
+            backend.adopt(self.plan);backend.adopt(self.plan)
+        snapshots=[c for c in process.call_args_list if c.args[0][0]=='/usr/bin/systemctl']
+        self.assertEqual(len(snapshots),4)
+        self.assertTrue(all(len([a for a in c.args[0] if a.startswith('--property=')])==27 for c in snapshots))
+        self.assertEqual(observe.call_count,4)
+        self.assertEqual(len(process.call_args_list),10)
+
+    def test_closing_generation_or_static_policy_drift_rejects(self):
+        for before,after in [('InvocationID='+'e'*32,'InvocationID='+'f'*32),
+                             ('PrivateNetwork=yes','PrivateNetwork=no'),
+                             ('RuntimeMaxUSec=15s','RuntimeMaxUSec=infinity')]:
+            backend,run,native=self.backend_fixture();count=0
+            def changed(argv,**kwargs):
+                nonlocal count
+                result=run(argv,**kwargs)
+                if argv[0]=='/usr/bin/systemctl':
+                    count+=1
+                    if count==2:result.stdout=result.stdout.replace(before,after)
+                return result
+            with self.subTest(before=before),patch('native_verifier.subprocess.run',side_effect=changed),patch('native_verifier.observe_unit',return_value=native):
+                with self.assertRaises(ValueError):backend.adopt(self.plan)
+
+    def test_closing_native_ownership_failure_rejects(self):
+        backend,run,native=self.backend_fixture()
+        with patch('native_verifier.subprocess.run',side_effect=run),patch('native_verifier.observe_unit',side_effect=[native,ValueError('closing ownership')]):
+            with self.assertRaisesRegex(ValueError,'closing ownership'):backend.adopt(self.plan)
+
+    def test_closing_same_generation_quiescence_regression_rejects(self):
+        for closing in ({'execution_finished':False,'cgroup_empty':False,'ownership_verified':True},
+                        {'execution_finished':False,'cgroup_empty':True,'ownership_verified':True}):
+            backend,run,native=self.backend_fixture()
+            with self.subTest(closing=closing),patch('native_verifier.subprocess.run',side_effect=run),patch('native_verifier.observe_unit',side_effect=[native,closing]):
+                with self.assertRaisesRegex(ValueError,'quiescence changed'):backend.adopt(self.plan)
+
+    def test_running_to_finished_cut_remains_conservative(self):
+        backend,run,finished=self.backend_fixture()
+        running={'execution_finished':False,'cgroup_empty':False,'ownership_verified':True}
+        with patch('native_verifier.subprocess.run',side_effect=run),patch('native_verifier.observe_unit',side_effect=[running,finished]):
+            result=backend.adopt(self.plan)
+        self.assertEqual(result['native'],running)
+        self.assertIsNone(result['exit_code'])
+
+    def test_every_isolation_property_remains_required(self):
+        names=('Description','WorkingDirectory','PrivateNetwork','ProtectSystem','ReadOnlyPaths','ReadWritePaths',
+               'InaccessiblePaths','NoNewPrivileges','PrivateTmp','PrivateDevices','RestrictAddressFamilies',
+               'CapabilityBoundingSet','ProtectKernelTunables','ProtectKernelModules','ProtectControlGroups',
+               'RestrictSUIDSGID','Environment','UnsetEnvironment','LimitAS','LimitCPU','LimitFSIZE')
+        for name in names:
+            backend,run,native=self.backend_fixture()
+            def changed(argv,**kwargs):
+                result=run(argv,**kwargs)
+                if argv[0]=='/usr/bin/systemctl':
+                    result.stdout='\n'.join(line if not line.startswith(name+'=') else name+'=substituted' for line in result.stdout.splitlines())+'\n'
+                return result
+            with self.subTest(name=name),patch('native_verifier.subprocess.run',side_effect=changed),patch('native_verifier.observe_unit',return_value=native):
+                with self.assertRaisesRegex(ValueError,'isolation drift'):backend.adopt(self.plan)
+
+    def test_property_cut_rejects_malformed_incomplete_duplicate_and_oversized_output(self):
+        from native_verifier import _property_cut
+        from types import SimpleNamespace
+        for raw in ('A=one\n','A=one\nB=two\nA=again\n','A=one\nB=two\nC=unknown\n',
+                    'A=one\nmalformed\n','A='+'x'*1048576+'\nB=two\n',None):
+            with self.subTest(raw_type=type(raw)),patch('native_verifier.subprocess.run',return_value=SimpleNamespace(stdout=raw)):
+                with self.assertRaises(ValueError):_property_cut('fixture',('A','B'))
+
+    def test_property_cut_preserves_embedded_equals_and_empty_values(self):
+        from native_verifier import _property_cut
+        from types import SimpleNamespace
+        with patch('native_verifier.subprocess.run',return_value=SimpleNamespace(stdout='A=x=y\nB=\n')):
+            self.assertEqual(_property_cut('fixture',('A','B')),{'A':'x=y','B':''})
 
     def test_submission_response_loss_is_never_replayed(self):
         from private_controller import TrustedStore
