@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Manual development checkpoints; validation checks records, not their truth."""
 import argparse
+import copy
 import proof_binding
 from contextlib import contextmanager, redirect_stdout, nullcontext
 import io
@@ -201,7 +202,7 @@ def skill_dependency(relative):
     raise ValueError(f'Missing skill dependency: {relative}; set DEEP_LOOP_SKILLS_ROOT to its installed skills directory.')
 
 
-def contract_data(path):
+def contract_data(path, verify_files=True):
     data = read_json(path)
     validator = skill_dependency('verification-contract/scripts/validate_contract.py')
     spec = importlib.util.spec_from_file_location('contract_validator', validator)
@@ -211,7 +212,7 @@ def contract_data(path):
     if errors:
         raise ValueError('Invalid verification contract: ' + '; '.join(errors))
     for verifier in data['verifiers']:
-        proof_binding.definition(verifier, proof_binding.logical(path).parent)
+        proof_binding.definition(verifier, proof_binding.logical(path).parent, verify_files=verify_files)
     return data
 
 
@@ -314,13 +315,13 @@ def resolution_context(state, archive=None):
     binding = state.get('proofResolution')
     if binding is None:
         return proof_binding.files_context()
-    path = (Path(archive)/'resolution.json').resolve() if archive else Path(binding['path']).resolve()
-    if hashlib.sha256(path.read_bytes()).hexdigest() != binding['sha256']:
+    path = Path(archive)/'resolution.json' if archive else Path(binding['path'])
+    if hashlib.sha256(proof_binding.dependency_bytes(path)).hexdigest() != binding['sha256']:
         raise ValueError('Preserved resolution map changed')
-    mapping = json.loads(path.read_text(encoding='utf-8'))
+    mapping = json.loads(proof_binding.dependency_bytes(path).decode('utf-8'))
     if mapping.get('schemaVersion') != 1 or not isinstance(mapping.get('files'), dict):
         raise ValueError('Invalid preserved resolution map')
-    return proof_binding.files_context(path.parent, mapping['files'])
+    return proof_binding.files_context(path.resolve().parent, mapping['files'])
 
 
 def contract_issues(state, stage, archive=None):
@@ -331,7 +332,116 @@ def contract_issues(state, stage, archive=None):
         return ['Preserved proof BLOCKED: ' + str(error)]
 
 
-def _contract_issues(state, stage):
+
+
+def contract_definition_issues(state):
+    """Validate parent definitions and coverage, without execution acceptance."""
+    try:
+        if not isinstance(state.get('verificationContract'), dict):
+            raise ValueError('Bound parent verification contract required')
+        with resolution_context(state, None):
+            return _contract_issues(state, 'build', verify_files=False)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return ['Contract definitions BLOCKED: ' + str(error)]
+
+
+def verification_definitions(state,verifier_ids):
+    """Resolve current selected deterministic inputs without executing commands.
+
+    Unrelated branch sources may be unavailable. Only the selected blocking
+    review verifiers grant a runnable plan; manual/readback proof stays explicit.
+    """
+    if (not isinstance(verifier_ids,list) or not verifier_ids or
+            any(not isinstance(i,str) or not i for i in verifier_ids) or
+            len(set(verifier_ids))!=len(verifier_ids)):
+        raise ValueError('Explicit unique verification IDs required')
+    with resolution_context(state,None):
+        failures=_contract_issues(state,'build',verify_files=False)
+        if failures:raise ValueError('Verification definitions blocked: '+'; '.join(failures))
+        path=Path(state['verificationContract']['path'])
+        contract=contract_data(path,verify_files=False)
+        verifiers={v['id']:v for v in contract['verifiers']}
+        checks={c.get('verifierId'):c for c in state.get('checks',[]) if isinstance(c,dict)}
+        result=[]
+        for identifier in verifier_ids:
+            verifier=verifiers.get(identifier)
+            if verifier is None:raise ValueError('Unknown selected verifier: '+identifier)
+            proof=proof_binding.definition(verifier,proof_binding.logical(path).parent)
+            if (verifier['gate']!='blocking' or verifier['class']=='human' or not proof or proof['mode']!='bound' or
+                    'readback' in proof or identifier not in checks or checks[identifier].get('stage','review')!='review'):
+                raise ValueError('Automatic verification requires bound blocking review proof: '+identifier)
+            base=proof_binding.logical(path).parent
+            inputs=[str(proof_binding.bound(proof[k],base)) for k in ('implementation','source_manifest','environment_manifest')]
+            manifest=proof_binding.bound(proof['source_manifest'],base)
+            inputs.extend(str(proof_binding.bound({'path':name,'sha256':value},proof_binding.logical(manifest).parent))
+                          for name,value in proof_binding.read(manifest)['files'].items())
+            result.append({'verifier':copy.deepcopy(verifier),'identity':proof_binding.identity(proof,base),
+                           'input_paths':sorted(set(inputs)),'base':str(base)})
+        return result
+
+
+def verified_check_state(state,verifier_id,receipt,evidence,expected_sha256):
+    """Pure selected-check update; receipt proof must already exist and be current."""
+    if (not isinstance(receipt,dict) or set(receipt)!={'path','sha256'} or
+            not isinstance(evidence,str) or not evidence.strip() or len(evidence)>4096 or
+            hashlib.sha256(json.dumps(state,sort_keys=True,separators=(",",":"),allow_nan=False).encode()).hexdigest()!=expected_sha256):
+        raise ValueError('Exact verification checkpoint preimage and receipt required')
+    verification_definitions(state,[verifier_id])
+    result=copy.deepcopy(state)
+    matches=[c for c in result.get('checks',[]) if c.get('verifierId')==verifier_id]
+    if len(matches)!=1:raise ValueError('Unique selected verification check required')
+    matches[0].update(status='passed',evidence=evidence,receipt=copy.deepcopy(receipt))
+    failures=prerequisite_issues(result,[verifier_id])
+    if failures:raise ValueError('Selected native receipt proof blocked: '+'; '.join(failures))
+    return result
+
+
+def prerequisite_issues(state, verifier_ids):
+    """Inspect selected current proof without changing parent acceptance.
+
+    IDs must come from the coordinator's protected task coverage map. This
+    reader cannot authenticate that mapping or authorize native dispatch.
+    """
+    try:
+        if (not isinstance(verifier_ids, list) or not verifier_ids or
+                any(not isinstance(v, str) or not v for v in verifier_ids) or
+                len(set(verifier_ids)) != len(verifier_ids)):
+            raise ValueError('Explicit unique prerequisite verifier IDs required')
+        if not isinstance(state.get('verificationContract'), dict):
+            raise ValueError('Bound parent verification contract required')
+        with resolution_context(state, None):
+            failures = _contract_issues(state, 'build', verify_files=False)
+            if failures:
+                return failures
+            path = Path(state['verificationContract']['path'])
+            contract = contract_data(path, verify_files=False)
+            verifiers = {v['id']: v for v in contract['verifiers']}
+            checks = {c.get('verifierId'): c for c in state.get('checks', []) if isinstance(c, dict)}
+            for identifier in verifier_ids:
+                if identifier not in verifiers:
+                    raise ValueError('Unknown prerequisite verifier: ' + identifier)
+                verifier = verifiers[identifier]
+                proof = proof_binding.definition(verifier, proof_binding.logical(path).parent)
+                check = checks.get(identifier)
+                if (verifier['gate'] != 'blocking' or not proof or proof['mode'] != 'bound' or
+                        'readback' in proof or not isinstance(check, dict) or
+                        check.get('stage', 'review') != 'review' or
+                        check.get('status') != 'passed' or not present(check, 'evidence')):
+                    raise ValueError('Current blocking review proof required: ' + identifier)
+            if 'design' in contract:
+                from ui_design import evidence_issues
+                failures.extend(evidence_issues(contract, path, state))
+            failures.extend(proof_binding.issues(contract, path, state, 'review',
+                            contract_semantics_sha256(contract), set(verifier_ids)))
+            # Completion gaps remain parent obligations at prerequisite review.
+            failures.extend('Unresolved contract gap: ' + g['id'] for g in contract['gaps']
+                            if g['blocks'] == 'completion')
+            return failures
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        return ['Prerequisite proof BLOCKED: ' + str(error)]
+
+
+def _contract_issues(state, stage, verify_files=True):
     binding = state.get('verificationContract')
     try:
         ui_required = ui_binding_required(state)
@@ -344,8 +454,9 @@ def _contract_issues(state, stage):
     source = Path(binding['path'])
     if proof_binding.sha(source) != binding['sha256']:
         return ['Verification contract changed; rebind explicitly and rerun evidence.']
-    contract = contract_data(source)
-    issues = proof_binding.issues(contract, source, state, stage, contract_semantics_sha256(contract))
+    contract = contract_data(source, verify_files=verify_files)
+    issues = (proof_binding.issues(contract, source, state, stage, contract_semantics_sha256(contract))
+              if verify_files else [])
     if ui_required and 'design' not in contract:
         issues.append('Registered substantive UI requires an approved Design Contract.')
     checks = [c for c in state.get('checks', []) if isinstance(c, dict)]
@@ -582,6 +693,45 @@ def task_records(state):
     return tasks, by_id
 
 
+def accepted_task_state(state, task_id, verifier_ids, evidence, expected_state_sha256):
+    """Prepare one proof-checked task transition without writing or authority.
+
+    A trusted coordinator supplies the approved verifier mapping and exact
+    checkpoint preimage, then owns atomic publication and independent readback.
+    This does not complete or deliver the parent and never mutates its input.
+    """
+    identity = hashlib.sha256(json.dumps(state, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+    if identity != expected_state_sha256:
+        raise ValueError('Task acceptance state preimage changed')
+    _, tasks = task_records(state)
+    if task_id not in tasks or tasks[task_id]['status'] not in ('pending', 'running', 'done'):
+        raise ValueError('Task acceptance requires an eligible approved task')
+    if not isinstance(evidence, str) or not evidence.strip():
+        raise ValueError('Task acceptance requires durable proof evidence')
+    if any(tasks[i]['status'] != 'done' for i in tasks[task_id].get('dependsOn', [])):
+        raise ValueError('Task acceptance requires completed prerequisites')
+    if tasks[task_id]['status'] != 'done' and (
+            state.get('complete') is True or state.get('active') is False or
+            state.get('blocker') or not required_at(tasks[task_id],
+                'ship' if state.get('phase') == 'SHIP' else 'review')):
+        raise ValueError('Task acceptance session or stage is not eligible')
+    failures = prerequisite_issues(state, verifier_ids)
+    if failures:
+        raise ValueError('Task acceptance proof blocked: ' + '; '.join(failures))
+    result = copy.deepcopy(state)
+    _, changed = task_records(result)
+    task = changed[task_id]
+    if task['status'] == 'done':
+        if task['evidence'] != evidence:
+            raise ValueError('Completed task evidence differs')
+        return result
+    task.update(status='done', evidence=evidence)
+    for field in ('blocker', 'nextAction'):
+        task.pop(field, None)
+    task_records(result)
+    return result
+
+
 def task_queue(state):
     tasks, by_id = task_records(state)
     ready, waiting = [], []
@@ -649,6 +799,134 @@ def graph(state):
     return 0
 
 
+def definition_observation(state):
+    """Compose existing definition readers in one bounded isolated operation.
+
+    No proof is cached, selected or published. Existing callers retain the
+    same records, definition issues and contract view at every observation.
+    """
+    return {'records':task_records(state),'issues':contract_definition_issues(state),
+            'contract':contract_data(Path(state['verificationContract']['path']),verify_files=False)}
+
+
+def outcome_observation(state,groups):
+    """Compose definition and prerequisite readers without full review gates."""
+    if not isinstance(groups,list) or not 1<=len(groups)<=129:
+        raise ValueError('Bounded outcome prerequisite groups required')
+    result=definition_observation(state)
+    result['prerequisites']=[prerequisite_issues(state,ids) for ids in groups]
+    return result
+
+
+def review_observation(state,groups,archive=None):
+    """Compose current readers for one bounded host review observation."""
+    if not isinstance(groups,list) or not 1<=len(groups)<=129:
+        raise ValueError('Bounded review prerequisite groups required')
+    result=definition_observation(state)
+    result['prerequisites']=[prerequisite_issues(state,ids) for ids in groups]
+    result['review_issues']=validation_issues(state,'ship' if state.get('complete') is True else 'review',archive)
+    return result
+
+
+def review_dependency_cut(state,groups,archive=None):
+    """Bounded read-only full-review file cut; no durable/public proof schema."""
+    with proof_binding.dependency_context() as records:
+        review_observation(state,groups,archive)
+        return proof_binding.close_dependency_cut(records)
+
+
+def checkpoint_observation(state,mode,groups,archive,derivation):
+    """Exact image readers composed with one fresh bounded observation.
+
+    Host callers authenticate these inputs and compare the outputs; this
+    read-only composition grants no authority and retains no result.
+    """
+    if (mode not in {'definition_observation','outcome_observation','review_observation'} or
+            not isinstance(derivation,dict) or set(derivation)!={'before','revision','evidence','terminal'} or
+            type(derivation['terminal']) is not bool):
+        raise ValueError('Fixed checkpoint observation required')
+    delivered=verified_delivery_state(derivation['before'],derivation['revision'],derivation['evidence'],archive)
+    images={'delivery_image':delivered}
+    if derivation['terminal']:images['terminal_image']=completed_state(delivered,archive)
+    observation=(definition_observation(state) if mode=='definition_observation' else
+                 outcome_observation(state,groups) if mode=='outcome_observation' else
+                 review_observation(state,groups,archive))
+    return {**observation,**images}
+
+
+def review_observation_with_dependencies(state,groups,archive=None):
+    with proof_binding.dependency_context() as records:
+        observation=review_observation(state,groups,archive)
+        return {'observation':observation,'dependencies':proof_binding.close_dependency_cut(records)}
+
+def checkpoint_observation_with_dependencies(state,mode,groups,archive,derivation):
+    with proof_binding.dependency_context() as records:
+        observation=checkpoint_observation(state,mode,groups,archive,derivation)
+        return {'observation':observation,'dependencies':proof_binding.close_dependency_cut(records)}
+
+
+def validation_issues(state, stage, archive=None):
+    """Read current recorded evidence without selecting or mutating a session."""
+    if not isinstance(state, dict) or type(state.get('schemaVersion')) is not int or state['schemaVersion'] not in (2, 3, 4):
+        raise ValueError('Workflow validation requires session schema 2, 3 or 4')
+    if stage not in ('build', 'review', 'delivery', 'ship'):
+        raise ValueError('Unsupported validation stage')
+    version = state['schemaVersion']
+    issues = contract_issues(state, stage, archive)
+    if version in (3, 4):
+        issues.extend(schema_three_issues(state, stage))
+    if version == 4:
+        issues.extend(schema_four_issues(state))
+    if state.get('issues'):
+        issues.append('Resolve recorded issues before validation.')
+    if state.get('blocker'):
+        issues.append('Required work is blocked; preserve the incomplete checkpoint.')
+    if stage == 'build':
+        return issues
+    checks = state.get('checks')
+    if not isinstance(checks, list) or not checks:
+        issues.append('Record the required acceptance checks before validation.')
+    else:
+        for check in checks:
+            if not isinstance(check, dict) or not present(check, 'name'):
+                issues.append('Check requires a name.')
+            elif check.get('status') not in ('pending', 'failed', 'passed', 'not_applicable'):
+                issues.append('Invalid check status: ' + check['name'])
+            elif not required_at(check, stage):
+                continue
+            elif check.get('status') == 'passed' and present(check, 'evidence'):
+                continue
+            elif check.get('status') == 'not_applicable' and present(check, 'reason'):
+                continue
+            else:
+                issues.append(f"Check lacks passing evidence or a not-applicable reason: {check['name']}")
+        if not any(isinstance(c, dict) and required_at(c, stage) and c.get('status') == 'passed' and present(c, 'evidence') for c in checks):
+            issues.append('At least one acceptance check must have passing evidence.')
+    debt = state.get('debt', [])
+    if not isinstance(debt, list):
+        issues.append('Debt must be a list.')
+    else:
+        for item in debt:
+            if not isinstance(item, dict) or not present(item, 'item'):
+                issues.append('Debt entry requires an item.')
+            elif item.get('status') == 'paid' and present(item, 'evidence'):
+                continue
+            elif item.get('status') == 'accepted' and present(item, 'acceptance', 'owner', 'paydown'):
+                continue
+            else:
+                issues.append(f"Debt is unresolved or acceptance is incomplete: {item['item']}")
+    if stage in ('delivery', 'ship'):
+        delivery = state.get('delivery')
+        if not isinstance(delivery, dict) or delivery.get('status') != 'verified' or not present(delivery, 'endpoint', 'evidence'):
+            issues.append('Delivery requires a named endpoint and independent readback evidence.')
+    elif state.get('complete') is True:
+        issues.append('A completed session must be validated with --stage ship.')
+    tasks, _ = task_records(state)
+    issues.extend(f"Unfinished {t['kind']}: {t['id']} ({t['status']})"
+                  for t in tasks if required_at(t, stage) and t['status'] not in ('done', 'cancelled'))
+    return issues
+
+
 def validate(args):
     path = resolve(args)
     state = read_json(path / 'state.json')
@@ -658,63 +936,15 @@ def validate(args):
         print('Legacy validation checks recorded flags only; it is not evidence validation.')
         if args.stage == 'ship':
             issues.append('Legacy session has no delivery evidence contract. Continue its manual workflow; do not treat this helper as shipment proof.')
-    elif version in (2, 3, 4):
-        issues = contract_issues(state, args.stage, path.parent if 'proofResolution' in state else None)
-        if version in (3, 4):
-            issues.extend(schema_three_issues(state, args.stage))
-        if version == 4:
-            issues.extend(schema_four_issues(state))
-        if state.get('issues'):
-            issues.append('Resolve recorded issues before validation.')
-        if state.get('blocker'):
-            issues.append('Required work is blocked; preserve the incomplete checkpoint.')
-        if args.stage == 'build':
-            print('\n'.join(f'- {issue}' for issue in issues) if issues else '[OK] BUILD prerequisites recorded; verify the cited evidence independently.')
-            return 1 if issues and args.mode == 'fail' else 0
-        checks = state.get('checks')
-        if not isinstance(checks, list) or not checks:
-            issues.append('Record the required acceptance checks before validation.')
-        else:
-            for check in checks:
-                if not isinstance(check, dict) or not present(check, 'name'):
-                    issues.append('Check requires a name.')
-                elif check.get('status') not in ('pending', 'failed', 'passed', 'not_applicable'):
-                    issues.append('Invalid check status: ' + check['name'])
-                elif not required_at(check, args.stage):
-                    continue
-                elif check.get('status') == 'passed' and present(check, 'evidence'):
-                    continue
-                elif check.get('status') == 'not_applicable' and present(check, 'reason'):
-                    continue
-                else:
-                    issues.append(f"Check lacks passing evidence or a not-applicable reason: {check['name']}")
-            if not any(isinstance(c, dict) and required_at(c, args.stage) and c.get('status') == 'passed' and present(c, 'evidence') for c in checks):
-                issues.append('At least one acceptance check must have passing evidence.')
-        debt = state.get('debt', [])
-        if not isinstance(debt, list):
-            issues.append('Debt must be a list.')
-        else:
-            for item in debt:
-                if not isinstance(item, dict) or not present(item, 'item'):
-                    issues.append('Debt entry requires an item.')
-                elif item.get('status') == 'paid' and present(item, 'evidence'):
-                    continue
-                elif item.get('status') == 'accepted' and present(item, 'acceptance', 'owner', 'paydown'):
-                    continue
-                else:
-                    issues.append(f"Debt is unresolved or acceptance is incomplete: {item['item']}")
-        if args.stage in ('delivery', 'ship'):
-            delivery = state.get('delivery')
-            if not isinstance(delivery, dict) or delivery.get('status') != 'verified' or not present(delivery, 'endpoint', 'evidence'):
-                issues.append('Delivery requires a named endpoint and independent readback evidence.')
-        elif state.get('complete') is True:
-            issues.append('A completed session must be validated with --stage ship.')
+        tasks, _ = task_records(state)
+        issues.extend(f"Unfinished {t['kind']}: {t['id']} ({t['status']})"
+                      for t in tasks if required_at(t, args.stage) and t['status'] not in ('done', 'cancelled'))
     else:
-        raise ValueError(f'Unsupported session schema: {version}')
-    tasks, _ = task_records(state)
-    issues.extend(f"Unfinished {t['kind']}: {t['id']} ({t['status']})"
-                  for t in tasks if required_at(t, args.stage) and t['status'] not in ('done', 'cancelled'))
-    print('\n'.join(f'- {issue}' for issue in issues) if issues else '[OK] Recorded requirements satisfied; verify the cited evidence independently.')
+        issues = validation_issues(state, args.stage, path.parent if 'proofResolution' in state else None)
+    success = ('[OK] BUILD prerequisites recorded; verify the cited evidence independently.'
+               if version in (2, 3, 4) and args.stage == 'build' else
+               '[OK] Recorded requirements satisfied; verify the cited evidence independently.')
+    print('\n'.join(f'- {issue}' for issue in issues) if issues else success)
     return 1 if issues and args.mode == 'fail' else 0
 
 
@@ -854,6 +1084,46 @@ def _recovery_report(args):
     return int(bool(blockers))
 
 
+def verified_delivery_state(state, revision, evidence, archive=None):
+    """Derive only an explicitly pending draft endpoint's verified fields.
+
+    Recorded evidence is not authentication. The controller must independently
+    verify the exact provider cut and guard any subsequent publication.
+    """
+    import re
+    if (not isinstance(state,dict) or state.get('phase')!='SHIP' or
+            state.get('active') is not True or state.get('complete') is not False):
+        raise ValueError('Delivery requires an active, incomplete checkpoint in SHIP.')
+    delivery=state.get('delivery')
+    if (not isinstance(delivery,dict) or delivery.get('status')!='pending' or
+            delivery.get('endpoint')!='github_draft_pr' or
+            not isinstance(revision,str) or re.fullmatch(r'[0-9a-f]{40}',revision) is None or
+            revision=='0'*40 or not isinstance(evidence,str) or not evidence.strip()):
+        raise ValueError('Exact pending draft delivery, revision and readback evidence required.')
+    result=copy.deepcopy(state)
+    result['delivery'].update(status='verified',revision=revision,evidence=evidence,
+        branchDisposition={'status':'verified','kind':'pull_request','revision':revision,'evidence':evidence})
+    issues=validation_issues(result,'delivery',archive)
+    if issues:raise ValueError('Verified delivery blocked: '+'; '.join(issues))
+    return result
+
+
+def completed_state(state, archive=None):
+    """Derive the exact terminal image after validating every SHIP obligation.
+
+    This reader grants no endpoint authority and writes no checkpoint. Trusted
+    writers must still bind the unchanged preimage and guard publication.
+    """
+    if (not isinstance(state,dict) or state.get('phase')!='SHIP' or
+            state.get('active') is not True or state.get('complete') is not False):
+        raise ValueError('Completion requires an active, incomplete checkpoint in SHIP.')
+    issues=validation_issues(state,'ship',archive)
+    if issues:raise ValueError('SHIP completion blocked: '+'; '.join(issues))
+    result=copy.deepcopy(state)
+    result.update(active=False,complete=True,phase='COMPLETE')
+    return result
+
+
 def complete_session(args):
     """Validate SHIP against one preimage, then atomically close that checkpoint."""
     root = Path(args.root).resolve()
@@ -869,13 +1139,15 @@ def complete_session(args):
     if state.get('phase') != 'SHIP' or state.get('active') is not True or state.get('complete') is not False:
         print('- Completion requires an active, incomplete checkpoint in SHIP.', file=sys.stderr)
         return 1
-    if validate(argparse.Namespace(root=str(root), path=str(path), session=None, stage='ship', mode='fail')):
+    try:
+        terminal=completed_state(state,path.parent if 'proofResolution' in state else None)
+    except ValueError as exc:
+        print('- '+str(exc),file=sys.stderr)
         return 1
     with checkpoint_lock(root):
         if state_path.read_bytes() != preimage:
             raise ValueError('Checkpoint changed after SHIP validation; revalidate before completion.')
-        state.update(active=False, complete=True, phase='COMPLETE')
-        write_json(state_path, state)
+        write_json(state_path, terminal)
     closed = read_json(state_path)
     if closed.get('active') is not False or closed.get('complete') is not True or closed.get('phase') != 'COMPLETE':
         raise ValueError('Completed checkpoint readback failed.')

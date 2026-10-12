@@ -1,10 +1,53 @@
 """Opt-in deterministic receipts and scoped, integrity-checked logical file resolution."""
 from contextlib import contextmanager
 from contextvars import ContextVar
-import datetime, hashlib, json, platform, stat, sys
+import datetime, hashlib, json, os, platform, stat, sys
 from pathlib import Path
 
 _CONTEXT=ContextVar('deep_loop_proof_files',default=None)
+
+_DEPENDENCIES=ContextVar('deep_loop_review_dependencies',default=None)
+
+@contextmanager
+def dependency_context():
+    records={};token=_DEPENDENCIES.set(records)
+    try:yield records
+    finally:_DEPENDENCIES.reset(token)
+
+def dependency_bytes(path):
+    """Read exact regular-file bytes, retaining operation-local identities."""
+    lexical=os.path.abspath(path)
+    path=Path(lexical).resolve()
+    if _DEPENDENCIES.get() is None:return path.read_bytes()
+    directory=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        for component in path.parts[1:-1]:
+            child=os.open(component,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+            os.close(directory);directory=child
+        fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+        with os.fdopen(fd,'rb') as stream:
+            before=os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode):raise ValueError('Regular proof dependency required')
+            payload=stream.read(67108865);after=os.fstat(stream.fileno())
+        if len(payload)>67108864 or Path(lexical).resolve()!=path or (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns):
+            raise ValueError('Proof dependency exceeds limit or changed during read')
+    finally:os.close(directory)
+    records=_DEPENDENCIES.get()
+    if records is not None:
+        row={'physical_path':str(path),'sha256':hashlib.sha256(payload).hexdigest(),'size':len(payload),
+             'device':after.st_dev,'inode':after.st_ino,'mode':stat.S_IMODE(after.st_mode)}
+        name=lexical
+        if name in records and records[name]!=row:raise ValueError('Conflicting proof dependency reads')
+        records[name]=row
+        if len(records)>512 or sum(r['size'] for r in records.values())>268435456:
+            raise ValueError('Proof dependency collection exceeds bound')
+    return payload
+
+def close_dependency_cut(records):
+    expected=dict(records)
+    for name in expected:dependency_bytes(name)
+    if records!=expected:raise ValueError('Proof dependency closure changed')
+    return expected
 
 def mapped_context():
     context = _CONTEXT.get()
@@ -19,6 +62,8 @@ def logical(path):
     return path
 
 def resolve_file(path):
+    context=_CONTEXT.get()
+    if _DEPENDENCIES.get() is not None and not (context and context.get('files') is not None):dependency_bytes(path)
     name=str(logical(path));context=_CONTEXT.get()
     if context and context.get('files') is not None:
         record=context['files'].get(name)
@@ -34,13 +79,14 @@ def resolve_file(path):
         path=raw.resolve()
         if not path.is_relative_to(context['archive'].resolve()):raise ValueError('Resolution escapes archive')
         if not path.is_file():raise ValueError('Preserved dependency is not a regular file')
-        if hashlib.sha256(path.read_bytes()).hexdigest()!=record['sha256']:raise ValueError('Preserved dependency changed: '+name)
+        if hashlib.sha256(dependency_bytes(path)).hexdigest()!=record['sha256']:raise ValueError('Preserved dependency changed: '+name)
     else:path=Path(name)
     if context is not None and context.get('trace') is not None:context['trace'].add(name)
+    if _DEPENDENCIES.get() is not None:dependency_bytes(path)
     return path
 
-def read(path):return json.loads(resolve_file(path).read_text(encoding='utf-8-sig'))
-def sha(path):return hashlib.sha256(resolve_file(path).read_bytes()).hexdigest()
+def read(path):return json.loads(dependency_bytes(resolve_file(path)).decode('utf-8-sig'))
+def sha(path):return hashlib.sha256(dependency_bytes(resolve_file(path))).hexdigest()
 def bound(record,base):
     path=logical(base)/record['path']
     if sha(path)!=record['sha256']:raise ValueError('Bound file changed: '+str(path))
@@ -58,7 +104,7 @@ def source_identity(path):
     for name,digest in files.items():bound({'path':name,'sha256':digest},logical(path).parent)
     return sha(path)
 
-def definition(verifier,base):
+def definition(verifier,base,verify_files=True):
     proof=verifier.get('proof')
     if proof is None:return None
     if not isinstance(proof,dict):raise ValueError('Verifier proof must be an object')
@@ -71,8 +117,14 @@ def definition(verifier,base):
         raise ValueError('Bound working_directory must be absolute')
     argv=proof.get('argv')
     if not isinstance(argv,list) or not argv or any(not isinstance(a,str) or not a for a in argv):raise ValueError('Bound proof requires approved argv')
-    for key in ('implementation','source_manifest','environment_manifest'):bound(proof[key],base)
-    source_identity(bound(proof['source_manifest'],base))
+    for key in ('implementation','source_manifest','environment_manifest'):
+        record=proof.get(key)
+        if (not isinstance(record,dict) or not isinstance(record.get('path'),str) or not record['path']
+                or not isinstance(record.get('sha256'),str) or len(record['sha256'])!=64
+                or any(c not in '0123456789abcdef' for c in record['sha256'])):
+            raise ValueError('Bound proof requires path and SHA256: '+key)
+        if verify_files:bound(record,base)
+    if verify_files:source_identity(bound(proof['source_manifest'],base))
     artifacts=proof.get('artifacts')
     if not isinstance(artifacts,list) or not artifacts or any(not isinstance(a,dict) or not isinstance(a.get('path'),str) or not a['path'] for a in artifacts):raise ValueError('Bound proof requires artifact paths')
     if len({str((logical(base)/a['path']).resolve()) for a in artifacts})!=len(artifacts):raise ValueError('Duplicate proof artifacts')
@@ -133,12 +185,13 @@ def readback_delivery(observation,state):
     expected={t.get('id'):t.get('revision') for t in subjects}
     if len(expected)!=len(subjects) or expected!={t['id']:t['revision'] for t in observation['targets']}:raise ValueError('Readback exact delivered target/revision mismatch')
 
-def issues(contract,path,state,stage,semantics):
+def issues(contract,path,state,stage,semantics,verifier_ids=None):
     failures=[];base=logical(path).parent
     checks={c.get('verifierId'):c for c in state.get('checks',[]) if isinstance(c,dict)}
     for verifier in contract['verifiers']:
         try:
-            proof=definition(verifier,base)
+            proof=definition(verifier,base,verify_files=verifier_ids is None or verifier['id'] in verifier_ids)
+            if verifier_ids is not None and verifier['id'] not in verifier_ids:continue
             if not proof or proof['mode']=='manual' or stage=='build':continue
             check=checks.get(verifier['id'])
             if verifier.get('gate') == 'advisory' and check is None:

@@ -5,14 +5,18 @@ state must be root-owned and outside the candidate. Do not import this module
 from model-controlled code or accept its calls through a public workflow.
 """
 import contextlib
+import copy
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import tempfile
 
-from admission import digest, finish, initialize, reserve
+from admission import credit_task, digest, finish, initialize, reserve
+from authority import require_active
+from worker_window import remaining
 from private_launch import launch_plan, recovery_action
 
 
@@ -104,18 +108,153 @@ class PrivateController:
     observes its exact invocation/cgroup, and authenticates a session observation.
     Journal and backend are trusted implementations, not candidate callbacks.
     """
-    def __init__(self, store, journal, backend, verifier=None):
+    def __init__(self, store, journal, backend, verifier=None, workflow_gate=None, native_verifier=None):
         self.store, self.journal, self.backend = store, journal, backend
         self.verifier = verifier
+        self.workflow_gate = workflow_gate
+        self.native_verifier = native_verifier
         self.contract_digest = journal.contract_digest
 
-    def _contract(self):
+    def _historical_contract(self):
         record = self.store.read(self.contract_digest + '.approval.json')
         if (set(record) != {'contract', 'approval_ref'} or
                 digest(record['contract']) != self.contract_digest or
                 not isinstance(record['approval_ref'], str) or not record['approval_ref']):
             raise ValueError('Missing or changed authenticated enrollment')
         return record['contract']
+
+    def _contract(self):
+        require_active(self.store, self.contract_digest)
+        return self._historical_contract()
+
+    def revoke(self, *, approval_ref, reason):
+        """Trusted root stop/cleanup request; no acceptance, replay or refund.
+
+        Intent itself revokes new authority. Resume only this immutable request
+        after an interruption; ambiguous native ownership remains blocked.
+        """
+        if os.geteuid() != 0 or any(not isinstance(v, str) or not v.strip() or len(v) > 4096
+                                  for v in (approval_ref, reason)):
+            raise ValueError('Explicit trusted root revocation required')
+        key = self.contract_digest
+        with self.store.lock():
+            contract = self._historical_contract()
+            revision, journal = self.journal.read()
+            try:
+                current = self.store.read('active-owner.json')
+            except FileNotFoundError:
+                current = None
+            selected = current if current and current['contract_digest'] == key else None
+            intent_name = key + '.revocation-intent.json'
+            try:
+                intent = self.store.read(intent_name)
+            except FileNotFoundError:
+                intent = {'contract_digest': key, 'approval_ref': approval_ref,
+                          'reason': reason, 'owner': selected}
+                self.store.create(intent_name, intent)
+            if (set(intent) != {'contract_digest', 'approval_ref', 'reason', 'owner'} or
+                    intent['contract_digest'] != key or intent['approval_ref'] != approval_ref or
+                    intent['reason'] != reason):
+                raise ValueError('Immutable revocation request changed')
+            revoked = {'contract_digest': key, 'intent_digest': digest(intent)}
+            try:
+                self.store.create(key + '.revoked.json', revoked)
+            except FileExistsError:
+                if self.store.read(key + '.revoked.json') != revoked:
+                    raise ValueError('Protected revocation changed')
+            try:verifier_stream=self.store.read('active-verifier.json')
+            except FileNotFoundError:verifier_stream=None
+            if verifier_stream is not None and verifier_stream.get('contract_digest')==key:
+                self._observe_native_verifier(stop=True)
+            complete_name = key + '.revocation-complete.json'
+            try:
+                complete = self.store.read(complete_name)
+            except FileNotFoundError:
+                complete = None
+            if complete is not None:
+                if (set(complete) != {'contract_digest', 'intent_digest', 'journal_revision'} or
+                        complete['contract_digest'] != key or
+                        complete['intent_digest'] != digest(intent) or
+                        complete['journal_revision'] != revision or selected is not None or
+                        journal['attempts'] and journal['attempts'][-1]['status'] != 'finished'):
+                    raise ValueError('Completed revocation state changed')
+                if intent['owner'] is not None:
+                    owner = intent['owner'];last = journal['attempts'][-1]
+                    original = {**journal, 'attempts': journal['attempts'][:-1] + [{**last, 'status':'reserved','progress_receipt':None}]}
+                    plan = launch_plan(original,key,run_id=owner['run_id'],run_attempt=owner['run_attempt'],session_id=owner['session_id'])
+                    proof = self.store.read(key+'.revocation-stop.json')
+                    if (proof['intent_digest'] != digest(intent) or proof['owner'] != owner or
+                            plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest']):
+                        raise ValueError('Completed revocation stop proof changed')
+                    observation = self.backend.observe_owned(plan,contract,owner,proof['invocation_id'])
+                    if not (observation['ownership_verified'] and observation['execution_finished'] and observation['cgroup_empty']):
+                        raise ValueError('Completed revocation predecessor reappeared')
+                return complete
+            owner = intent['owner']
+            if owner is not None:
+                if not journal['attempts']:
+                    raise ValueError('Revoked owner lacks charged reservation')
+                last = journal['attempts'][-1]
+                original = {**journal, 'attempts': journal['attempts'][:-1] +
+                            [{**last, 'status': 'reserved', 'progress_receipt': None}]}
+                plan = launch_plan(original, key, run_id=owner['run_id'],
+                                   run_attempt=owner['run_attempt'], session_id=owner['session_id'])
+                if (plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest'] or
+                        last['status'] == 'reserved' and revision != owner['reservation_revision']):
+                    raise ValueError('Revoked ownership history changed')
+                if selected is not None and selected != owner:
+                    raise ValueError('Revoked owner replaced')
+                proof_name = key + '.revocation-stop.json'
+                try:
+                    proof = self.store.read(proof_name)
+                except FileNotFoundError:
+                    if selected != owner:
+                        raise ValueError('Lost revoked owner requires inspection')
+                    try:
+                        native = self.store.read(owner['unit'] + '.invocation.json')
+                    except FileNotFoundError:
+                        invocation = self.backend.recover_invocation(plan, contract, owner)
+                        self._invocation(invocation)
+                        native = {'invocation_id': invocation, 'owner': owner}
+                        self.store.create(owner['unit'] + '.invocation.json', native)
+                    if native['owner'] != owner:
+                        raise ValueError('Revocation native owner changed')
+                    self._invocation(native['invocation_id'])
+                    observation = self.backend.stop_owned(plan, contract, owner, native['invocation_id'])
+                    proof = {'intent_digest': digest(intent), 'invocation_id': native['invocation_id'],
+                             'owner': owner, 'observation': observation}
+                    self.store.create(proof_name, proof)
+                observation = proof['observation']
+                if (proof['intent_digest'] != digest(intent) or proof['owner'] != owner or
+                        observation.get('unit') != owner['unit'] or
+                        observation.get('invocation_id') != proof['invocation_id'] or
+                        observation.get('ownership_verified') is not True or
+                        observation.get('execution_finished') is not True or
+                        observation.get('cgroup_empty') is not True):
+                    raise ValueError('Revocation lacks ended empty native ownership proof')
+                fresh = self.backend.observe_owned(plan, contract, owner, proof['invocation_id'])
+                if not (fresh['ownership_verified'] and fresh['execution_finished'] and fresh['cgroup_empty']):
+                    raise ValueError('Revocation predecessor no longer ended and empty')
+                if selected is None and last['status'] != 'finished':
+                    raise ValueError('Revocation lost owner before charged finish')
+                if last['status'] == 'reserved':
+                    closed = finish(journal, key, run_id=owner['run_id'],
+                                    run_attempt=owner['run_attempt'], progress_receipt=None)
+                    revision = self.journal.publish(revision, closed)
+                    if self.journal.read() != (revision, closed):
+                        raise ValueError('Uncertain revocation reconciliation')
+                if selected is not None:
+                    self.store.remove('active-owner.json')
+                elif last['status'] != 'finished':
+                    raise ValueError('Revocation lost owner before charged finish')
+            if owner is None and journal['attempts'] and journal['attempts'][-1]['status'] == 'reserved':
+                raise ValueError('Revoked reservation lacks authenticated ownership; inspection required')
+            complete = {'contract_digest': key, 'intent_digest': digest(intent),
+                        'journal_revision': revision}
+            self.store.create(complete_name, complete)
+            if self.store.read(complete_name) != complete:
+                raise ValueError('Revocation completion readback changed')
+            return complete
 
     def enroll(self, contract, approval_ref):
         """Trusted human-approval importer only, never automatic recovery."""
@@ -129,17 +268,138 @@ class PrivateController:
                               {'contract': contract, 'approval_ref': approval_ref})
             return self.journal.publish(None, initialize(self.contract_digest))
 
+    def _verifier_unowned(self):
+        try:self.store.read('active-verifier.json')
+        except FileNotFoundError:pass
+        else:raise ValueError('Private credential stream has an unreconciled verifier')
+        # Also fence interrupted preparation before the stream marker existed.
+        for path in self.store.root.glob('deep-loop-pilot-*.verifier-*.intent.json'):
+            prefix=path.name.removesuffix('.intent.json')
+            intent=self.store.read(path.name)
+            try:self._verifier_cleanup_completion(prefix,intent)
+            except FileNotFoundError:
+                raise ValueError('Pending native verifier requires result publication or cleanup')
+
     def _unowned(self):
+        self._verifier_unowned()
         try:
             self.store.read('active-owner.json')
         except FileNotFoundError:
             return
         raise ValueError('Private credential stream has an unreconciled owner')
 
-    def start(self, *, run_id, run_attempt, model_seconds, active_seconds, session_id=None):
+    def ready_workflow_tasks(self):
+        """Worker selection is advisory; start rechecks under the same lock."""
+        with self.store.lock():
+            self._require_no_pending_parent_acceptance()
+            self._require_no_pending_task_acceptance()
+            self._require_no_pending_task_credit()
+            self._contract()
+            self._unowned()
+            try:
+                self.store.read(self.contract_digest + '.workflow.json')
+            except FileNotFoundError:
+                self._workflow_selection(None)
+                return None
+            gate = self.workflow_gate
+            if gate is None or gate.store is not self.store or gate.contract_digest != self.contract_digest:
+                raise ValueError('Trusted workflow reader unavailable')
+            return gate.selection()['ready']
+
+    def _require_no_pending_task_acceptance(self):
+        for path in self.store.root.glob('deep-loop-pilot-' + self.contract_digest + '-*.task-acceptance-intent.json'):
+            intent = self.store.read(path.name)
+            result_name = path.name.removesuffix('-intent.json') + '.json'
+            try:
+                result = self.store.read(result_name)
+            except FileNotFoundError:
+                raise ValueError('Pending owned task acceptance must reconcile before dispatch')
+            expected = {'owner':intent['owner'], 'intent_digest':digest(intent),
+                        'checkpoint_sha256':digest(intent['transition']['after']),
+                        'progress_identity':intent['progress_identity'],
+                        'progress_credit_assigned':False, 'parent_accepted':False}
+            if result != expected:
+                raise ValueError('Task acceptance completion identity drift')
+
+    def _require_no_pending_task_credit(self):
+        pattern = 'deep-loop-pilot-' + self.contract_digest + '-*.task-credit-intent.json'
+        names = sorted(path.name for path in self.store.root.glob(pattern))
+        records, histories = {}, []
+        for name in names:
+            intent = self.store.read(name)
+            try:result = self.store.read(name.removesuffix('-intent.json') + '.json')
+            except FileNotFoundError:
+                raise ValueError('Pending task credit must reconcile before dispatch')
+            if (set(result) != {'owner','intent_digest','journal_revision','progress_identity',
+                               'progress_credit_assigned','parent_accepted'} or
+                    result['owner'] != intent['owner'] or result['intent_digest'] != digest(intent) or
+                    result['progress_identity'] != intent['progress_identity'] or
+                    result['progress_credit_assigned'] is not True or result['parent_accepted'] is not False or
+                    not isinstance(result['journal_revision'],str) or len(result['journal_revision']) not in (40,64) or
+                    any(c not in '0123456789abcdef' for c in result['journal_revision'])):
+                raise ValueError('Task credit completion identity drift')
+            records[name] = copy.deepcopy((intent, result))
+            histories.append((result['journal_revision'], copy.deepcopy(intent['after'])))
+        batch = getattr(self.journal, 'verify_histories', None)
+        if len(histories) > 1 and callable(batch):
+            batch(histories)
+        else:
+            for revision, expected in histories:
+                self.journal.verify_history(revision, expected)
+        if sorted(path.name for path in self.store.root.glob(pattern)) != names:
+            raise ValueError('Task credit records changed during inspection')
+        for name, expected in records.items():
+            if (self.store.read(name), self.store.read(name.removesuffix('-intent.json') + '.json')) != expected:
+                raise ValueError('Task credit records changed during inspection')
+
+    def _workflow_selection(self, task_id):
+        self._require_no_pending_parent_acceptance()
+        self._require_no_pending_task_credit()
+        self._require_no_pending_task_acceptance()
+        try:
+            self.store.read(self.contract_digest + '.workflow.json')
+        except FileNotFoundError:
+            if list(self.store.root.glob('deep-loop-pilot-' + self.contract_digest + '-*.workflow-attempt.json')):
+                raise ValueError('Prior workflow attempt lost its protected enrollment')
+            if task_id is not None:
+                raise ValueError('Task dispatch requires protected workflow enrollment')
+            return None
+        gate = self.workflow_gate
+        if (gate is None or gate.store is not self.store or
+                gate.contract_digest != self.contract_digest or
+                not isinstance(task_id, str) or not task_id):
+            raise ValueError('Trusted workflow gate and explicit task required')
+        selection = gate.selection()
+        if task_id not in selection['ready']:
+            raise ValueError('Task prerequisites unavailable: ' + task_id)
+        return {'task_id': task_id, 'binding_digest': selection['binding_digest'],
+                'session_id': selection['session_id'],
+                'prompt_sha256': selection['prompt_sha256'][task_id]}
+
+    def _workflow_receipt(self, owner):
+        try:
+            binding = self.store.read(self.contract_digest + '.workflow.json')
+        except FileNotFoundError:
+            try:
+                self.store.read(owner['unit'] + '.workflow-attempt.json')
+            except FileNotFoundError:
+                return None
+            raise ValueError('Workflow attempt lost its protected enrollment')
+        receipt = self.store.read(owner['unit'] + '.workflow-attempt.json')
+        selection = receipt.get('selection', {})
+        if (set(receipt) != {'owner', 'selection'} or receipt['owner'] != owner or
+                set(selection) != {'task_id', 'binding_digest', 'session_id', 'prompt_sha256'} or
+                selection['binding_digest'] != digest(binding) or
+                selection['session_id'] != binding['session_id'] or
+                selection['task_id'] not in binding['task_verifiers']):
+            raise ValueError('Protected workflow attempt identity drift')
+        return selection
+
+    def start(self, *, run_id, run_attempt, model_seconds, active_seconds, session_id=None, task_id=None):
         with self.store.lock():
             contract = self._contract()
             self._unowned()
+            selection = self._workflow_selection(task_id)
             revision, journal = self.journal.read()
             reserved = reserve(journal, self.contract_digest, run_id=run_id, run_attempt=run_attempt,
                                model_seconds=model_seconds, active_seconds=active_seconds)
@@ -149,9 +409,16 @@ class PrivateController:
                 binding = self.store.read(session_id + '.session.json')
                 if binding['contract_digest'] != self.contract_digest or binding['session_id'] != session_id:
                     raise ValueError('Session does not belong to approved contract')
+                if selection is not None:
+                    prior = self.store.read(binding['unit'] + '.workflow-attempt.json')
+                    if (prior['owner']['unit'] != binding['unit'] or
+                            self._workflow_receipt(prior['owner']) != selection):
+                        raise ValueError('Session does not belong to selected workflow task')
             # No model work is permitted by qualification. It must also prove no
             # unit for this dedicated identity is active outside the owner record.
             self.backend.qualify(plan, contract)
+            if self._workflow_selection(task_id) != selection:
+                raise ValueError('Workflow selection changed during qualification')
             persisted = self.journal.publish(revision, reserved)
             observed, saved = self.journal.read()
             if observed != persisted or saved != reserved:
@@ -160,6 +427,11 @@ class PrivateController:
                      'plan_digest': digest(plan), 'reservation_revision': persisted,
                      'run_id': run_id, 'run_attempt': run_attempt, 'session_id': session_id}
             self.store.create('active-owner.json', owner)
+            if selection is not None:
+                self.store.create(plan['unit'] + '.workflow-attempt.json',
+                                  {'owner': owner, 'selection': selection})
+            if self._workflow_selection(task_id) != selection:
+                raise ValueError('Workflow selection changed before native submission')
             # The immutable intent precedes submission. Any crash or uncertainty
             # after this point blocks a second launch, including another contract.
             invocation = self.backend.submit(plan, contract)
@@ -173,6 +445,976 @@ class PrivateController:
         if not isinstance(value, str) or len(value) != 32 or any(c not in '0123456789abcdef' for c in value):
             raise ValueError('Invalid native invocation identity')
 
+    def _finished_workflow_context(self, owner):
+        """Caller holds lock; authenticate exact stopped attempt before proof."""
+        contract = self._contract()
+        self._unowned()
+        selection = self._workflow_receipt(owner)
+        gate = self.workflow_gate
+        if (selection is None or gate is None or gate.store is not self.store or
+                gate.contract_digest != self.contract_digest):
+            raise ValueError('Trusted enrolled task proof reader required')
+        revision, journal = self.journal.read()
+        if not journal['attempts']:
+            raise ValueError('Finished workflow attempt required')
+        last = journal['attempts'][-1]
+        if (last['status'] != 'finished' or owner['contract_digest'] != self.contract_digest or
+                (last['run_id'], last['run_attempt']) != (owner['run_id'], owner['run_attempt'])):
+            raise ValueError('Latest finished workflow attempt required')
+        original = {**journal, 'attempts': journal['attempts'][:-1] +
+                    [{**last, 'status': 'reserved', 'progress_receipt': None}]}
+        if original.get('schema') == 2:
+            original = {**original, 'task_credits':[c for c in original['task_credits']
+                        if (c['run_id'],c['run_attempt']) != (owner['run_id'],owner['run_attempt'])]}
+        plan = launch_plan(original, self.contract_digest, run_id=owner['run_id'],
+                           run_attempt=owner['run_attempt'], session_id=owner['session_id'])
+        if plan['unit'] != owner['unit'] or digest(plan) != owner['plan_digest']:
+            raise ValueError('Task proof launch ownership drift')
+        invocation = self.store.read(owner['unit'] + '.invocation.json')
+        if invocation['owner'] != owner:
+            raise ValueError('Task proof invocation ownership drift')
+        self._invocation(invocation['invocation_id'])
+        native = self.backend.observe_owned(plan, contract, owner, invocation['invocation_id'])
+        proof = {k: native.get(k) for k in ('unit', 'active_state', 'cgroup_empty', 'ownership_verified')}
+        if 'execution_finished' in native:
+            proof['execution_finished'] = native['execution_finished']
+        if (native.get('invocation_id') != invocation['invocation_id'] or
+                recovery_action(original, self.contract_digest, proof) != 'reconcile_without_refund'):
+            raise ValueError('Exact stopped task ownership proof required')
+        return gate,selection,revision,journal,invocation
+
+    def workflow_verification_plan(self,owner):
+        with self.store.lock():
+            self._require_no_pending_parent_acceptance()
+            self._require_no_pending_task_acceptance()
+            self._require_no_pending_task_credit()
+            gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
+            plan=gate.verification_plan(selection)
+            if self.journal.read()!=(revision,journal):raise ValueError('Verification journal changed')
+            return {'owner':owner,'invocation_id':invocation['invocation_id'],
+                    'journal_revision':revision,'plan':plan}
+
+    def start_native_workflow_verification(self,owner,index):
+        """One protected dispatch; an interrupted call must inspect, never replay."""
+        from native_verifier import launch_plan as verifier_plan
+        from private_launch import ROOT
+        with self.store.lock():
+            self._require_no_pending_parent_acceptance()
+            self._verifier_unowned()
+            self._require_no_pending_task_acceptance()
+            self._require_no_pending_task_credit()
+            gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
+            owned={'owner':owner,'invocation_id':invocation['invocation_id'],
+                   'journal_revision':revision,'plan':gate.verification_plan(selection)}
+            if self.journal.read()!=(revision,journal):raise ValueError('Verification journal changed')
+            if self.native_verifier is None:raise ValueError('Native verifier adapter unavailable')
+            plan=verifier_plan(owned,ROOT+'/candidate/'+self.contract_digest,index)
+            prefix=owner['unit']+'.verifier-'+str(index)
+            intent={'owned_plan':owned,'plan':plan,'plan_digest':digest(plan)}
+            self.store.create(prefix+'.intent.json',intent)
+            stream={'contract_digest':self.contract_digest,'prefix':prefix,'plan_digest':digest(plan)}
+            self.store.create('active-verifier.json',stream)
+            if self.store.read(prefix+'.intent.json')!=intent or self.store.read('active-verifier.json')!=stream:
+                raise ValueError('Verifier ownership publication changed')
+            observation=self.native_verifier.submit(plan)
+            self._save_verifier_invocation(prefix,plan,observation)
+            return observation
+
+    def _save_verifier_invocation(self,prefix,plan,observation):
+        self._invocation(observation['invocation_id'])
+        if observation['plan_digest']!=digest(plan):raise ValueError('Verifier observation plan changed')
+        record={'plan_digest':digest(plan),'invocation_id':observation['invocation_id']}
+        try:self.store.create(prefix+'.invocation.json',record)
+        except FileExistsError:
+            if self.store.read(prefix+'.invocation.json')!=record:raise ValueError('Verifier invocation changed')
+
+    def _observe_native_verifier(self,stop=False):
+        stream=self.store.read('active-verifier.json')
+        if stream['contract_digest']!=self.contract_digest:raise ValueError('Verifier owned by another outcome')
+        intent=self.store.read(stream['prefix']+'.intent.json');plan=intent['plan']
+        if (set(stream)!={'contract_digest','prefix','plan_digest'} or
+                stream['prefix']!=plan['source_owner']['unit']+'.verifier-'+str(plan['index']) or
+                stream['plan_digest']!=digest(plan) or intent['plan_digest']!=digest(plan)):
+            raise ValueError('Verifier stream ownership changed')
+        if self.native_verifier is None:raise ValueError('Native verifier adapter unavailable')
+        observation=self.native_verifier.adopt(plan)
+        self._save_verifier_invocation(stream['prefix'],plan,observation)
+        if stop:
+            observation=self.native_verifier.stop(plan,observation['invocation_id'])
+            self._save_verifier_invocation(stream['prefix'],plan,observation)
+            native=observation['native']
+            if not (native['ownership_verified'] and native['execution_finished'] and native['cgroup_empty']):
+                raise ValueError('Verifier cleanup lacks empty ended ownership')
+        # Keep the fence until result publication or qualified cleanup completes.
+        return observation
+
+    def recover_native_workflow_verification(self):
+        with self.store.lock():return self._observe_native_verifier()
+
+    def _verifier_cleanup_completion(self,prefix,intent):
+        completion=self.store.read(prefix+'.cleanup-complete.json')
+        cleanup=self.store.read(prefix+'.cleanup-intent.json')
+        if cleanup.get('preparation_only') is True:
+            absence=self.store.read(prefix+'.preparation-absence.json')
+            expected={'plan_digest':digest(intent['plan']),'intent_digest':digest(intent),
+                      'invocation_id':None,'cleanup_only':True,'parent_accepted':False,
+                      'preparation_only':True,'absence_digest':digest(absence)}
+            if (absence!={'plan_digest':expected['plan_digest'],'submission_intent_absent':True,
+                          'account_empty':True,'native_dispatched':False} or cleanup!=expected or
+                    completion!=dict(expected,cleanup_intent_digest=digest(cleanup)) or
+                    intent['plan_digest']!=expected['plan_digest']):
+                raise ValueError('Verifier preparation cleanup identity drift')
+            for suffix in ('.submit-intent.json','.invocation.json'):
+                try:self.store.read(prefix+suffix)
+                except FileNotFoundError:pass
+                else:raise ValueError('Closed preparation acquired dispatch history')
+            return completion
+        invocation=self.store.read(prefix+'.invocation.json')
+        expected={'plan_digest':digest(intent['plan']),'intent_digest':digest(intent),
+                  'invocation_id':invocation['invocation_id'],'cleanup_only':True,'parent_accepted':False}
+        if (cleanup!=expected or completion!=dict(expected,cleanup_intent_digest=digest(cleanup)) or
+                invocation['plan_digest']!=expected['plan_digest'] or intent['plan_digest']!=expected['plan_digest']):
+            raise ValueError('Verifier cleanup completion identity drift')
+        return completion
+
+    def cleanup_native_workflow_verification(self,prefix):
+        """Stop only exact owned verifier; durable cleanup grants no result proof."""
+        with self.store.lock():
+            return self._cleanup_native_verifier(prefix)
+
+    def _cleanup_native_verifier(self,prefix):
+        intent=self.store.read(prefix+'.intent.json');plan=intent['plan']
+        if (plan['contract_digest']!=self.contract_digest or
+                prefix!=plan['source_owner']['unit']+'.verifier-'+str(plan['index'])):
+            raise ValueError('Verifier cleanup ownership changed')
+        if self.native_verifier is None:raise ValueError('Native verifier adapter unavailable')
+        expected_stream={'contract_digest':self.contract_digest,'prefix':prefix,'plan_digest':digest(plan)}
+        try:stream=self.store.read('active-verifier.json')
+        except FileNotFoundError:stream=None
+        try:completed=self._verifier_cleanup_completion(prefix,intent)
+        except FileNotFoundError:completed=None
+        try:self.store.read(prefix+'.submit-intent.json')
+        except FileNotFoundError:
+            if stream not in (None,expected_stream):raise ValueError('Preparation cleanup conflicts with another stream')
+            try:self.store.read('active-owner.json')
+            except FileNotFoundError:pass
+            else:raise ValueError('Model owner blocks preparation cleanup')
+            absence=self.native_verifier.unsubmitted(plan)
+            if absence!={'plan_digest':digest(plan),'submission_intent_absent':True,
+                         'account_empty':True,'native_dispatched':False}:
+                raise ValueError('Verifier preparation absence unavailable')
+            try:self.store.create(prefix+'.preparation-absence.json',absence)
+            except FileExistsError:
+                if self.store.read(prefix+'.preparation-absence.json')!=absence:raise ValueError('Preparation absence drift')
+            cleanup={'plan_digest':digest(plan),'intent_digest':digest(intent),'invocation_id':None,
+                     'cleanup_only':True,'parent_accepted':False,'preparation_only':True,'absence_digest':digest(absence)}
+            try:self.store.create(prefix+'.cleanup-intent.json',cleanup)
+            except FileExistsError:
+                if self.store.read(prefix+'.cleanup-intent.json')!=cleanup:raise ValueError('Preparation cleanup intent drift')
+            completion=dict(cleanup,cleanup_intent_digest=digest(cleanup))
+            try:self.store.create(prefix+'.cleanup-complete.json',completion)
+            except FileExistsError:
+                if self.store.read(prefix+'.cleanup-complete.json')!=completion:raise ValueError('Preparation cleanup completion drift')
+            if self._verifier_cleanup_completion(prefix,intent)!=completion:raise ValueError('Preparation cleanup readback changed')
+            if stream==expected_stream:self.store.remove('active-verifier.json')
+            return completion
+        if completed is None and stream!=expected_stream:
+            raise ValueError('Verifier cleanup lost stream ownership')
+        observation=self.native_verifier.adopt(plan)
+        self._save_verifier_invocation(prefix,plan,observation)
+        cleanup={'plan_digest':digest(plan),'intent_digest':digest(intent),
+                 'invocation_id':observation['invocation_id'],'cleanup_only':True,'parent_accepted':False}
+        try:self.store.create(prefix+'.cleanup-intent.json',cleanup)
+        except FileExistsError:
+            if self.store.read(prefix+'.cleanup-intent.json')!=cleanup:raise ValueError('Verifier cleanup intent drift')
+        native=observation['native']
+        if not (native['ownership_verified'] and native['execution_finished'] and native['cgroup_empty']):
+            observation=self.native_verifier.stop(plan,observation['invocation_id'])
+            self._save_verifier_invocation(prefix,plan,observation)
+        fresh=self.native_verifier.adopt(plan)
+        self._save_verifier_invocation(prefix,plan,fresh)
+        native=fresh['native']
+        if not (native['ownership_verified'] and native['execution_finished'] and native['cgroup_empty']):
+            raise ValueError('Verifier cleanup lacks fresh ended empty ownership')
+        completion=dict(cleanup,cleanup_intent_digest=digest(cleanup))
+        try:self.store.create(prefix+'.cleanup-complete.json',completion)
+        except FileExistsError:
+            if self.store.read(prefix+'.cleanup-complete.json')!=completion:raise ValueError('Verifier cleanup completion drift')
+        if self._verifier_cleanup_completion(prefix,intent)!=completion:
+            raise ValueError('Verifier cleanup readback changed')
+        if stream==expected_stream:self.store.remove('active-verifier.json')
+        return completion
+
+    def seal_native_workflow_result(self,prefix):
+        from native_result import NativeResult
+        with self.store.lock():
+            if self.native_verifier is None or self.workflow_gate is None:
+                raise ValueError('Trusted native result adapters unavailable')
+            return NativeResult(self.store,self.journal,self.native_verifier,self.workflow_gate).seal(prefix)
+
+    def prepare_native_workflow_publication(self,prefix):
+        from native_publication import NativePublication
+        with self.store.lock():
+            if self.native_verifier is None or self.workflow_gate is None:
+                raise ValueError('Trusted native publication adapters unavailable')
+            return NativePublication(self.store,self.journal,self.native_verifier,self.workflow_gate).prepare(prefix)
+
+    def publish_native_workflow_result(self,prefix):
+        from native_publication import NativePublication
+        with self.store.lock():
+            if self.native_verifier is None or self.workflow_gate is None:
+                raise ValueError('Trusted native publication adapters unavailable')
+            return NativePublication(self.store,self.journal,self.native_verifier,self.workflow_gate).publish(prefix)
+
+    def advance_finished_workflow_task(self):
+        """Choose one stopped-attempt action; each action revalidates under lock.
+
+        This uses only the latest explicitly enrolled task attempt. A failed or
+        stale already-run verifier blocks; its execution is never replayed.
+        """
+        with self.store.lock():
+            self._contract();self._unowned()
+            try:self.store.read(self.contract_digest+'.workflow.json')
+            except FileNotFoundError:return None
+            _,journal=self.journal.read()
+            if journal['schema']!=2 or not journal['attempts']:return None
+            last=journal['attempts'][-1]
+            if last['status']!='finished':raise ValueError('Finished workflow attempt required')
+            if any((c['run_id'],c['run_attempt'])==(last['run_id'],last['run_attempt'])
+                   for c in journal['task_credits']):return None
+            unit='deep-loop-pilot-'+self.contract_digest+'-'+str(last['run_id'])+'-'+str(last['run_attempt'])
+            attempt=self.store.read(unit+'.workflow-attempt.json');owner=attempt['owner']
+            gate,selection,_,_,_=self._finished_workflow_context(owner)
+            binding,state,_=gate._read()
+            if binding.get('schema') in (2, 3, 4):
+                plan=gate.verification_plan(selection)
+                identifiers=plan['verifier_ids']
+                unresolved=gate.unresolved_verifiers(binding,state,identifiers)
+            else:
+                identifiers=binding['task_verifiers'][selection['task_id']]
+                unresolved=[identifier for identifier in identifiers
+                            if gate.helper.prerequisite_issues(state,[identifier])]
+            if not unresolved:
+                try:self.store.read(unit+'.task-proof.json')
+                except FileNotFoundError:action=('proof',None)
+                else:action=('accept',None)
+            else:
+                plan=gate.verification_plan(selection)
+                index=next(i for i,definition in enumerate(plan['definitions'])
+                           if definition['verifier']['id'] in unresolved)
+                prefix=unit+'.verifier-'+str(index)
+                try:self.store.read(prefix+'.intent.json')
+                except FileNotFoundError:action=('verify',index)
+                else:return 'blocked_stale_or_failed_verifier_proof'
+        if action[0]=='verify':
+            self.start_native_workflow_verification(owner,action[1])
+            return 'submitted_native_workflow_verifier'
+        if action[0]=='proof':
+            self.record_workflow_task_proof(owner)
+            return 'recorded_workflow_task_proof'
+        self.accept_workflow_task(owner)
+        return 'accepted_workflow_task'
+
+    def _recover_orphan_verifier_preparation(self):
+        """Close one provably unsubmitted preparation; never reconstruct dispatch."""
+        with self.store.lock():
+            pending=[]
+            for path in self.store.root.glob('deep-loop-pilot-*.verifier-*.intent.json'):
+                prefix=path.name.removesuffix('.intent.json')
+                intent=self.store.read(path.name)
+                try:self._verifier_cleanup_completion(prefix,intent)
+                except FileNotFoundError:pending.append((prefix,intent))
+            if not pending:return None
+            if len(pending)!=1:return 'blocked_ambiguous_verifier_preparation'
+            prefix,intent=pending[0];plan=intent['plan']
+            if plan['contract_digest']!=self.contract_digest:return 'blocked_other_verifier_owner'
+            if (intent['plan_digest']!=digest(plan) or
+                    prefix!=plan['source_owner']['unit']+'.verifier-'+str(plan['index'])):
+                raise ValueError('Orphan verifier preparation identity drift')
+            for suffix in ('.submit-intent.json','.invocation.json'):
+                try:self.store.read(prefix+suffix)
+                except FileNotFoundError:pass
+                else:return 'blocked_missing_verifier_stream'
+            self._cleanup_native_verifier(prefix)
+            return 'recovered_native_verifier_preparation_cleanup'
+
+    def recover_pending_native_publication(self):
+        """One worker recovery step; never dispatch or release ambiguous owners."""
+        try:stream=self.store.read('active-verifier.json')
+        except FileNotFoundError:return self._recover_orphan_verifier_preparation()
+        if stream['contract_digest']!=self.contract_digest:return 'blocked_other_verifier_owner'
+        prefix=stream['prefix']
+        # Cleanup intent takes precedence over proof work, including after a
+        # failed stop/readback. The cleanup implementation rechecks exact owner.
+        try:self.store.read(prefix+'.cleanup-intent.json')
+        except FileNotFoundError:pass
+        else:
+            self.cleanup_native_workflow_verification(prefix)
+            return 'recovered_native_verifier_cleanup'
+        observed=self.recover_native_workflow_verification()
+        if not observed['native']['execution_finished'] or not observed['native']['cgroup_empty']:
+            return 'wait_for_native_verifier'
+        if observed['exit_code']!=0 or observed['unit_result']!='success':
+            self.cleanup_native_workflow_verification(prefix)
+            return 'blocked_failed_native_verifier'
+        try:self.store.read(prefix+'.publication-complete.json')
+        except FileNotFoundError:pass
+        else:
+            self.publish_native_workflow_result(prefix)
+            self.cleanup_native_workflow_verification(prefix)
+            return 'recovered_native_verifier_cleanup'
+        try:self.store.read(prefix+'.publication-intent.json')
+        except FileNotFoundError:
+            self.prepare_native_workflow_publication(prefix)
+            return 'prepared_native_verifier_publication'
+        self.publish_native_workflow_result(prefix)
+        return 'recovered_native_verifier_publication'
+
+    def _current_workflow_task_proof(self,owner):
+        self._require_no_pending_parent_acceptance()
+        from workflow_gate import task_progress_identity
+        gate,selection,revision,journal,invocation=self._finished_workflow_context(owner)
+        observation = gate.task_acceptance(selection)
+        if self.journal.read() != (revision, journal):
+            raise ValueError('Task proof journal changed during inspection')
+        record = {'owner': owner, 'invocation_id': invocation['invocation_id'],
+                  'journal_revision': revision, 'observation': observation,
+                  'progress_identity': task_progress_identity(observation),
+                  'progress_credit_assigned': False}
+        return record
+
+    def _workflow_mutation_authority(self, *, parent_recovery=False):
+        if not parent_recovery:self._require_no_pending_parent_acceptance()
+        require_active(self.store,self.contract_digest)
+        if remaining(self.store,self.contract_digest)<=0:
+            raise ValueError('Immutable workflow mutation window expired')
+
+    def _workflow_source_guard(self, observation, *, parent_recovery=False):
+        self._workflow_mutation_authority(parent_recovery=parent_recovery)
+        source=observation.get('candidate_source')
+        if source is not None:
+            from candidate_snapshot import require_candidate_snapshot
+            require_candidate_snapshot(source['policy'],source['snapshot'])
+            self._workflow_mutation_authority(parent_recovery=parent_recovery)
+
+    def record_workflow_task_proof(self, owner):
+        """Persist exact stopped-attempt proof without credit or task mutation."""
+        with self.store.lock():
+            record = self._current_workflow_task_proof(owner)
+            name = owner['unit'] + '.task-proof.json'
+            self._workflow_source_guard(record['observation'])
+            try:
+                self.store.create(name, record)
+            except FileExistsError:
+                if self.store.read(name) != record:
+                    raise ValueError('Changed protected task proof observation')
+            if self.store.read(name) != record:
+                raise ValueError('Task proof observation readback differs')
+            return record
+
+    def accept_workflow_task(self, owner):
+        """Recoverable owned-attempt task acceptance; no parent/budget credit."""
+        with self.store.lock():
+            current = self._current_workflow_task_proof(owner)
+            proof = self.store.read(owner['unit'] + '.task-proof.json')
+            if (proof['owner'] != owner or proof['invocation_id'] != current['invocation_id'] or
+                    proof['journal_revision'] != current['journal_revision'] or
+                    proof['progress_identity'] != current['progress_identity'] or
+                    proof['observation']['proof_receipts'] != current['observation']['proof_receipts']):
+                raise ValueError('Task acceptance protected proof drift')
+            name = owner['unit'] + '.task-acceptance-intent.json'
+            try:
+                intent = self.store.read(name)
+            except FileNotFoundError:
+                transition = self.workflow_gate.accepted_state(proof['observation']['selection'],
+                                str(self.store.root / (owner['unit'] + '.task-proof.json')))
+                if transition['observation'] != proof['observation']:
+                    raise ValueError('Task acceptance preimage differs from recorded proof')
+                intent = {'owner': owner, 'proof_digest': digest(proof),
+                          'progress_identity': current['progress_identity'], 'transition': transition}
+                self._workflow_source_guard(current['observation'])
+                self.store.create(name, intent)
+            if (set(intent) != {'owner','proof_digest','progress_identity','transition'} or
+                    intent['owner'] != owner or intent['proof_digest'] != digest(proof) or
+                    intent['progress_identity'] != current['progress_identity']):
+                raise ValueError('Task acceptance intent identity drift')
+            saved = self.workflow_gate.publish_accepted_state(intent['transition'],before_write=lambda:self._workflow_source_guard(current['observation']))
+            completed = {'owner':owner, 'intent_digest':digest(intent),
+                         'checkpoint_sha256':digest(saved),
+                         'progress_identity':current['progress_identity'],
+                         'progress_credit_assigned':False, 'parent_accepted':False}
+            result_name = owner['unit'] + '.task-acceptance.json'
+            self._workflow_source_guard(current['observation'])
+            try:
+                self.store.create(result_name, completed)
+            except FileExistsError:
+                if self.store.read(result_name) != completed:
+                    raise ValueError('Task acceptance completion drift')
+            if self.store.read(result_name) != completed:
+                raise ValueError('Task acceptance completion readback differs')
+            return completed
+
+    def recover_pending_workflow_transition(self):
+        """Recover one already-authorized durable intent, never dispatch.
+
+        Fresh task acceptance still requires an explicit trusted acceptance call.
+        This wakeup seam resumes saved acceptance and derives credit authority
+        from durable accepted intent; it never chooses a fresh task acceptance.
+        """
+        with self.store.lock():
+            self._contract(); self._unowned()
+            _, journal = self.journal.read()
+            if journal['schema'] != 2:
+                return None
+            pending = []
+            for path in self.store.root.glob('deep-loop-pilot-' + self.contract_digest + '-*.task-acceptance-intent.json'):
+                intent = self.store.read(path.name)
+                owner = intent['owner']
+                try:self.store.read(owner['unit'] + '.task-acceptance.json')
+                except FileNotFoundError:
+                    pending.append(('accept',owner));continue
+                try:self.store.read(owner['unit'] + '.task-credit.json')
+                except FileNotFoundError:pending.append(('credit',owner))
+            if not pending:return None
+            if len(pending) != 1:
+                raise ValueError('Ambiguous pending workflow transition ownership')
+            action,owner = pending[0]
+        # Each operation reacquires the credential lock and revalidates current
+        # exact ownership/proof. No stale unlocked snapshot grants authority.
+        if action == 'accept':
+            self.accept_workflow_task(owner)
+            return 'recovered_workflow_task_acceptance'
+        self.credit_workflow_task(owner)
+        return 'recovered_workflow_task_credit'
+
+    def credit_workflow_task(self, owner):
+        """Append one credit for durable acceptance; recover uncertain Git write."""
+        with self.store.lock():
+            current = self._current_workflow_task_proof(owner)
+            acceptance = self.store.read(owner['unit'] + '.task-acceptance.json')
+            accepted_intent = self.store.read(owner['unit'] + '.task-acceptance-intent.json')
+            expected = {'owner':owner,'intent_digest':digest(accepted_intent),
+                        'checkpoint_sha256':digest(accepted_intent['transition']['after']),
+                        'progress_identity':current['progress_identity'],
+                        'progress_credit_assigned':False,'parent_accepted':False}
+            if acceptance != expected:
+                raise ValueError('Durable owned task acceptance required for credit')
+            proof = self.store.read(owner['unit'] + '.task-proof.json')
+            if (accepted_intent['owner'] != owner or accepted_intent['proof_digest'] != digest(proof) or
+                    proof['invocation_id'] != current['invocation_id'] or
+                    proof['observation']['proof_receipts'] != current['observation']['proof_receipts'] or
+                    accepted_intent['progress_identity'] != current['progress_identity']):
+                raise ValueError('Task credit accepted proof identity drift')
+            accepted = self.workflow_gate.accepted_state(current['observation']['selection'],
+                            str(self.store.root / (owner['unit'] + '.task-proof.json')))
+            if accepted['before'] != accepted['after']:
+                raise ValueError('Task credit requires current accepted checkpoint task')
+            revision, journal = self.journal.read()
+            name = owner['unit'] + '.task-credit-intent.json'
+            try:
+                intent = self.store.read(name)
+            except FileNotFoundError:
+                after = credit_task(journal,self.contract_digest,run_id=owner['run_id'],
+                                    run_attempt=owner['run_attempt'],progress_receipt=current['progress_identity'])
+                intent = {'owner':owner,'acceptance_digest':digest(acceptance),
+                          'expected_revision':revision,'before':journal,'after':after,
+                          'progress_identity':current['progress_identity']}
+                self._workflow_source_guard(current['observation'])
+                self.store.create(name,intent)
+            if (set(intent) != {'owner','acceptance_digest','expected_revision','before','after','progress_identity'} or
+                    intent['owner'] != owner or intent['acceptance_digest'] != digest(acceptance) or
+                    intent['progress_identity'] != current['progress_identity'] or
+                    intent['after'] != credit_task(intent['before'],self.contract_digest,
+                        run_id=owner['run_id'],run_attempt=owner['run_attempt'],
+                        progress_receipt=current['progress_identity'])):
+                raise ValueError('Task credit intent identity drift')
+            if journal == intent['before'] and revision == intent['expected_revision']:
+                # Uncertain publication propagates. A retry reads this same intent
+                # and exact remote state; it never repeats a model submission.
+                self._workflow_source_guard(current['observation'])
+                self.journal.publish(revision,intent['after'],before_publish=lambda:self._workflow_source_guard(current['observation']))
+                revision,journal = self.journal.read()
+            if journal != intent['after']:
+                raise ValueError('Task credit journal drift requires reconciliation')
+            completed = {'owner':owner,'intent_digest':digest(intent),'journal_revision':revision,
+                         'progress_identity':current['progress_identity'],
+                         'progress_credit_assigned':True,'parent_accepted':False}
+            result_name = owner['unit'] + '.task-credit.json'
+            self._workflow_source_guard(current['observation'])
+            try:self.store.create(result_name,completed)
+            except FileExistsError:
+                if self.store.read(result_name) != completed:
+                    raise ValueError('Task credit completion drift')
+            if self.store.read(result_name) != completed:
+                raise ValueError('Task credit independent readback differs')
+            return completed
+
+    def _workflow_quiescence(self):
+        from private_launch import ACCOUNT
+        observation=self.backend.observe_quiescence()
+        if (not isinstance(observation,dict) or set(observation)!={'account','uid','empty'} or
+                observation['account']!=ACCOUNT or type(observation['uid']) is not int or
+                observation['uid']<=0 or observation['empty'] is not True):
+            raise ValueError('Trusted account-wide workflow quiescence required')
+        return observation
+
+    def _require_no_pending_parent_acceptance(self):
+        name = self.contract_digest + '.parent-acceptance-intent.json'
+        try: intent = self.store.read(name)
+        except FileNotFoundError: return
+        try: completed = self.store.read(self.contract_digest + '.parent-acceptance.json')
+        except FileNotFoundError:
+            raise ValueError('Pending parent acceptance requires exact recovery')
+        if completed.get('intent_digest') != digest(intent) or completed.get('parent_accepted') is not True:
+            raise ValueError('Parent acceptance completion identity drift')
+        # Accepted parents cannot reenter task/model/verifier mutation.
+        raise ValueError('Accepted parent requires workflow delivery')
+
+    @staticmethod
+    def _parent_outcome_at_checkpoint(outcome, checkpoint_digest):
+        """Translate only current checkpoint references after phase-only write."""
+        result = copy.deepcopy(outcome)
+        proof = result['outcome_proof']; proof['checkpoint_sha256'] = checkpoint_digest
+        for row in proof['tasks'].values():
+            row['observation']['checkpoint_sha256'] = checkpoint_digest
+        for history in result['task_histories'].values():
+            history['checkpoint_sha256'] = checkpoint_digest
+            history['current_observation']['checkpoint_sha256'] = checkpoint_digest
+        return result
+
+    @staticmethod
+    def _parent_proof_at_checkpoint(proof, checkpoint_digest):
+        result=copy.deepcopy(proof);result['checkpoint_sha256']=checkpoint_digest
+        outcome=result['outcome_proof'];outcome['checkpoint_sha256']=checkpoint_digest
+        for row in outcome['tasks'].values():row['observation']['checkpoint_sha256']=checkpoint_digest
+        return result
+
+    def prepare_workflow_parent_acceptance(self):
+        """Save explicit integrated review authority; never deliver or complete."""
+        outcome = self.observe_workflow_outcome()
+        with self.store.lock():
+            self._contract(); self._unowned()
+            self._require_no_pending_task_acceptance(); self._require_no_pending_task_credit()
+            self._require_no_pending_parent_acceptance()
+            transition = self.workflow_gate.parent_accepted_state()
+            if transition['before']['phase'] not in {'BUILD', 'REVIEW'}:
+                raise ValueError('Parent acceptance requires its original review preimage')
+            journal = self.journal.read()
+            if (transition['observation']['outcome_proof'] != outcome['outcome_proof'] or
+                    journal[0] != outcome['journal_revision'] or
+                    self._workflow_quiescence() != outcome['quiescence']):
+                raise ValueError('Parent review acceptance cut changed')
+            intent = {'contract_digest': self.contract_digest, 'transition': transition,
+                      'journal_revision': journal[0], 'journal': journal[1], 'outcome': outcome}
+            self._workflow_source_guard(transition['observation'])
+            self.store.create(self.contract_digest + '.parent-acceptance-intent.json', intent)
+            if self.store.read(self.contract_digest + '.parent-acceptance-intent.json') != intent:
+                raise ValueError('Parent acceptance intent readback differs')
+            return intent
+
+    def recover_workflow_parent_acceptance(self):
+        """Recover only a saved phase transition within its original authority."""
+        try: intent = self.store.read(self.contract_digest + '.parent-acceptance-intent.json')
+        except FileNotFoundError: return None
+        if (set(intent) != {'contract_digest','transition','journal_revision','journal','outcome'} or
+                intent['contract_digest'] != self.contract_digest):
+            raise ValueError('Parent acceptance intent identity drift')
+        # The aggregate reader independently validates historical credits and
+        # current source. It grants no dispatch or parent mutation authority.
+        outcome = self.observe_workflow_outcome()
+        with self.store.lock():
+            self._contract(); self._unowned()
+            self._require_no_pending_task_acceptance(); self._require_no_pending_task_credit()
+            transition = intent['transition']
+            binding, state, _ = self.workflow_gate._read()
+            if (binding.get('schema') not in (3, 4) or state not in (transition['before'], transition['after']) or
+                    self.journal.read() != (intent['journal_revision'], intent['journal']) or
+                    outcome != self._parent_outcome_at_checkpoint(intent['outcome'], digest(state)) or
+                    self._workflow_quiescence() != outcome['quiescence']):
+                raise ValueError('Parent acceptance exact recovery cut changed')
+            def guard():
+                self._workflow_source_guard(transition['observation'], parent_recovery=True)
+                if (self.journal.read() != (intent['journal_revision'], intent['journal']) or
+                        self._workflow_quiescence() != outcome['quiescence']):
+                    raise ValueError('Parent acceptance journal or quiescence changed')
+                self._workflow_mutation_authority(parent_recovery=True)
+            saved = self.workflow_gate.publish_parent_accepted_state(transition, before_write=guard)
+            proof = self.workflow_gate.final_review_proof()
+            if proof['checkpoint_sha256'] != digest(saved):
+                raise ValueError('Parent acceptance postimage proof changed')
+            completed = {'contract_digest':self.contract_digest,'intent_digest':digest(intent),
+                         'journal_revision':intent['journal_revision'],'checkpoint_sha256':digest(saved),
+                         'postimage_review_proof':proof,'parent_accepted':True,
+                         'delivery_verified':False,'complete':False}
+            guard()
+            if self.workflow_gate._read()[1] != saved:
+                raise ValueError('Parent checkpoint changed before completion publication')
+            self._workflow_mutation_authority(parent_recovery=True)
+            name = self.contract_digest + '.parent-acceptance.json'
+            try: self.store.create(name, completed)
+            except FileExistsError:
+                if self.store.read(name) != completed:
+                    raise ValueError('Parent acceptance completion drift')
+            if self.store.read(name) != completed:
+                raise ValueError('Parent acceptance completion readback differs')
+            return 'recovered_workflow_parent_acceptance'
+
+    def authenticate_workflow_parent_acceptance(self):
+        """Read a fresh accepted parent cut for delivery; never publish or recover.
+
+        A retained SHIP phase or receipt alone grants no delivery truth. Callers
+        must invoke this again before each external mutation and compare the cut
+        with their immutable delivery intent. Explicit delivery authority is a
+        separate enrollment obligation.
+        """
+        outcome = self.observe_workflow_outcome()
+        with self.store.lock():
+            self._contract(); self._unowned()
+            self._require_no_pending_task_acceptance(); self._require_no_pending_task_credit()
+            self._workflow_mutation_authority(parent_recovery=True)
+            intent = self.store.read(self.contract_digest + '.parent-acceptance-intent.json')
+            completed = self.store.read(self.contract_digest + '.parent-acceptance.json')
+            if (set(intent) != {'contract_digest','transition','journal_revision','journal','outcome'} or
+                    intent['contract_digest'] != self.contract_digest):
+                raise ValueError('Accepted parent intent identity drift')
+            binding, state, _ = self.workflow_gate._read()
+            transition = intent['transition']
+            origin=self.workflow_gate.accepted_parent_image(binding,state)
+            if (binding.get('schema') not in (3, 4) or origin != transition['after'] or
+                    transition['before'].get('phase') not in {'BUILD','REVIEW'} or
+                    transition['after'] != {**transition['before'], 'phase':'SHIP'} or
+                    self.journal.read() != (intent['journal_revision'], intent['journal']) or
+                    outcome != self._parent_outcome_at_checkpoint(intent['outcome'], digest(state)) or
+                    self._workflow_quiescence() != outcome['quiescence']):
+                raise ValueError('Accepted parent current delivery cut changed')
+            proof = self.workflow_gate.final_review_proof()
+            expected = {'contract_digest':self.contract_digest,'intent_digest':digest(intent),
+                        'journal_revision':intent['journal_revision'],'checkpoint_sha256':digest(origin),
+                        'postimage_review_proof':self._parent_proof_at_checkpoint(proof,digest(origin)),'parent_accepted':True,
+                        'delivery_verified':False,'complete':False}
+            if completed != expected:
+                raise ValueError('Accepted parent completion proof changed')
+            self._workflow_source_guard(proof, parent_recovery=True)
+            if (self.workflow_gate._read()[:2] != (binding, state) or
+                    self.journal.read() != (intent['journal_revision'], intent['journal']) or
+                    self._workflow_quiescence() != outcome['quiescence']):
+                raise ValueError('Accepted parent changed during delivery inspection')
+            self._workflow_mutation_authority(parent_recovery=True)
+            return {'contract_digest':self.contract_digest,'binding_sha256':digest(binding),
+                    'parent_receipt_sha256':digest(completed),'parent_receipt':completed,
+                    'outcome':self._parent_outcome_at_checkpoint(outcome,digest(origin))}
+
+    def advance_workflow_parent_acceptance(self):
+        """Only explicitly enrolled parents may enter integrated review acceptance."""
+        with self.store.lock():
+            try: binding = self.store.read(self.contract_digest + '.workflow.json')
+            except FileNotFoundError: return None
+            if binding.get('schema') not in (3, 4): return None
+            try: self.store.read(self.contract_digest + '.parent-acceptance-intent.json')
+            except FileNotFoundError:
+                _, _, tasks = self.workflow_gate._read()
+                if any(task['status'] != 'done' for task in tasks.values()): return None
+                pending = False
+            else: pending = True
+            completed = (self.store.root / (self.contract_digest + '.parent-acceptance.json')).exists()
+        if pending:
+            if completed and (self.store.root/(self.contract_digest+'.workflow-delivery-checkpoint-intent.json')).exists():
+                self.authenticate_workflow_parent_acceptance()
+                return 'workflow_delivery_pending'
+            result = self.recover_workflow_parent_acceptance()
+            return 'workflow_delivery_pending' if completed else result
+        self.prepare_workflow_parent_acceptance()
+        return 'prepared_workflow_parent_acceptance'
+
+    def observe_workflow_outcome(self):
+        """Authenticate every task's current proof and historical credit; read only."""
+        from workflow_gate import task_progress_identity
+        with self.store.lock():
+            self._contract();self._unowned()
+            self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+            gate=self.workflow_gate
+            if gate is None or gate.store is not self.store or gate.contract_digest!=self.contract_digest:
+                raise ValueError('Trusted workflow outcome reader required')
+            quiescence=self._workflow_quiescence()
+            outcome=gate.outcome_proof();snapshot=self.journal.read()
+            journal=snapshot[1]
+            if journal['schema']!=2 or not journal['attempts'] or any(a['status']!='finished' for a in journal['attempts']):
+                raise ValueError('Finished workflow outcome history required')
+            owners={};credits_by_task={}
+            for credit in journal['task_credits']:
+                unit='deep-loop-pilot-'+self.contract_digest+'-'+str(credit['run_id'])+'-'+str(credit['run_attempt'])
+                owner=self.store.read(unit+'.task-credit.json')['owner']
+                if (owner['unit']!=unit or owner['run_id']!=credit['run_id'] or
+                        owner['run_attempt']!=credit['run_attempt']):
+                    raise ValueError('Workflow outcome credit owner attribution drift')
+                selected=self._workflow_receipt(owner)
+                task_id=selected['task_id']
+                if task_id not in outcome['tasks'] or task_id in owners:
+                    raise ValueError('Missing or duplicate workflow outcome task attribution')
+                owners[task_id]=owner;credits_by_task[task_id]=credit
+            if set(owners)!=set(outcome['tasks']):
+                raise ValueError('Every workflow outcome task requires durable credited acceptance')
+            retained=self._workflow_retained_record_cut(list(owners.values()))
+        # Public readers take their own credential locks. Revalidate the entire
+        # cut after sequential inspection; unlocked snapshots grant no mutation.
+        histories={task_id:self.authenticate_workflow_task_provenance(owner)
+                   for task_id,owner in owners.items()}
+        with self.store.lock():
+            self._contract();self._unowned()
+            self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+            inspection=self._workflow_inspection_cut()
+            self._workflow_close_retained_histories(retained,list(histories.values()))
+            if (gate.outcome_proof()!=outcome or self.journal.read()!=snapshot or
+                    any(h['journal_revision']!=snapshot[0] or
+                        h['progress_identity']!=credits_by_task[task_id]['progress_receipt'] or
+                        h['current_selection']!=outcome['tasks'][task_id]['observation']['selection'] or
+                        h['progress_identity']!=task_progress_identity(outcome['tasks'][task_id]['observation']) or
+                        h['checkpoint_sha256']!=outcome['tasks'][task_id]['observation']['checkpoint_sha256']
+                        for task_id,h in histories.items())):
+                raise ValueError('Workflow outcome acceptance cut changed during inspection')
+            if self._workflow_quiescence()!=quiescence:
+                raise ValueError('Workflow account identity changed during outcome inspection')
+            if self._workflow_retained_record_cut(list(owners.values()))!=retained:
+                raise ValueError('Retained records changed during closing outcome proof')
+            self._workflow_close_inspection_cut(inspection,retained,list(histories.values()),quiescence)
+            # The opening and closing aggregate proofs authenticate these exact
+            # current observations. Provenance above still independently checks
+            # every retained chain and stopped native owner. Reuse is confined
+            # to this checked cut; no proof survives a later reader invocation.
+            histories={task_id:{**history,'kind':'historical_workflow_task_acceptance',
+                'current_observation':outcome['tasks'][task_id]['observation'],
+                'final_proof_verified':True} for task_id,history in histories.items()}
+            return {'kind':'authenticated_workflow_outcome_observation',
+                    'outcome_proof':outcome,'task_histories':histories,
+                    'journal_revision':snapshot[0],'quiescence':quiescence,'parent_accepted':False,'delivery_verified':False}
+
+    def authenticate_workflow_task_history(self,owner):
+        """Compatibility reader requiring both provenance and current task proof."""
+        from workflow_gate import task_progress_identity
+        history=self.authenticate_workflow_task_provenance(owner)
+        with self.store.lock():
+            self._contract();self._unowned()
+            self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+            current=self.workflow_gate.task_acceptance(history['current_selection'])
+            if (task_progress_identity(current)!=history['progress_identity'] or
+                    current['checkpoint_sha256']!=history['checkpoint_sha256'] or
+                    self.journal.read()[0]!=history['journal_revision']):
+                raise ValueError('Historical task current proof changed during inspection')
+            return {**history,'kind':'historical_workflow_task_acceptance',
+                    'current_observation':current,'final_proof_verified':True}
+
+    def _workflow_inspection_cut(self,*,proof_files=None):
+        """Exact operation-local inputs; no helper process or derived proof."""
+        from workflow_gate import checkpoint_bytes
+        suffixes=('approval','window','workflow','workflow-binding-intent','workflow-binding-complete',
+                  'workflow-helper','workflow-helper-intent','workflow-helper-complete',
+                  'parent-acceptance-intent','parent-acceptance','workflow-delivery-plan',
+                  'workflow-delivery-complete','workflow-delivery-checkpoint-intent',
+                  'workflow-delivery-checkpoint','workflow-terminal-intent','workflow-terminal-complete')
+        records={}
+        for suffix in suffixes:
+            try:records[suffix]=self.store.read(self.contract_digest+'.'+suffix+'.json')
+            except FileNotFoundError:records[suffix]=None
+        binding=records['workflow']
+        payload=checkpoint_bytes(Path(binding['checkpoint_path']));state=json.loads(payload)
+        ids=sorted({identifier for group in binding['task_verifiers'].values() for identifier in group})
+        archive=Path(binding['checkpoint_path']).parent.parent if 'proofResolution' in state else None
+        collector=getattr(self.workflow_gate.helper,'review_dependency_cut',None)
+        if proof_files is None and not callable(collector):
+            raise ValueError('Pinned helper lacks required proof dependency collection capability')
+        files=collector(state,[ids],archive) if proof_files is None else proof_files
+        return {'records':records,'checkpoint':checkpoint_bytes(Path(binding['checkpoint_path'])),
+                'journal':self.journal.read(),'source':self.workflow_gate.candidate_snapshot(binding),'proof_files':files}
+
+    def _workflow_reobserve_proof_files(self,expected):
+        """Controller-only bounded byte closure; helper code stays isolated."""
+        if not isinstance(expected,dict) or not expected or len(expected)>512:
+            raise ValueError('Bounded nonempty proof dependency cut required')
+        observed={};total=0
+        for lexical,row in expected.items():
+            if (not isinstance(lexical,str) or os.path.abspath(lexical)!=lexical or
+                    not isinstance(row,dict) or set(row)!={'physical_path','sha256','size','device','inode','mode'} or
+                    type(row['size']) is not int or not 0<=row['size']<=67108864):
+                raise ValueError('Malformed proof dependency identity')
+            path=Path(lexical).resolve();directory=os.open('/',os.O_RDONLY|os.O_DIRECTORY)
+            try:
+                for component in path.parts[1:-1]:
+                    child=os.open(component,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=directory)
+                    os.close(directory);directory=child
+                fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory)
+                with os.fdopen(fd,'rb') as stream:
+                    before=os.fstat(stream.fileno())
+                    if not stat.S_ISREG(before.st_mode):raise ValueError('Regular proof dependency required')
+                    payload=stream.read(67108865);after=os.fstat(stream.fileno())
+                if (len(payload)>67108864 or Path(lexical).resolve()!=path or
+                        (before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)!=
+                        (after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns)):
+                    raise ValueError('Proof dependency changed during controller read')
+            finally:os.close(directory)
+            total+=len(payload)
+            if total>268435456:raise ValueError('Proof dependency total exceeds bound')
+            observed[lexical]={'physical_path':str(path),'sha256':hashlib.sha256(payload).hexdigest(),
+                'size':len(payload),'device':after.st_dev,'inode':after.st_ino,'mode':stat.S_IMODE(after.st_mode)}
+        if observed!=expected:raise ValueError('Workflow proof dependency changed after final native observation')
+        return observed
+
+    def _workflow_close_inspection_cut(self,expected,records,histories,quiescence):
+        """Close after the last helper, with bounded native and exact-input reads.
+
+        Root-owned unit control and the credential lock remain trust boundaries;
+        these observations do not form an atomic snapshot of the operating system.
+        """
+        self._workflow_close_retained_histories(records,histories)
+        if self._workflow_quiescence()!=quiescence:
+            raise ValueError('Workflow account identity changed during final inspection')
+        verify=getattr(self.workflow_gate.helper,'_verify',None)
+        if callable(verify):verify()
+        self._contract();self._unowned()
+        self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+        files=self._workflow_reobserve_proof_files(expected['proof_files'])
+        if self._workflow_inspection_cut(proof_files=files)!=expected:
+            raise ValueError('Workflow exact inspection inputs changed after final native observation')
+        if self._workflow_retained_record_cut([h['owner'] for h in histories])!=records:
+            raise ValueError('Retained records changed after final native observation')
+        self._workflow_mutation_authority(parent_recovery=True)
+
+    def _workflow_retained_record_cut(self,owners):
+        """Operation-local selected chains; no public receipt/schema change."""
+        records={}
+        for owner in owners:
+            if (not isinstance(owner,dict) or set(owner)!={'contract_digest','unit','plan_digest',
+                    'reservation_revision','run_id','run_attempt','session_id'} or
+                    owner['contract_digest']!=self.contract_digest or owner['unit'] in records):
+                raise ValueError('Retained history owner identity drift')
+            records[owner['unit']]={suffix:self.store.read(owner['unit']+suffix) for suffix in
+                ('.workflow-attempt.json','.invocation.json','.task-proof.json',
+                 '.task-acceptance-intent.json','.task-acceptance.json',
+                 '.task-credit-intent.json','.task-credit.json')}
+        return records
+
+    def _workflow_close_retained_histories(self,records,histories):
+        """Fresh native generation observations, then exact selected records."""
+        self._workflow_mutation_authority(parent_recovery=True);contract=self._contract()
+        owners=[]
+        for history in histories:
+            owner=history['owner'];owners.append(owner);chain=records[owner['unit']]
+            before=chain['.task-credit-intent.json']['before'];last=before['attempts'][-1]
+            reserved={**before,'attempts':before['attempts'][:-1]+[{**last,'status':'reserved','progress_receipt':None}]}
+            plan=launch_plan(reserved,self.contract_digest,run_id=owner['run_id'],
+                             run_attempt=owner['run_attempt'],session_id=owner['session_id'])
+            invocation=chain['.invocation.json']
+            if plan['unit']!=owner['unit'] or digest(plan)!=owner['plan_digest'] or invocation['owner']!=owner:
+                raise ValueError('Retained native closing ownership drift')
+            native=self.backend.observe_owned(plan,contract,owner,invocation['invocation_id'])
+            if native!=history['native']:
+                raise ValueError('Retained native generation changed during history inspection')
+        if self._workflow_retained_record_cut(owners)!=records:
+            raise ValueError('Retained records changed during history inspection')
+        self._unowned();self._workflow_mutation_authority(parent_recovery=True)
+
+    def authenticate_workflow_task_provenance(self,owner):
+        """Read one accepted historical task chain; never accept the parent.
+
+        Authenticate retained acceptance, credit and stopped ownership only.
+        Fresh candidate truth remains the separate final review obligation.
+        """
+        from workflow_gate import task_progress_identity
+        with self.store.lock():
+            return self._workflow_task_provenance_locked(owner)
+
+    def _workflow_task_provenance_locked(self,owner):
+        """Full retained-history authentication with the credential lock held."""
+        from workflow_gate import task_progress_identity
+        contract=self._contract();self._unowned()
+        self._require_no_pending_task_acceptance();self._require_no_pending_task_credit()
+        if (set(owner)!={'contract_digest','unit','plan_digest','reservation_revision',
+                         'run_id','run_attempt','session_id'} or
+                owner['contract_digest']!=self.contract_digest):
+            raise ValueError('Historical task owner identity drift')
+        retained=self._workflow_retained_record_cut([owner])
+        selection=self._workflow_receipt(owner)
+        gate=self.workflow_gate
+        if selection is None or gate is None or gate.store is not self.store or gate.contract_digest!=self.contract_digest:
+            raise ValueError('Trusted historical task proof reader required')
+        binding,checkpoint,_=gate._read()
+        unit=owner['unit'];proof=self.store.read(unit+'.task-proof.json')
+        identity=task_progress_identity(proof['observation'])
+        accepted_intent=self.store.read(unit+'.task-acceptance-intent.json')
+        acceptance=self.store.read(unit+'.task-acceptance.json')
+        credit_intent=self.store.read(unit+'.task-credit-intent.json')
+        credit=self.store.read(unit+'.task-credit.json')
+        invocation=self.store.read(unit+'.invocation.json')
+        self._invocation(invocation['invocation_id'])
+        if (set(proof)!={'owner','invocation_id','journal_revision','observation','progress_identity','progress_credit_assigned'} or
+                proof['progress_credit_assigned'] is not False or
+                set(accepted_intent)!={'owner','proof_digest','progress_identity','transition'} or
+                invocation['owner']!=owner or proof['owner']!=owner or
+                proof['invocation_id']!=invocation['invocation_id'] or
+                proof['observation']['selection']!=selection or
+                proof['observation']['contract_digest']!=self.contract_digest or
+                proof['progress_identity']!=identity or
+                task_progress_identity(proof['observation'])!=identity or
+                accepted_intent['owner']!=owner or
+                accepted_intent['proof_digest']!=digest(proof) or
+                accepted_intent['progress_identity']!=identity or
+                accepted_intent['transition']['observation']!=proof['observation'] or
+                digest(accepted_intent['transition']['before'])!=proof['observation']['checkpoint_sha256']):
+            raise ValueError('Historical task acceptance proof chain drift')
+        expected_acceptance={'owner':owner,'intent_digest':digest(accepted_intent),
+            'checkpoint_sha256':digest(accepted_intent['transition']['after']),
+            'progress_identity':identity,'progress_credit_assigned':False,'parent_accepted':False}
+        if acceptance!=expected_acceptance:
+            raise ValueError('Historical task acceptance completion drift')
+        before=credit_intent['before'];after=credit_intent['after']
+        if (set(credit_intent)!={'owner','acceptance_digest','expected_revision','before','after','progress_identity'} or
+                credit_intent['owner']!=owner or credit_intent['acceptance_digest']!=digest(acceptance) or
+                credit_intent['progress_identity']!=identity or
+                after!=credit_task(before,self.contract_digest,run_id=owner['run_id'],
+                    run_attempt=owner['run_attempt'],progress_receipt=identity) or
+                proof['journal_revision']!=credit_intent['expected_revision']):
+            raise ValueError('Historical task credit intent drift')
+        expected_credit={'owner':owner,'intent_digest':digest(credit_intent),
+            'journal_revision':credit['journal_revision'],'progress_identity':identity,
+            'progress_credit_assigned':True,'parent_accepted':False}
+        if credit!=expected_credit:raise ValueError('Historical task credit completion drift')
+        latest=self.journal.verify_history(credit_intent['expected_revision'],before)
+        if self.journal.verify_history(credit['journal_revision'],after)!=latest:
+            raise ValueError('Historical task journal changed during inspection')
+        last=before['attempts'][-1]
+        if last['status']!='finished' or (last['run_id'],last['run_attempt'])!=(owner['run_id'],owner['run_attempt']):
+            raise ValueError('Historical finished task attempt required')
+        reserved={**before,'attempts':before['attempts'][:-1]+[{**last,'status':'reserved','progress_receipt':None}]}
+        plan=launch_plan(reserved,self.contract_digest,run_id=owner['run_id'],
+                         run_attempt=owner['run_attempt'],session_id=owner['session_id'])
+        if plan['unit']!=unit or digest(plan)!=owner['plan_digest']:
+            raise ValueError('Historical task launch ownership drift')
+        native=copy.deepcopy(self.backend.observe_owned(plan,contract,owner,invocation['invocation_id']))
+        owned={k:native.get(k) for k in ('unit','active_state','cgroup_empty','ownership_verified')}
+        if 'execution_finished' in native:owned['execution_finished']=native['execution_finished']
+        if (native.get('invocation_id')!=invocation['invocation_id'] or
+                recovery_action(reserved,self.contract_digest,owned)!='reconcile_without_refund'):
+            raise ValueError('Historical stopped task ownership proof required')
+        expected_path=str(self.store.root/(unit+'.task-proof.json'))
+        closing_binding,state,by_id=gate._read()
+        if (by_id[selection['task_id']]['status']!='done' or
+                by_id[selection['task_id']].get('evidence')!=expected_path):
+            raise ValueError('Historical accepted task evidence identity drift')
+        # Evidence attribution and checkpoint equality use the same fresh
+        # closing observation under the credential lock. No external call
+        # intervenes between inspecting its task row and comparing its cut.
+        if (closing_binding,state)!=(binding,checkpoint) or self.journal.read()!=latest:
+            raise ValueError('Historical task attribution cut changed during inspection')
+        if self._workflow_retained_record_cut([owner])!=retained:
+            raise ValueError('Retained task records changed during provenance inspection')
+        return {'kind':'historical_workflow_task_provenance','owner':owner,
+                'invocation_id':invocation['invocation_id'],'native':native,
+                'task_id':selection['task_id'],'current_selection':selection,
+                'historical_observation':proof['observation'],'final_proof_verified':False,
+                'checkpoint_sha256':digest(checkpoint),
+                'proof_digest':digest(proof),'acceptance_digest':digest(acceptance),
+                'credit_digest':digest(credit),'journal_revision':latest[0],
+                'progress_identity':identity,'parent_accepted':False,'delivery_verified':False}
+
     def reconcile(self):
         """Wakeup/restart path: inspect and finish only, never submit or refund."""
         with self.store.lock():
@@ -180,6 +1422,7 @@ class PrivateController:
             owner = self.store.read('active-owner.json')
             if owner['contract_digest'] != self.contract_digest:
                 raise ValueError('Credential stream owned by another contract')
+            workflow = self._workflow_receipt(owner)
             revision, journal = self.journal.read()
             if not journal['attempts']:
                 raise ValueError('Missing reserved ownership history')
@@ -255,7 +1498,9 @@ class PrivateController:
                 # A trusted verifier reads the stopped candidate independently.
                 # Semantic receipts omit invocation IDs/time so identical output
                 # cannot repeatedly reset the no-progress counter.
-                evidence = self.verifier(contract, owner) if self.verifier is not None else None
+                # Frozen single-artifact proof cannot accept a graph parent.
+                # Workflow acceptance will use its enrolled task/parent contract.
+                evidence = self.verifier(contract, owner) if self.verifier is not None and workflow is None else None
                 if evidence is not None and (not isinstance(evidence, dict) or
                         evidence.get('contract_digest') != self.contract_digest):
                     raise ValueError('Verification evidence contract drift')

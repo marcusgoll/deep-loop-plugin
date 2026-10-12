@@ -92,6 +92,25 @@ class EnrollmentTests(unittest.TestCase):
         self.assertEqual(list(self.store.root.glob('*.enrollment-intent.json')),[])
         self.assertEqual(self.activations,[])
 
+    def test_unsupported_obligations_never_preflight_or_create_authority(self):
+        cases={'dependencies':[{'id':'required-native','boundary':'merge'}],
+               'required_checks':['required-native'],
+               'allowed_actions':['merge'],
+               'metadata':{'unsupported':'not silently ignored'}}
+        self.importer.preflight=lambda contract:self.fail('Unsupported contract reached host preflight')
+        for field,value in cases.items():
+            with self.subTest(field=field):
+                contract=copy.deepcopy(self.contract);contract[field]=value
+                key=digest(contract);self.journal.contract_digest=key
+                with self.assertRaisesRegex(ValueError,'Unsupported frozen contract fields'):
+                    self.importer.apply(contract,expected_digest=key,approval_ref='human')
+        self.assertEqual(list(self.store.root.glob('*.approval.json')),[])
+        self.assertEqual(list(self.store.root.glob('*.enrollment-intent.json')),[])
+        self.assertEqual(list(self.store.root.glob('*.window.json')),[])
+        self.assertEqual(self.activations,[])
+        self.assertEqual(self.backend.submissions,[])
+        self.assertIsNone(self.journal.state)
+
     def test_foreign_contract_partial_intent_blocks_new_enrollment(self):
         self.store.create('a'*64+'.enrollment-intent.json',{'contract_digest':'a'*64})
         self.importer.preflight=lambda contract:self.fail('Must not preflight after partial enrollment')

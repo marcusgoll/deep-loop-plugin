@@ -261,3 +261,323 @@ only the exact contract, including `runtime.bundle_digest` and
 or execution window requires inspection. Uncertain results never authorize a
 retry or reset. Source fixtures do not establish actual host activation, human
 approval, live inference or disposable delivery.
+
+
+Outcome revocation uses `PrivateController.revoke` from a trusted root operator
+with an externally authenticated approval reference and reason. This is a source
+API, with no automatic enrollment or installed operator entrypoint. The immutable
+revocation intent immediately denies subsequent dispatch, wakeup and provider
+operations; a partial intent also denies them. Revocation authenticates the
+persisted owner, plan and retained native invocation before signaling that unit's
+control group. It tries SIGTERM, then SIGKILL if required, retaining native identity
+and requiring fresh ended/empty observation before releasing ownership.
+
+Cleanup finishes the existing charged reservation without accepting output,
+refunding budget or deleting candidate edits. Interrupted cleanup resumes the
+same immutable request. Unknown ownership, missing native evidence or changed
+terminal receipts block cleanup completion. Revocation is serialized with the
+credential-stream lock; an already-issued provider request can have an uncertain
+result and is never undone or replayed by cleanup. No new request is allowed after
+the protected intent exists. Source fixtures do not establish deployment of these
+changes or full A01-A11 qualification.
+
+
+The protected workflow gate now offers an observation-only `task_acceptance`
+reader. It checks the selected approved task, current bound proof for that task
+and its ancestors, prerequisite completion, and an unchanged checkpoint after
+inspection. Cancelled or blocked tasks cannot produce an observation. It does
+not change task status or accept the parent.
+
+`task_progress_identity` assigns one identity per immutable approved task
+selection. Receipt reruns, checkpoint changes and native invocation changes are
+provenance and cannot create a second progress credit. Before controller use,
+current proof and exact stopped-attempt ownership must be validated, credits
+must be deduplicated across the entire charged history, and provenance must be
+retained separately. Supported enrollment, checkpoint mutation and final parent
+acceptance remain outstanding; these readers are not wired into live execution.
+
+
+`PrivateController.accept_workflow_task` now exposes an explicit source-only
+acceptance transaction. It requires recorded current proof for the latest
+finished owned attempt, persists an immutable transition intent, publishes the
+helper-owned task transition, and independently reads back a complete protected
+receipt. A pending or malformed completion fences subsequent dispatch. Process
+interruption after intent or checkpoint publication can resume the same
+transaction without another submission or charge. Acceptance currently assigns
+no budget progress credit and never accepts the parent; the production worker
+and supported enrollment do not invoke this transaction yet.
+
+
+Workflow accounting has an explicit schema-2 journal with append-only
+`task_credits`. A credit targets the latest finished attempt and a unique
+approved task-progress identity, preserving all attempt records and cumulative
+limits. The Git journal admits only the exact credit transition. Schema-1 pilot
+history cannot be implicitly upgraded or credited. These accounting primitives
+still require controller authentication of durable task acceptance and recovery
+around uncertain publication; they are not connected to the production worker.
+
+
+The explicit `credit_workflow_task` API now authenticates current stopped
+ownership, the durable task-acceptance receipt, and the still-accepted checkpoint
+before appending credit. Its immutable credit intent supports exact-before or
+exact-after recovery when Git publication is uncertain. Pending credit blocks
+new dispatch. Completed credit also requires an exact historical Git revision,
+ancestry and preserved attempt/credit prefixes; a substituted revision or journal
+rollback cannot clear the fence. Worker wakeup integration remains outstanding.
+
+
+Schema-2 wakeups now recover one pending acceptance transition or derive one
+credit transaction from durable task acceptance, then return without dispatch.
+Credit-aware retry accounting preserves cumulative limits. The source worker
+recognizes both recovery results as continuing states. Fresh task acceptance
+still requires a trusted explicit call; production graph construction, supported
+enrollment and native end-to-end qualification remain outstanding.
+
+
+`WorkflowBindingEnrollment` stages an exact approved graph binding for an
+already-approved empty schema-2 journal. The checkpoint must reside directly in
+the private controller store with its complete ancestry revalidated. Exact graph
+approval, contract/mapping validation, durable intent and independent readback
+precede the nonactivating completion. A partial binding cannot select tasks.
+This API does not open an execution window, enable an outcome, activate a timer,
+or replace the frozen pilot enrollment operator. Production graph construction
+and fully unattended verifier execution remain outstanding.
+
+
+The native-verifier primitive freezes one declared bound command from an exact
+stopped workflow attempt. It runs as the private nonroot account with a cleared
+environment, read-only candidate inputs, disjoint writable output directories,
+network and io_uring syscall denial, and an immutable execution deadline.
+Candidate inputs must be private regular files with exactly one hard link.
+Protected intent and shared-stream ownership precede submission. Interrupted
+submission can inspect the same native unit; it cannot replay dispatch.
+
+Controller cleanup requires the exact invocation to be ended and empty before
+persisting cleanup-only completion and releasing its own stream fence. An
+isolated Linux fixture exercised actual native submission, recovery, fencing and
+cleanup without a model call. A failed namespace setup was also recovered and
+cleaned without replay. These fixtures leave the task unaccepted and preserve
+charged history. Interrupted preparation before stream-marker publication also has a cleanup
+path: exact protected intent, absent submission/invocation records and an empty
+private account establish that the protected dispatch sequence was never
+crossed. Durable preparation-only completion releases the orphan fence, rejects
+later dispatch history and prevents future submission of that closed intent.
+An isolated Linux fixture exercised this fault and exact recovery while keeping
+the checkpoint and charged journal unchanged. Automatic worker wiring remains
+outstanding; this primitive has no CLI or automatic worker entry point and is
+not activated in production.
+
+
+`NativeResult` seals an exact successful native invocation into protected state.
+Both observations must report systemd success, exit zero and ended/empty
+ownership; a zero main-process exit cannot hide a unit timeout. Native wall and
+monotonic timestamps, declared argv/cwd, current bound inputs, artifact hashes and
+bounded capture hashes/explicitly truncated previews bind the saved result.
+Authority and the immutable window are checked before publication. Sealing keeps
+the verifier fence and grants no checkpoint check, task acceptance or credit.
+An isolated Linux fixture exercised actual sealing and exact retry with 89
+matching source pins and independently read back unchanged checkpoint/charges.
+`NativePublication` prepares a protected bound receipt and immutable publication
+intent, then applies or adopts only its exact checkpoint transition. Saved-byte
+receipt hashing and fresh native, contract, artifact and charged-journal checks
+fence substitution. Recovery permits the saved after-checkpoint while requiring
+all other original execution-plan fields to remain unchanged. Active authority
+and the original window are checked at checkpoint replacement/adoption and
+completion persistence. Publication keeps the verifier fence; owned cleanup
+remains separate and task acceptance/credit are not implied.
+
+A model-free Linux fixture exercised the actual native backend, isolated pinned
+helper and atomic checkpoint writer. An injected completion-persistence error
+after the checkpoint write recovered without another execution. Only the selected
+check changed; tasks and charged history stayed unchanged. A second fixture
+terminated the publication child with SIGKILL after checkpoint publication and
+recovered through reconstructed adapters in the surviving process, using the
+same native invocation and original execution window. An initial native
+observation race was recovered without redispatch before reaching the fault.
+Fresh-interpreter, host-reboot and automatic worker recovery, and parent
+acceptance remain outstanding.
+
+
+Worker construction now supplies the trusted native verifier adapter. Wakeups
+recover an existing verifier stream before task selection, advancing receipt
+preparation, checkpoint publication and cleanup in separate wakes. A running
+verifier waits; a failed verifier is cleaned and stops the loop. Cleanup intent
+has priority, and no recovery wake also dispatches a model attempt. Routing tests
+cover this source integration. A disposable native fixture also exercised
+`run`/`tick` in three fresh isolated interpreters, recovering preparation,
+publication and cleanup of the same verifier stream. Each wake preserved tasks
+and charged history; only the selected check changed. Installed systemd
+supervisor behavior, orphan preparation recovery and parent completion remain
+unqualified. A later fixture qualifies bounded automatic verifier initiation
+and task acceptance/credit as described below. Nothing is promoted or activated by these source changes.
+
+
+After recovery, a wake may advance the latest finished enrolled task attempt.
+It selects the next verifier without current proof, preserving the full plan's
+index. An already-run verifier with stale or failed proof blocks instead of
+replaying. Once proofs pass, separate wakes record task proof, accept the task,
+and recover its credit. Proof, acceptance, checkpoint and credit mutation
+boundaries recheck active authority and the original execution window; remote
+journal push has a final guard after local Git preparation. Routing, actual
+checkpoint and bare-Git expiry tests cover this source path. A disposable model-free host fixture exercised automatic verifier initiation,
+proof publication, cleanup, task proof, acceptance and credit through seven
+fresh isolated worker interpreters. Independent host readbacks verified all
+93 source pins, exact publication/acceptance/credit chains, one credit and
+unchanged original 600/1200 charges. Only the selected task/check changed;
+fences were removed and production stayed inactive. The fixture substitutes
+literal initial execution and rejects further model dispatch. It does not
+qualify live model execution, the installed supervisor or parent completion.
+
+Repeated controller recovery/advance and credit calls on the completed native
+fixture preserved the exact checkpoint, journal revision and control-file
+hashes with one credit. Independent actual-host readbacks confirmed this
+primitive idempotence; full post-credit worker scheduling remains unqualified.
+
+When the verifier stream marker is absent, a wake scans protected preparation
+intents under the credential lock. It closes only one own preparation with
+no submission or invocation history and a fresh trusted native absence proof.
+Ambiguity, foreign ownership, plan drift or submitted-but-unowned history
+blocks without replay. Cleanup is a separate wake. Source tests and independent
+review qualify the routing; A disposable native fixture also exercised
+three fresh worker interpreters: injected failure before the stream marker,
+preparation-only cleanup, then stale-proof replay blocking. Both independent
+host readbacks verified 93 pins, exact absence/cleanup hashes, unchanged
+checkpoint and journal charges, no verifier submission or task acceptance,
+and inactive production. The installed supervisor and process-crash variant
+remain unqualified.
+
+Supervisor qualification accepts a constrained trusted qualification-unit name
+while retaining its canonical production default. Invocation identity and all
+three native timeouts are checked against that exact unit. A disposable runtime
+service/timer exercised actual `main`: timer-driven preparation cleanup, then
+stale-proof blocking and terminal self-stop. Both host reviews verified 93
+pins, exact runtime units/wrapper, 45/5/5 limits, unchanged checkpoint/charges
+and native manager journal records for both invocation IDs. The fixture uses
+a one-second timer cadence and literal initial execution, blocks model dispatch
+and leaves production inactive. Production installation, reboot, full workflow
+completion and parent acceptance remain unqualified.
+
+The read-only outcome observer requires every approved task done and every
+mapped blocking verifier to have current integrated proof, then inspects each
+task and rejects checkpoint drift. Real-check tests cover missing proof, source
+drift and concurrent checkpoint changes. It grants neither parent acceptance
+nor delivery authority. Raw task evidence remains input for historical stopped
+ownership, durable acceptance and credit authentication, which are not yet
+integrated. Final quiescent proof, parent transition and endpoint readback
+remain required before workflow completion.
+
+Historical task authentication binds protected ownership, proof, acceptance
+and credit records, validates the exact credit transition against retained
+Git ancestry, reconstructs the charged launch, and requires fresh ended/empty
+native ownership plus current accepted-task evidence. The aggregate observer
+requires exactly one attributed credit per approved task and a freshly unchanged
+whole proof/journal cut after inspection. Tests exercise earlier histories after
+later attempts and all three task acceptance chains. Both source reviews passed;
+actual native/Git multi-task qualification remains pending. These read-only
+observations do not grant parent acceptance or delivery.
+
+
+Native receipt construction reads the complete contract structurally to derive
+its semantic hash, while sealing independently authenticates the selected
+verifier inputs and artifacts. Future task outputs may be absent until their
+own task runs. A real-helper regression covers that case and rejects selected
+source drift. The original three-task native fixture failed before receipt
+publication; recovery of its retained invocation later stopped at the original
+immutable deadline with one charged attempt and no task credit. That fixture
+remains failed, and corrected-source end-to-end native qualification is pending.
+
+
+A separate corrected-source fixture completed three literal tasks against actual
+native units and append-only Git, retaining exactly three finished charged
+attempts (1800 model/3600 active seconds), three task credits and the original
+window. Twenty successful fresh worker wakes plus a fresh outcome observer
+validated the histories and current task-specific proof. Two independent host
+readbacks confirmed 93 source pins, all retained native generations ended/empty,
+no owner/verifier fences, and production inactive with its timer disabled.
+A transient observation failure after first verifier submission required exact
+owned-invocation recovery and manual continuation; this is not evidence of an
+intervention-free full workflow. Parent acceptance and delivery remain false.
+
+
+The aggregate workflow observer now requires a fresh root-observed empty private
+account before inspecting final proof and again at the final cut, with the same
+nonroot UID. Stopped named units alone are insufficient. Populated accounts,
+unavailable probes and identity drift reject the observation without changing
+checkpoint or journal. This guard contributes to final quiescence; full helper
+review validation, stale-verifier rerun routing and parent transition remain
+required. It grants no parent acceptance or future process exclusion.
+
+
+`validation_issues` exposes the existing helper's full modern-schema validation
+as a read-only API; the CLI delegates to it while retaining legacy handling.
+The pinned proxy exposes that exact operation. `final_review_proof` requires
+current whole-task proof plus full review validation, then rechecks the complete
+cut. Named checks, debt, blockers, schema/UI obligations and unfinished tasks
+remain gates. Frozen helper snapshots are unchanged; missing API/dependencies
+fail closed. Final verifier rerun routing and durable parent acceptance remain
+unimplemented.
+
+
+Historical provenance now has a distinct read-only API authenticating protected
+acceptance/credit records, Git ancestry and stopped native ownership. It keeps
+current binding/evidence attribution checks but explicitly makes no final-proof
+claim. The compatibility history reader still requires current task proof and
+a matching checkpoint/journal cut; outcome aggregation keeps that stricter
+reader. Candidate drift can therefore preserve provenance while blocking final
+acceptance. Dynamic candidate snapshots require a new explicitly enrolled
+source policy; existing frozen contracts remain unchanged.
+
+
+Candidate-source preparation: `candidate_snapshot.py` captures a bounded complete Linux candidate inventory without writes or acceptance. Its explicit version-one policy binds the canonical root, allowed owners and entry/byte/depth limits; it permits no exclusions or partial scope. Hidden files, empty directories, modes, UID/GID, additions and deletions contribute to identity. Descriptor-relative reads reject aliases, hardlinks, special files and mount-ID changes, including same-filesystem bind mounts; missing Linux fdinfo fails closed. Two inventory passes detect observed mutations. Callers must quiesce writers and expose candidate inputs read-only throughout verification; matching snapshots do not establish historical immutability. This primitive is not yet wired into enrollment, native plans/results/receipts or final acceptance. Existing frozen bindings and generic bound semantics remain unchanged. Ten focused inventory tests pass; Mac tests explicitly substitute the mount reader. Actual Linux mount and bind-mount qualification remains pending. Both independent source reviews passed.
+
+
+Version-two workflow candidate binding is explicit source preparation. Its exact
+schema adds `schema: 2`, `candidate_source_policy` and `artifact_output_root` to
+the existing binding. Enrollment still requires the exact authenticated binding
+digest and empty inactive workflow journal; there is no recovery migration.
+The complete inventory policy permits no exclusions. Immutable verifier code,
+environment and source-manifest inputs must live outside the mutable candidate;
+artifacts must live under the separately approved disjoint output root.
+
+Owned plans, native results and protected receipt rows retain the candidate
+snapshot. Dispatch, sealing, checkpoint publication and task credit require fresh
+comparisons; authority and original window are checked after potentially long
+recaptures. Ownership/cleanup reconstructs the retained envelope without requiring
+current source truth. A dependent task refreshes ancestor verifier receipts under
+its stopped owner; the final task refreshes all blocking verifiers before credit.
+Old task credits remain immutable, and an already-run verifier prefix never
+replays. Candidate-aware proof is supplementary: generic bound verification and
+legacy bindings retain their exact semantics. Source review and local tests do
+not establish enrollment, actual native version-two integration or parent acceptance.
+
+### Explicit parent review acceptance
+
+A new exact workflow binding version adds `schema: 3` and
+`parent_acceptance: {"kind": "review_to_ship", "approval_ref": "<attributable approval>"}`
+to the complete version-two candidate binding. Enrollment still requires its
+exact authenticated digest and an empty inactive journal. Existing bindings and
+frozen helper snapshots never acquire this capability through recovery.
+
+The worker prepares parent acceptance only after every approved task is done.
+It authenticates each stopped attempt and durable credit, all current candidate
+receipts, full helper review obligations, the exact journal cut and account-wide
+quiescence. A protected immutable intent records the checkpoint preimage and a
+postimage changing only `phase` to `SHIP`. A later wake recognizes only those two
+images and recomputes current review proof. The changed checkpoint hashes are
+translated only in current-proof fields; historical provenance remains exact.
+Authority, the original execution window, candidate identity, journal and
+quiescence are rechecked before checkpoint and completion publication.
+
+Pending parent acceptance fences task/model/verifier mutation. After acceptance,
+the worker returns `workflow_delivery_pending`; it neither dispatches another
+attempt nor uses frozen literal-artifact delivery for the parent. Acceptance here
+means integrated review acceptance: `active` stays true, `complete` stays false,
+and delivery is unchanged. General workflow delivery and final SHIP completion
+remain required. Source and deterministic interruption tests do not establish
+native parent qualification or authorize live enrollment.
+
+The earlier 95-pin candidate fixture now has three literal native tasks, refreshed
+ancestor/final verifier receipts and three historical credits, independently read
+back. Its full-helper audit correctly rejects missing schema-three delivery and
+schema-four UI classification metadata. That frozen fixture is retained as-is;
+its mapped-check success is not full parent review proof.
