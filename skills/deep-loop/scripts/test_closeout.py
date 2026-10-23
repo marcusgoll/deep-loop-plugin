@@ -71,6 +71,27 @@ class CloseoutChecks(unittest.TestCase):
         (self.archive / 'closeout-evidence').write_text('corrupt')
         self.cli('verify-archive', '--archive', str(self.archive), ok=False)
 
+    def test_finalized_plan_drift_rejected(self):
+        self.preserve()
+        self.cli('retire-checkpoint', '--archive', str(self.archive))
+        evidence = self.base / 'readback.txt'
+        evidence.write_text('Source removed; archive retained', encoding='utf-8')
+        self.cli('finalize-archive', '--archive', str(self.archive), '--evidence', str(evidence))
+        plan = self.archive / 'checkpoint/plan.md'
+        original = plan.read_bytes()
+        plan.write_bytes(b'Changed accepted scope')
+        self.cli('verify-archive', '--archive', str(self.archive), ok=False)
+        plan.write_bytes(original)
+        self.cli('verify-archive', '--archive', str(self.archive))
+        # Legacy receipts bind the original snapshot plan as a fail-closed fallback.
+        receipt = self.archive / 'final.json'
+        final = json.loads(receipt.read_text(encoding='utf-8'))
+        final.pop('plan', None)
+        receipt.write_text(json.dumps(final), encoding='utf-8')
+        self.cli('verify-archive', '--archive', str(self.archive))
+        plan.write_bytes(b'Changed legacy scope')
+        self.cli('verify-archive', '--archive', str(self.archive), ok=False)
+
     def test_planned_closeout_waits_until_preserved_delivery(self):
         contract_path = self.base / 'contract.json'
         contract = {'name': 'Archive recovery', 'scope': 'Saved export', 'status': 'NOT_RUN',

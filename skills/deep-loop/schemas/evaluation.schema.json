@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deep Loop evaluation results",
+  "type": "object",
+  "required": ["format", "total", "passed", "pass_rate", "overall", "scenarios"],
+  "properties": {
+    "format": {"const": "deep-loop-evaluation-v1"},
+    "total": {"type": "integer", "minimum": 1},
+    "passed": {"type": "integer", "minimum": 0},
+    "pass_rate": {"type": "number", "minimum": 0, "maximum": 1},
+    "overall": {"enum": ["passed", "not_proven"]},
+    "scenarios": {"type": "array", "minItems": 1}
+  }
+}

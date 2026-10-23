@@ -11,6 +11,255 @@ import deep_loop
 HELPER = Path(__file__).with_name('deep_loop.py')
 
 
+class SessionWriterTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.folder = self.root / '.deep-writer01'
+        self.folder.mkdir()
+        self.state = {'schemaVersion': 2, 'sessionId': 'writer01', 'task': 'Keep evidence',
+                      'active': True, 'complete': False, 'phase': 'SHIP',
+                      'checks': [{'name': 'Acceptance', 'status': 'passed', 'evidence': 'saved proof'}],
+                      'delivery': {'endpoint': 'local', 'status': 'verified', 'evidence': 'readback'}}
+        deep_loop.write_json(self.folder / 'state.json', self.state)
+        (self.folder / 'plan.md').write_text('Authorized scope')
+
+    def run_cli(self, *args):
+        return subprocess.run([sys.executable, '-B', str(HELPER), '--root', str(self.root),
+                               *args], capture_output=True, text=True, timeout=20)
+
+    def child(self, code):
+        process = subprocess.Popen([sys.executable, '-B', '-c', code, str(self.folder)],
+                                   cwd=HELPER.parent, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
+        self.addCleanup(cleanup)
+        for line in process.stdout:
+            if line.strip() == 'ready':
+                break
+        else:
+            self.fail('Child did not reach the mutation barrier: ' + process.stderr.read())
+        return process
+
+    def test_competing_process_rejected_and_other_session_independent(self):
+        holder = self.child("import deep_loop as d,sys; from pathlib import Path\n"
+                            "with d.session_write(Path(sys.argv[1])):\n"
+                            " print('ready',flush=True); input()\n")
+        before = (self.folder / 'state.json').read_bytes()
+        result = self.run_cli('complete', '--path', str(self.folder))
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Session writer conflict', result.stderr)
+        self.assertEqual((self.folder / 'state.json').read_bytes(), before)
+        for command in ('bind-contract', 'refresh-contract', 'preserve'):
+            options = ('--destination', str(self.root / 'archive')) if command == 'preserve' else (
+                '--contract', str(self.root / 'missing-contract'), '--endpoint', 'local')
+            result = self.run_cli(command, '--path', str(self.folder), *options)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn('Session writer conflict', result.stderr)
+        other = self.root / '.deep-writer02'; other.mkdir()
+        deep_loop.write_json(other / 'state.json', dict(self.state, sessionId='writer02'))
+        (other / 'plan.md').write_text('Independent scope')
+        self.assertEqual(self.run_cli('complete', '--path', str(other)).returncode, 0)
+        holder.stdin.write('\n'); holder.stdin.flush()
+        self.assertEqual(holder.wait(timeout=10), 0)
+        self.assertEqual(self.run_cli('complete', '--path', str(self.folder)).returncode, 0)
+
+    def test_stale_revision_rejected_without_rewriting_evidence(self):
+        revision = deep_loop.checkpoint_revision(self.folder)
+        self.assertEqual(self.run_cli('complete', '--path', str(self.folder),
+                                     '--expected-revision', revision).returncode, 0)
+        before = (self.folder / 'state.json').read_bytes()
+        result = self.run_cli('complete', '--path', str(self.folder), '--expected-revision', revision)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('revision', result.stderr)
+        self.assertEqual((self.folder / 'state.json').read_bytes(), before)
+        self.assertEqual(deep_loop.read_json(self.folder / 'state.json')['checks'], self.state['checks'])
+
+    def test_interruption_after_replace_recovers_committed_state(self):
+        process = self.child("import deep_loop as d,sys,argparse; from pathlib import Path\n"
+                             "original=d.os.replace\n"
+                             "def interrupt(*args):\n original(*args); print('ready',flush=True); input()\n"
+                             "d.os.replace=interrupt\n"
+                             "d.complete_session(argparse.Namespace(root=str(Path(sys.argv[1]).parent),"
+                             "path=sys.argv[1],session=None))\n")
+        process.kill(); process.wait(timeout=10)
+        closed = deep_loop.read_json(self.folder / 'state.json')
+        self.assertEqual((closed['phase'], closed['active'], closed['complete']), ('COMPLETE', False, True))
+        self.assertEqual(closed['checks'], self.state['checks'])
+        self.assertEqual(self.run_cli('recovery-report', '--path', str(self.folder), '--json').returncode, 0)
+        self.assertEqual(self.run_cli('complete', '--path', str(self.folder)).returncode, 0)
+
+    def test_initialization_refuses_live_session_lock(self):
+        holder = self.child("import deep_loop as d,sys; from pathlib import Path\n"
+                            "with d.session_write(Path(sys.argv[1])):\n"
+                            " print('ready',flush=True); input()\n")
+        before = (self.folder / 'state.json').read_bytes()
+        result = self.run_cli('init', '--session', 'writer01', '--task', 'Must not overwrite')
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Session writer conflict', result.stderr)
+        self.assertEqual((self.folder / 'state.json').read_bytes(), before)
+
+    def test_process_interruption_before_replace_preserves_state_and_releases_lock(self):
+        before = (self.folder / 'state.json').read_bytes()
+        process = self.child("import deep_loop as d,sys; from pathlib import Path\n"
+                             "def interrupt(*args):\n print('ready',flush=True); input()\n"
+                             "d.os.replace=interrupt\n"
+                             "with d.session_write(Path(sys.argv[1])):\n"
+                             " d.write_json(Path(sys.argv[1])/'state.json',{'lost':'must not replace'})\n")
+        self.assertEqual(self.run_cli('complete', '--path', str(self.folder)).returncode, 1)
+        process.kill(); process.wait(timeout=10)
+        self.assertEqual((self.folder / 'state.json').read_bytes(), before)
+        self.assertEqual(len(list(self.folder.glob('state.json.*.tmp'))), 1)
+        self.assertEqual(self.run_cli('recovery-report', '--path', str(self.folder), '--json').returncode, 0)
+        self.assertEqual(self.run_cli('complete', '--path', str(self.folder),
+                                     '--expected-revision', deep_loop.checkpoint_revision(self.folder)).returncode, 0)
+        self.assertEqual(len(list(self.folder.glob('state.json.*.tmp'))), 1)
+
+    def test_noncooperative_state_and_plan_drift_rejected_before_replace(self):
+        for filename in ('state.json', 'plan.md'):
+            self.setUp()
+            process = self.child("import deep_loop as d,sys; from pathlib import Path\n"
+                                 "p=Path(sys.argv[1])\n"
+                                 "with d.session_write(p):\n"
+                                 " state=d.read_json(p/'state.json')\n"
+                                 " print('ready',flush=True); input()\n"
+                                 " state['task']='stale'; d.write_json(p/'state.json',state)\n")
+            target = self.folder / filename
+            target.write_text(json.dumps(dict(self.state, task='new writer')) if filename == 'state.json' else 'New scope')
+            before = (self.folder / 'state.json').read_bytes()
+            process.stdin.write('\n'); process.stdin.flush()
+            _, error = process.communicate(timeout=10)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn('Checkpoint changed', error)
+            self.assertEqual((self.folder / 'state.json').read_bytes(), before)
+
+    def test_post_replace_drift_is_not_adopted_as_the_new_revision(self):
+        for filename in ('state.json', 'plan.md'):
+            self.setUp()
+            process = self.child("import deep_loop as d,sys; from pathlib import Path\n"
+                                 "p=Path(sys.argv[1]); original=d.os.replace\n"
+                                 "def barrier(*args):\n original(*args); print('ready',flush=True); input()\n"
+                                 "d.os.replace=barrier\n"
+                                 "with d.session_write(p):\n"
+                                 " state=d.read_json(p/'state.json'); state['task']='intended'\n"
+                                 " d.write_json(p/'state.json',state)\n")
+            target = self.folder / filename
+            target.write_text(json.dumps(dict(self.state, task='intervening writer'))
+                              if filename == 'state.json' else 'Intervening scope')
+            before = (self.folder / 'state.json').read_bytes()
+            process.stdin.write('\n'); process.stdin.flush()
+            _, error = process.communicate(timeout=10)
+            self.assertNotEqual(process.returncode, 0)
+            self.assertIn('Checkpoint changed', error)
+            self.assertEqual((self.folder / 'state.json').read_bytes(), before)
+
+    def test_nested_locks_keep_both_state_guards_active(self):
+        other = self.root / '.deep-writer02'; other.mkdir()
+        deep_loop.write_json(other / 'state.json', dict(self.state, sessionId='writer02'))
+        with deep_loop.session_write(self.folder), deep_loop.session_write(other):
+            changed = dict(self.state, task='Intervening writer')
+            (self.folder / 'state.json').write_text(json.dumps(changed))
+            with self.assertRaisesRegex(ValueError, 'Checkpoint changed'):
+                deep_loop.write_json(self.folder / 'state.json', self.state)
+            self.assertEqual(deep_loop.read_json(self.folder / 'state.json'), changed)
+
+    def retired_archive(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        archive = Path(temporary.name) / 'archive'
+        deep_loop.write_json(self.folder / 'state.json', dict(self.state, active=False))
+        result = self.run_cli('preserve', '--path', str(self.folder), '--destination', str(archive), '--checkpoint-only')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        result = self.run_cli('retire-checkpoint', '--archive', str(archive))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = Path(temporary.name) / 'readback.txt'; evidence.write_text('Source retired and archive inspected')
+        return archive, evidence
+
+    def finalizer(self, archive, evidence):
+        return self.child("import deep_loop as d,sys,argparse; from pathlib import Path\n"
+                          "original=d.shutil.copy2\n"
+                          "def barrier(*args,**kwargs):\n original(*args,**kwargs); print('ready',flush=True); input()\n"
+                          "d.shutil.copy2=barrier\n"
+                          f"d.finalize_archive(argparse.Namespace(root=str(Path(sys.argv[1]).parent),archive={str(archive)!r},evidence={str(evidence)!r}))\n")
+
+    def test_finalization_excludes_source_recreation_and_archive_mutation(self):
+        archive, evidence = self.retired_archive()
+        process = self.finalizer(archive, evidence)
+        for args in (('init', '--session', 'writer01', '--task', 'Competing recreation'),
+                     ('complete', '--path', str(archive / 'checkpoint'))):
+            result = self.run_cli(*args)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn('Session writer conflict', result.stderr)
+        self.assertFalse(self.folder.exists())
+        process.stdin.write('\n'); process.stdin.flush()
+        _, error = process.communicate(timeout=10)
+        self.assertEqual(process.returncode, 0, error)
+        self.assertTrue(deep_loop.read_json(archive / 'checkpoint/state.json')['complete'])
+        self.assertEqual(self.run_cli('verify-archive', '--archive', str(archive)).returncode, 0)
+
+    def test_interrupted_finalization_releases_both_locks_and_recovers(self):
+        archive, evidence = self.retired_archive()
+        process = self.finalizer(archive, evidence)
+        self.assertEqual(self.run_cli('init', '--session', 'writer01', '--task', 'Competing recreation').returncode, 1)
+        process.kill(); process.wait(timeout=10)
+        self.assertFalse(self.folder.exists())
+        self.assertFalse(deep_loop.read_json(archive / 'checkpoint/state.json')['complete'])
+        result = self.run_cli('finalize-archive', '--archive', str(archive), '--evidence', str(evidence))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(deep_loop.read_json(archive / 'checkpoint/state.json')['complete'])
+        self.assertEqual(self.run_cli('init', '--session', 'writer01', '--task', 'Later authorized session').returncode, 0)
+
+    def test_finalization_preserves_removed_checkout_compatibility(self):
+        archive, evidence = self.retired_archive()
+        deep_loop.shutil.rmtree(self.root)
+        result = self.run_cli('finalize-archive', '--archive', str(archive), '--evidence', str(evidence))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.root.exists())
+        self.assertTrue(deep_loop.read_json(archive / 'checkpoint/state.json')['complete'])
+
+    def test_final_receipt_does_not_adopt_late_state_drift(self):
+        archive, evidence = self.retired_archive()
+        state_path = archive / 'checkpoint/state.json'
+        process = self.child("import deep_loop as d,sys,argparse; from pathlib import Path\n"
+                             "original=d.file_manifest; fired=False\n"
+                             "def barrier(path):\n"
+                             " global fired\n"
+                             f" if not fired and Path(path).resolve()==Path({str(state_path)!r}).resolve() and d.read_json(path).get('complete'):\n"
+                             "  fired=True; print('ready',flush=True); input()\n"
+                             " return original(path)\n"
+                             "d.file_manifest=barrier\n"
+                             f"d.finalize_archive(argparse.Namespace(root=str(Path(sys.argv[1]).parent),archive={str(archive)!r},evidence={str(evidence)!r}))\n")
+        changed = deep_loop.read_json(state_path); changed['phase'] = 'CORRUPT'
+        state_path.write_text(json.dumps(changed))
+        process.stdin.write('\n'); process.stdin.flush()
+        _, error = process.communicate(timeout=10)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn('Checkpoint changed', error)
+        self.assertFalse((archive / 'final.json').exists())
+        self.assertEqual(deep_loop.read_json(state_path), changed)
+
+    def test_final_readback_rejects_late_plan_drift(self):
+        archive, evidence = self.retired_archive()
+        process = self.child("import deep_loop as d,sys,argparse; from pathlib import Path\n"
+                             "original=d.verify_archive\n"
+                             "def barrier(path,*args,**kwargs):\n"
+                             " result=original(path,*args,**kwargs)\n"
+                             " if (Path(path)/'final.json').exists():\n"
+                             "  print('ready',flush=True); input()\n"
+                             " return result\n"
+                             "d.verify_archive=barrier\n"
+                             f"d.finalize_archive(argparse.Namespace(root=str(Path(sys.argv[1]).parent),archive={str(archive)!r},evidence={str(evidence)!r}))\n")
+        plan = archive / 'checkpoint/plan.md'; plan.write_text('Intervening scope')
+        process.stdin.write('\n'); process.stdin.flush()
+        _, error = process.communicate(timeout=10)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn('Checkpoint changed', error)
+        self.assertEqual(plan.read_text(), 'Intervening scope')
+
+
 class DeliveryChecks(unittest.TestCase):
     def test_schema_three_requires_delivery_authority_and_branch_disposition(self):
         with tempfile.TemporaryDirectory() as temp:

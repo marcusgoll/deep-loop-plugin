@@ -1,6 +1,6 @@
 # Portable helper usage and provisioning
 
-The current package is the reviewed v0.5.9 Codex snapshot; its public version update is proposed for review. The portable commands below replace the author-specific Windows installation paths in SKILL.md and its references. They invoke the same helper with the same acceptance and authority requirements; they do not waive prerequisites or approve execution.
+The current package is the v0.6.2 Codex snapshot from the verified local installation. The portable commands below replace the author-specific Windows installation paths in SKILL.md and its references. They invoke the same helper with the same acceptance and authority requirements; they do not waive prerequisites or approve execution.
 
 From the repository root, inspect commands without installing:
 
@@ -31,7 +31,7 @@ This repository distributes the Deep Loop snapshot, not the separately maintaine
 
 Deep Loop's helper resolves validator dependencies from DEEP_LOOP_SKILLS_ROOT when explicitly set; otherwise it tries the adjacent skills directory and the skills directory under CODEX_HOME (default ~/.codex). The harness's to-spec fixture separately looks under ~/.agents/skills/to-spec. The source-reader procedure uses the discovered skill-optimization installation path. Obtain these skills through your existing approved provisioning, not from an assumed path in this repo.
 
-If a required dependency is unavailable, the affected source-reading, bound-contract or full-package-verification step is blocked. The maintainer's passing receipts establish checks in the recorded provisioned environment, not a successful clean-install experience for an unprovisioned public checkout. Do not report partial checks as the full 16-gate pass.
+If a required dependency is unavailable, the affected source-reading, bound-contract or full-package-verification step is blocked. The maintainer's passing receipts establish checks in the recorded provisioned environment, not a successful clean-install experience for an unprovisioned public checkout. Do not report partial checks as the full package pass.
 
 In a provisioned environment, the existing full-check entrypoint is:
 
@@ -41,3 +41,9 @@ python3 skills/deep-loop/scripts/verify_skill.py check-summary --output /path/to
 ```
 
 Keep receipts outside skills/deep-loop to avoid changing the package being checked. Review the recorded skips and environment limits. Running these fixture checks does not enroll an unattended worker, install the skill, or authorize delivery.
+
+## Separate controller app
+
+The skill does not contain the Deep Loop Controller runtime. Controller use requires a separately provisioned app and explicit selection. Personal executable paths in the integration guide describe the maintainer installation. Discover your own app path and verify its version before use. A public app distribution is not part of this update.
+
+The JSON schemas describe record structure. The CLI validators also enforce path rules, cross-field constraints and evidence integrity. A schema pass alone does not establish executable inputs, valid proof or accepted results.
