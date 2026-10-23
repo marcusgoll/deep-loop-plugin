@@ -6,4 +6,4 @@ The full package check uses scripts/verify_skill.py check. On 2026-10-23, all 26
 
 The legacy archive and root license remain unchanged from the refreshed repository baseline. The skill contains no controller runtime, controller service unit or controller tests. Its integration guide requires a separately provisioned app.
 
-Package checks do not prove live model execution, Linux controller isolation, crash recovery, remote delivery, native device delivery or an unattended workflow. Browser capability trials remain opt-in. This update does not install the skill elsewhere, publish the controller, create a tag or release, merge, deploy or activate services.
+Package checks do not prove live model execution, Linux controller isolation, crash recovery, remote delivery, native device delivery or an unattended workflow. Browser capability trials remain opt-in. This update does not install the skill elsewhere, publish the controller, create a tag or release, deploy or activate services.
