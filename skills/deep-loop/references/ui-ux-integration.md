@@ -9,6 +9,8 @@ Deep Loop owns acceptance/delivery. Product Design owns creative design, current
 
 ## Route before frontend BUILD
 
+When design intent is unresolved, first use [Design Grill integration](design-grill-integration.md) to establish an approved brief, one design decision at a time. Reuse existing brief approval and settled targets. Brief approval does not replace the target selection, Design Contract, or proof gates below.
+
 Substantive UI uses existing context and approved acceptance to select exploration and proof. Unresolved direction follows **conditional research → Product Design alternatives/remixing → owner selection → frozen target and reusable component handoff → implementation → focused Design QA and selected checks → SHIP/readback**. A clear supplied target or established pattern reuses its existing authority. Exact-target fidelity keeps the bound Design Contract and all its pixel, structural, interaction, accessibility and responsive gates.
 
 Record the actual affected scope and endpoint in the existing brief/plan, including every substantive change. Run [ui_design.py](../scripts/ui_design.py) with a JSON request, e.g. {"surface":"ui","changes":["navigation","composition"],"mode":"REDESIGN","platform":"web"}.

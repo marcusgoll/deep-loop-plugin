@@ -3,6 +3,8 @@ import io
 import json
 import shutil
 import tempfile
+import subprocess
+import sys
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -38,6 +40,38 @@ class RecoveryReportTests(unittest.TestCase):
         self.assertEqual(report['inspection']['proofBasis'],'record_only')
         self.assertEqual(report['delivery']['liveEndpoint'],'not_inspected')
         self.assertEqual(report['completionTruth'],'not_authenticated_by_report')
+        self.assertEqual(report['checkpointRevision'], deep_loop.checkpoint_revision(self.checkpoint))
+
+    def test_live_or_leftover_lock_does_not_establish_owner_liveness(self):
+        process = subprocess.Popen([sys.executable, '-B', '-c',
+            "import deep_loop as d,sys; from pathlib import Path\n"
+            "with d.session_write(Path(sys.argv[1])):\n"
+            " print('ready',flush=True); input()\n", str(self.checkpoint)],
+            cwd=Path(deep_loop.__file__).parent, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(process.stdout.readline().strip(), 'ready')
+            lock = self.root / (self.checkpoint.name + '.writer.lock')
+            lock_bytes = lock.read_bytes()  # Windows ownership must not block archive hashing.
+            before = deep_loop.file_manifest(self.checkpoint)
+            root_entries = sorted(p.name for p in self.root.iterdir())
+            code, report = self.report()
+            self.assertEqual(code, 0)
+            self.assertEqual(report['inspection']['ownership'], 'unknown')
+            self.assertEqual(report['inspection']['ownerLiveness'], 'not_inspected')
+            self.assertEqual(deep_loop.file_manifest(self.checkpoint), before)
+            self.assertEqual(sorted(p.name for p in self.root.iterdir()), root_entries)
+            process.kill(); process.wait(timeout=10)
+            code, recovered = self.report()
+            self.assertEqual(code, 0)
+            self.assertEqual(recovered['checkpointRevision'], report['checkpointRevision'])
+            self.assertEqual(lock.read_bytes(), lock_bytes)
+            self.assertEqual(deep_loop.file_manifest(self.checkpoint), before)
+            self.assertEqual(sorted(p.name for p in self.root.iterdir()), root_entries)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=10)
     def test_stage_due_and_skipped_checks_cannot_pass(self):
         self.state['phase']='REVIEW'
         self.state['checks'].append({'name':'Closeout','stage':'closeout','status':'pending'})

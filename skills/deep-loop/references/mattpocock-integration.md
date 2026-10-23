@@ -1,6 +1,13 @@
 # Matt Pocock workflow integration
 
-The worker-selection section also applies to ordinary Deep Loop delegation. The other sections apply when the user chooses Matt's workflows alongside deep-loop. Read the selected installed skill before execution; its current instructions and the task's authority govern its work. Resolve named skills from the current catalog. When an instruction names a Skill tool unavailable in this runtime, read and apply the installed source after its invocation requirements are satisfied.
+- [Choose the execution owner](#choose-the-execution-owner)
+- [PR body writing](#pr-body-writing)
+- [Handoff and return](#handoff-and-return)
+- [Worker selection, models and concurrency](#worker-selection-models-and-concurrency)
+- [Return to delivery](#return-to-delivery)
+- [Optional retrospective](#optional-retrospective)
+
+The worker-selection section also applies to ordinary Deep Loop delegation. PR body writing also applies to ordinary Deep Loop delivery. The remaining sections apply when the user chooses Matt's workflows alongside deep-loop. Read the selected installed skill before execution; its current instructions and the task's authority govern its work. Resolve named skills from the current catalog. When an instruction names a Skill tool unavailable in this runtime, read and apply the installed source after its invocation requirements are satisfied.
 
 ## Choose the execution owner
 
@@ -16,7 +23,40 @@ Select one implementation controller for an effort. Deep-loop owns the overall a
 
 Native decision mapping and coordinated delivery are part of Deep Loop and do not invoke Matt's user-only entry points. When the coordinated path applies, its verified host-controller, approval, and evidence requirements remain in force with any selected implementation owner.
 
-Matt's user-invoked entry points use `disable-model-invocation: true`. Deep-loop may suggest them; the user selects/invokes them. Naming deep-loop alone does not invoke those entry points, and one user-invoked skill does not automatically fire another. Once selected, use its model-invoked disciplines (`tdd`, `codebase-design`, `diagnosing-bugs`, `code-review`, `pr`) when applicable. Missing setup or unresolved test seams are handoff gaps to resolve under the selected skill, rather than inventing tracker configuration or test authority.
+Matt's user-invoked entry points use `disable-model-invocation: true`. Deep-loop may suggest them; the user selects/invokes them. Naming deep-loop alone does not invoke those entry points, and one user-invoked skill does not automatically fire another. Once selected, use its model-invoked disciplines (`tdd`, `codebase-design`, `diagnosing-bugs`, `code-review`, `pr`) when applicable. The `pr` discipline can also apply directly under PR body writing below; it needs no separate workflow selection. Missing setup or unresolved test seams are handoff gaps to resolve under the selected skill, rather than inventing tracker configuration or test authority.
+
+## PR body writing
+
+When Deep Loop writes or updates a PR body, read and apply the current installed `mattpocock-skills:pr` skill (Matt Pocock package; source credits Dex Horthy / Humanlayer `show-me`). This applies to ordinary direct delivery as well as selected implementation controllers. Resolve it from the current catalog; do not bind to a plugin cache version or select a user-only workflow.
+
+Keep prose brief, skip preambles, and use the project's `GLOSSARY.md` terms when present. Use the smallest useful diagram, diff sketch, pseudocode, or tree for the summary. Place it next to the text it supports. Retain required repository template fields and explicit user formats; fit the summary, evidence, and merge risk into that structure. If no overriding format applies, use:
+
+````markdown
+## Summary
+
+<smallest useful diagram, diff sketch, or tree>
+
+## Evidence
+
+- **Before:** <observed screenshot, output, or failing check>
+  **After:** <observed screenshot, output, or passing check>
+
+## Merge Danger
+
+**Door:** <one-way or two-way>
+
+<brief reason when needed>
+
+**Blast Radius:** <one-word scope>
+
+<brief impact when needed>
+````
+
+Use actual before/after evidence for the current change. Screenshots help for visual changes; executed checks or output help for behavior changes. Link the retained evidence and identify the tested revision/environment when needed. If a baseline or check is unavailable, state that gap and the available proof. Do not invent a failing run, screenshot, result, or CI success to fill the template. Required missing acceptance proof still blocks delivery under Deep Loop's existing gates.
+
+Classify the door by the actual cost of reversal. Destructive or hard-to-reverse effects can be one-way even when code can be reverted. Describe the potential affected scope, including consumers and data when relevant. Recheck the body after scope or evidence changes.
+
+If the installed PR skill is unavailable, use this retained format and report the missing source. It is a writing discipline only: drafting a body grants no authority to create or update a remote PR, push, merge, release, or deploy. Those actions retain the agreed endpoint and repository gates. Local-only work needs no PR body unless requested.
 
 ## Handoff and return
 

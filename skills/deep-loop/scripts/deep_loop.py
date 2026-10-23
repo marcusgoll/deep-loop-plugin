@@ -3,6 +3,8 @@
 import argparse
 import proof_binding
 from contextlib import contextmanager, redirect_stdout, nullcontext
+from contextvars import ContextVar
+from functools import wraps
 import io
 import datetime
 import graphlib
@@ -10,6 +12,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import stat
@@ -17,6 +20,79 @@ import subprocess
 import sys
 import tempfile
 import uuid
+
+
+_writer = ContextVar('checkpoint_writers', default=())
+
+
+def _checkpoint_records(path):
+    return {name: hashlib.sha256((path / name).read_bytes()).hexdigest()
+            if (path / name).is_file() else None
+            for name in ('state.json', 'plan.md', 'verification.json', 'debt.md')}
+
+
+def _record_revision(records):
+    return hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()
+
+
+def checkpoint_revision(path):
+    """Content revision of authoritative records, independent of pointer and lock files."""
+    return _record_revision(_checkpoint_records(path))
+
+
+def _checked_writer(path):
+    path = Path(path).resolve()
+    owner = next((writer for writer in _writer.get() if writer['path'] == path), None)
+    if owner is not None and checkpoint_revision(path) != owner['revision']:
+        raise ValueError('Checkpoint changed during mutation; retain current bytes and inspect before retrying.')
+    return owner
+
+
+@contextmanager
+def session_write(path, expected_revision=None):
+    """Own one local mutation with a kernel lock; never infer liveness from its file."""
+    path = Path(path).resolve()
+    # Keep the inode outside checkpoint snapshots; never unlink a reusable lock.
+    with (path.parent / (path.name + '.writer.lock')).open('a+b') as stream:
+        if os.name == 'nt':
+            import msvcrt
+            if os.fstat(stream.fileno()).st_size == 0:
+                stream.write(b'\0'); stream.flush()
+            # Lock beyond the sentinel so Windows can still copy/hash included lock files.
+            stream.seek(1 << 31)
+            try:
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                raise ValueError('Session writer conflict; inspect actual ownership before retrying.') from error
+        elif os.name == 'posix':
+            import fcntl
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise ValueError('Session writer conflict; inspect actual ownership before retrying.') from error
+        else:
+            raise ValueError('Local session locking is unsupported on this platform.')
+        records = _checkpoint_records(path)
+        revision = _record_revision(records)
+        if expected_revision is not None and expected_revision != revision:
+            raise ValueError('Checkpoint revision differs; inspect current records before retrying.')
+        token = _writer.set(_writer.get() + ({'path': path, 'records': records, 'revision': revision},))
+        try:
+            yield revision
+        finally:
+            _writer.reset(token)
+        # Closing the descriptor releases ownership even after process termination.
+
+
+def session_mutation(function):
+    @wraps(function)
+    def guarded(args):
+        path = resolve(args)
+        with session_write(path, getattr(args, 'expected_revision', None)):
+            result = function(argparse.Namespace(**{**vars(args), 'path': str(path), 'session': None}))
+            _checked_writer(path)
+            return result
+    return guarded
 
 
 def write_json(path, data):
@@ -29,7 +105,13 @@ def write_json(path, data):
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+        owner = _checked_writer(path.parent) if path.name == 'state.json' else None
+        written = hashlib.sha256(temporary.read_bytes()).hexdigest() if owner is not None else None
         os.replace(temporary, path)
+        if owner is not None:
+            owner['records']['state.json'] = written
+            owner['revision'] = _record_revision(owner['records'])
+            _checked_writer(owner['path'])
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
@@ -92,7 +174,7 @@ def exclude_checkpoints(root):
         raise ValueError(result.stderr.strip())
     path = root / result.stdout.strip()
     existing = path.read_bytes() if path.exists() else b''
-    missing = [p for p in (b'.deep-*/', b'.deep-current.json') if p not in existing.splitlines()]
+    missing = [p for p in (b'.deep-*/', b'.deep-current.json', b'.deep-*.writer.lock') if p not in existing.splitlines()]
     if missing:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open('ab') as stream:
@@ -107,6 +189,13 @@ def init(args):
     if len(session_id) != 8 or not session_id.isalnum():
         raise ValueError('Session ID must be eight letters or digits.')
     exclude_checkpoints(root)
+    with session_write(root / f'.deep-{session_id}'):
+        return _init(argparse.Namespace(**{**vars(args), 'session': session_id}))
+
+
+def _init(args):
+    root = Path(args.root).resolve()
+    session_id = args.session
     path = root / f'.deep-{session_id}'
     path.mkdir()  # Never overwrite an existing checkpoint.
     write_json(path / 'state.json', {
@@ -228,6 +317,7 @@ def contract_semantics_sha256(contract):
     return hashlib.sha256(payload.encode('utf-8')).hexdigest()
 
 
+@session_mutation
 def bind_contract(args):
     path = resolve(args)
     state = read_json(path / 'state.json')
@@ -285,6 +375,7 @@ def bind_contract(args):
     return 0
 
 
+@session_mutation
 def refresh_contract(args):
     """Refresh mutable contract run status without invalidating unchanged acceptance evidence."""
     path = resolve(args)
@@ -582,8 +673,102 @@ def task_records(state):
     return tasks, by_id
 
 
+def queue_selection(state, tasks, by_id):
+    """Validate declared selection inputs; never observe time or mutate records."""
+    if 'queuePolicy' not in state:
+        return None
+    policy = state['queuePolicy']
+    if (not isinstance(policy, dict) or set(policy) != {'kind', 'asOf', 'agingAfterSeconds', 'evidence'}
+            or policy.get('kind') != 'outcome' or not present(policy, 'evidence')
+            or type(policy.get('agingAfterSeconds')) is not int or policy['agingAfterSeconds'] <= 0):
+        raise ValueError('queuePolicy requires outcome, UTC asOf, positive integer agingAfterSeconds and evidence.')
+
+    def utc(value, field):
+        if (not isinstance(value, str) or re.fullmatch(
+                r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|\+00:00)',
+                value) is None):
+            raise ValueError(f'{field} requires a canonical UTC timestamp YYYY-MM-DDTHH:MM:SS[.fraction](Z|+00:00).')
+        try:
+            timestamp = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+        except ValueError as error:
+            raise ValueError(f'{field} requires an explicit UTC timestamp.') from error
+        if timestamp.tzinfo is None or timestamp.utcoffset() != datetime.timedelta(0):
+            raise ValueError(f'{field} requires an explicit UTC timestamp.')
+        return timestamp
+
+    as_of = utc(policy['asOf'], 'queuePolicy.asOf')
+    metadata = {}
+    for task in tasks:
+        selected = task.get('selection', {})
+        if ('selection' in task and (not isinstance(selected, dict) or not present(selected, 'evidence')
+                or set(selected) - {'userPriority', 'blockingCorrectness', 'required', 'readySince', 'evidence'})):
+            raise ValueError(f'Invalid evidenced selection metadata: {task["id"]}')
+        for field in ('userPriority',):
+            if type(selected.get(field, 0)) is not int or selected.get(field, 0) < 0:
+                raise ValueError(f'{field} must be a nonnegative integer: {task["id"]}')
+        for field in ('blockingCorrectness', 'required'):
+            if type(selected.get(field, False)) is not bool:
+                raise ValueError(f'{field} must be a boolean: {task["id"]}')
+        age = None
+        if 'readySince' in selected:
+            age = (as_of - utc(selected['readySince'], f'{task["id"]}.readySince')).total_seconds()
+            if age < 0:
+                raise ValueError(f'readySince must not follow declared asOf: {task["id"]}')
+        metadata[task['id']] = {
+            'id': task['id'], 'userPriority': selected.get('userPriority', 0),
+            'blockingCorrectness': selected.get('blockingCorrectness', False),
+            'required': selected.get('required', False), 'ageSeconds': age,
+            'aged': age is not None and age >= policy['agingAfterSeconds'],
+        }
+    # A required descendant is recorded unfinished scope, not proof that running this
+    # task alone will make the descendant ready. Exclude cancelled chains and count once.
+    for task in tasks:
+        descendants = []
+        for other in tasks:
+            if other['status'] in ('done', 'cancelled') or not metadata[other['id']]['required']:
+                continue
+            pending = list(other.get('dependsOn', []))
+            seen = set()
+            while pending:
+                dependency = pending.pop()
+                if dependency in seen:
+                    continue
+                seen.add(dependency)
+                pending.extend(by_id[dependency].get('dependsOn', []))
+            if (task['id'] in seen and
+                    not any(by_id[dependency]['status'] == 'cancelled' for dependency in seen)):
+                descendants.append(other['id'])
+        metadata[task['id']]['potentialRequiredDescendants'] = sorted(descendants)
+    return metadata
+
+
+def rank_ready(state, ready, metadata):
+    def key(task):
+        row = metadata[task['id']]
+        age = row['ageSeconds'] if row['ageSeconds'] is not None else 0
+        urgency = ((-age, 0, 0) if row['aged'] else
+                   (-int(row['blockingCorrectness']), -len(row['potentialRequiredDescendants']), -age))
+        return (-row['userPriority'], -int(row['aged']), *urgency, task['id'])
+    ready.sort(key=key)
+    return {
+        'policy': 'outcome', 'basis': 'record_only', 'asOf': state['queuePolicy']['asOf'],
+        'agingAfterSeconds': state['queuePolicy']['agingAfterSeconds'],
+        'ranking': [dict(metadata[t['id']], reason=(
+            'Higher userPriority first; aged tasks precede urgency tiers within that priority; '
+            'aged tasks use oldest declared age first; otherwise blocking correctness, '
+            'potential unfinished required descendants, declared age, then stable task ID.')) for t in ready],
+        'limitations': [
+            'Snapshot eligibility and priority metadata do not establish live readiness, authority or ownership; inspect before action.',
+            'Declared asOf and readySince require fresh coordinator evidence of continuous eligibility; missing age is unavailable.',
+            'Aging never overrides user priority or hard gates; unknown/stale ages or persistent higher user priority prevent a starvation-freedom guarantee.',
+            'Potential required descendants exclude cancelled prerequisite chains; their recorded scope does not prove immediate readiness, verified dependency acceptance or authority.',
+        ],
+    }
+
+
 def task_queue(state):
     tasks, by_id = task_records(state)
+    metadata = queue_selection(state, tasks, by_id)
     ready, waiting = [], []
     for task in tasks:
         if task['status'] in ('done', 'cancelled'):
@@ -606,8 +791,11 @@ def task_queue(state):
             waiting.append({'task': task, 'reasons': reasons})
         else:
             ready.append(task)
-    return {'queueState': ('untracked' if not tasks else 'ready' if ready else 'waiting' if waiting else 'terminal'),
-            'ready': ready, 'waiting': waiting}
+    result = {'queueState': ('untracked' if not tasks else 'ready' if ready else 'waiting' if waiting else 'terminal'),
+              'ready': ready, 'waiting': waiting}
+    if metadata is not None:
+        result['selection'] = rank_ready(state, ready, metadata)
+    return result
 
 
 def scan(root):
@@ -735,6 +923,7 @@ def _recovery_report(args):
                 if item.is_file() else None for item in observed}
 
     before = fingerprint()
+    revision = checkpoint_revision(path)
     state = read_json(path / 'state.json')
     if not isinstance(state, dict):
         raise ValueError('Checkpoint state must be an object.')
@@ -819,6 +1008,7 @@ def _recovery_report(args):
     local_ship = not problems and gates['ship']['status'] == 'recorded_satisfied'
     report = {
         'schemaVersion': 1, 'checkpoint': str(path), 'sessionId': state.get('sessionId'),
+        'checkpointRevision': revision,
         'recorded': {'schemaVersion': version, 'phase': phase, 'active': state.get('active'),
                      'complete': state.get('complete'), 'task': state.get('task')},
         'inspection': {'scope': 'local retained evidence only', 'checkpointIdentity': before,
@@ -837,7 +1027,7 @@ def _recovery_report(args):
         'nextSafeAction': ('Inspect the listed blockers and current authority before changing or resuming this checkpoint.'
                            if blockers else 'Inspect cited evidence, endpoint truth, and ownership before any authorized next action.'),
     }
-    if fingerprint() != before:
+    if fingerprint() != before or checkpoint_revision(path) != revision:
         raise ValueError('Checkpoint or locator changed during inspection; discard this report and inspect again.')
     if getattr(args, 'json', False):
         print(json.dumps(report, indent=2))
@@ -854,6 +1044,7 @@ def _recovery_report(args):
     return int(bool(blockers))
 
 
+@session_mutation
 def complete_session(args):
     """Validate SHIP against one preimage, then atomically close that checkpoint."""
     root = Path(args.root).resolve()
@@ -871,11 +1062,10 @@ def complete_session(args):
         return 1
     if validate(argparse.Namespace(root=str(root), path=str(path), session=None, stage='ship', mode='fail')):
         return 1
-    with checkpoint_lock(root):
-        if state_path.read_bytes() != preimage:
-            raise ValueError('Checkpoint changed after SHIP validation; revalidate before completion.')
-        state.update(active=False, complete=True, phase='COMPLETE')
-        write_json(state_path, state)
+    if state_path.read_bytes() != preimage:
+        raise ValueError('Checkpoint changed after SHIP validation; revalidate before completion.')
+    state.update(active=False, complete=True, phase='COMPLETE')
+    write_json(state_path, state)
     closed = read_json(state_path)
     if closed.get('active') is not False or closed.get('complete') is not True or closed.get('phase') != 'COMPLETE':
         raise ValueError('Completed checkpoint readback failed.')
@@ -976,6 +1166,14 @@ def verify_archive(archive, allow_unfinalized=False):
 
 
 def preserve(args):
+    destination = Path(args.destination).resolve()
+    if any(destination.is_relative_to(Path(p).resolve()) for p in args.include):
+        raise ValueError('Included evidence cannot contain its destination archive.')
+    return _preserve(args)
+
+
+@session_mutation
+def _preserve(args):
     root, source = Path(args.root).resolve(), resolve(args)
     destination = Path(args.destination).absolute()
     state = read_json(source / 'state.json')
@@ -1102,6 +1300,16 @@ def preserve(args):
 
 
 def retire_checkpoint(args):
+    saved = read_json(Path(args.archive).resolve() / 'archive.json')
+    session_id = saved['sessionId']
+    if not isinstance(session_id, str) or len(session_id) != 8 or not session_id.isalnum():
+        raise ValueError('Invalid preserved session identity.')
+    source = Path(args.root).resolve() / f".deep-{saved['sessionId']}"
+    with session_write(source, getattr(args, 'expected_revision', None)):
+        return _retire_checkpoint(args)
+
+
+def _retire_checkpoint(args):
     archive = Path(args.archive).resolve()
     saved = verify_archive(archive)
     root = Path(args.root).resolve()
@@ -1123,8 +1331,21 @@ def retire_checkpoint(args):
 
 
 def finalize_archive(args):
+    checkpoint = Path(args.archive).resolve() / 'checkpoint'
+    with session_write(checkpoint, getattr(args, 'expected_revision', None)):
+        saved = verify_archive(Path(args.archive).resolve(), allow_unfinalized=True)
+        source = Path(saved['sourcePath'])
+        # Cooperative init cannot recreate a removed checkout; never recreate it to lock it.
+        with session_write(source) if source.parent.is_dir() else nullcontext():
+            result = _finalize_archive(args, saved)
+            _checked_writer(checkpoint)
+            _checked_writer(source)
+            print('Archived checkpoint COMPLETE; supplied closeout evidence is recorded, not authenticated by this helper.')
+            return result
+
+
+def _finalize_archive(args, saved):
     archive = Path(args.archive).resolve()
-    saved = verify_archive(archive, allow_unfinalized=True)
     if Path(saved['sourcePath']).exists():
         raise ValueError('Retire the selected live checkpoint before finalization.')
     evidence = Path(args.evidence).absolute()
@@ -1150,9 +1371,10 @@ def finalize_archive(args):
         raise ValueError('Archived SHIP requirements are not satisfied; keep incomplete.')
     state.update(active=False, complete=True, phase='COMPLETE')
     write_json(checkpoint / 'state.json', state)
-    write_json(archive / 'final.json', {'state': file_manifest(checkpoint / 'state.json'), 'evidence': expected})
+    final_state = file_manifest(checkpoint / 'state.json')
+    _checked_writer(checkpoint)
+    write_json(archive / 'final.json', {'state': final_state, 'evidence': expected})
     verify_archive(archive)
-    print('Archived checkpoint COMPLETE; supplied closeout evidence is recorded, not authenticated by this helper.')
     return 0
 
 
@@ -1369,12 +1591,16 @@ def main():
     for name in ('verify-archive', 'retire-checkpoint', 'finalize-archive'):
         command = commands.add_parser(name)
         command.add_argument('--archive', required=True)
+        if name != 'verify-archive':
+            command.add_argument('--expected-revision', help='Inspected checkpoint revision; refuse stale records')
         if name == 'finalize-archive':
             command.add_argument('--evidence', required=True)
     for name in ('status', 'recovery-report', 'use', 'validate', 'complete', 'next', 'graph', 'bind-contract', 'refresh-contract', 'preserve'):
         command = commands.add_parser(name)
         command.add_argument('--session')
         command.add_argument('--path')
+        if name in ('complete', 'bind-contract', 'refresh-contract', 'preserve'):
+            command.add_argument('--expected-revision', help='Inspected checkpoint revision; refuse stale records')
         if name == 'recovery-report':
             command.add_argument('--json', action='store_true', help='Emit read-only inspection as JSON on stdout')
         if name == 'preserve':

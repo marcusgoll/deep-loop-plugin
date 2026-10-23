@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Deep Loop read-only GitHub snapshot",
+  "type": "object",
+  "required": ["format", "head_sha", "readiness", "authorization", "unknown", "blocked"],
+  "properties": {
+    "format": {"const": "deep-loop-github-snapshot-v1"},
+    "head_sha": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "checked_head_sha": {"type": ["string", "null"]},
+    "readiness": {"enum": ["blocked", "unknown", "eligible_for_further_review"]},
+    "authorization": {"const": "not_established"},
+    "unknown": {"type": "array", "items": {"type": "string"}},
+    "blocked": {"type": "array", "items": {"type": "string"}}
+  }
+}
