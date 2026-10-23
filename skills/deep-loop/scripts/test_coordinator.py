@@ -63,6 +63,24 @@ class CoordinatorTests(unittest.TestCase):
   for proc in procs:
    out,err=proc.communicate(timeout=15);self.assertEqual(proc.returncode,0,err);results.append(json.loads(out))
   self.assertEqual(sum(result is not None for result in results),1);self.assertEqual(self.cmd('status')[0]['generation'],1)
+ def test_real_lease_clock_sampled_after_lock(self):
+  from unittest.mock import patch
+  from contextlib import redirect_stdout
+  import coordinator,io
+  self.init();out=io.StringIO()
+  argv=['coordinator',str(self.db),'lease','--worker','one','--ttl','1']
+  with patch.object(sys,'argv',argv),patch.object(coordinator.time,'time',side_effect=[100,200]),redirect_stdout(out):
+   self.assertEqual(coordinator.main(),0)
+  self.assertEqual(json.loads(out.getvalue())['deadline'],201)
+ def test_submit_expired_while_waiting_for_lock(self):
+  from unittest.mock import patch
+  from contextlib import redirect_stderr
+  import coordinator,io
+  self.init();a=self.cmd('lease','--worker','one','--now','100','--ttl','1')
+  argv=['coordinator',str(self.db),'submit','--job','a','--worker','one','--token',str(a['token']),'--result','late']
+  with patch.object(sys,'argv',argv),patch.object(coordinator.time,'time',side_effect=[100,200]),redirect_stderr(io.StringIO()):
+   self.assertEqual(coordinator.main(),1)
+  self.assertEqual(self.cmd('status')[0]['state'],'leased')
  def test_graph_reinitialization_rejected(self):
   self.init();before=self.cmd('status');self.jobs=[dict(id='other',deps=[],workspace='work/other',protected=False,authorized=False)];self.plan.write_text(json.dumps({'jobs':self.jobs}));self.cmd('init','--plan',str(self.plan),ok=False);self.assertEqual(self.cmd('status'),before)
  def test_malformed_job_rejected_cleanly(self):

@@ -1,6 +1,6 @@
 # Portable helper usage and provisioning
 
-The current package is the v0.6.1 Codex snapshot from the verified local installation. The portable commands below replace the author-specific Windows installation paths in SKILL.md and its references. They invoke the same helper with the same acceptance and authority requirements; they do not waive prerequisites or approve execution.
+The current package is the v0.6.2 Codex snapshot from the verified local installation. The portable commands below replace the author-specific Windows installation paths in SKILL.md and its references. They invoke the same helper with the same acceptance and authority requirements; they do not waive prerequisites or approve execution.
 
 From the repository root, inspect commands without installing:
 
@@ -45,3 +45,5 @@ Keep receipts outside skills/deep-loop to avoid changing the package being check
 ## Separate controller app
 
 The skill does not contain the Deep Loop Controller runtime. Controller use requires a separately provisioned app and explicit selection. Personal executable paths in the integration guide describe the maintainer installation. Discover your own app path and verify its version before use. A public app distribution is not part of this update.
+
+The JSON schemas describe record structure. The CLI validators also enforce path rules, cross-field constraints and evidence integrity. A schema pass alone does not establish executable inputs, valid proof or accepted results.

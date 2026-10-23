@@ -44,6 +44,11 @@ class TrustTests(unittest.TestCase):
   self.assertEqual(validate(self.secret,token,'a','verifier',now=101,bindings=self.bindings),'v')
   for job,role,now in [('b','verifier',101),('a','builder',101),('a','verifier',401)]:
    with self.assertRaises(ValueError):validate(self.secret,token,job,role,now=now,bindings=self.bindings)
+ def test_issued_expiry_stays_in_clock_range(self):
+  with self.assertRaises(ValueError):issue(self.secret,'v','verifier','a',now=1e15-1,ttl=2,bindings=self.bindings)
+ def test_issued_token_fits_validator(self):
+  for worker,job in [('v'*9000,'a'),('v','a'*9000)]:
+   with self.assertRaises(ValueError):issue(self.secret,worker,'verifier',job,bindings=self.bindings)
  def test_generation_binding(self):
   token=issue(self.secret,'v','verifier','a',bindings=self.bindings)
   with self.assertRaises(ValueError):validate(self.secret,token,'a','verifier',generation=2,bindings=self.bindings)
@@ -59,7 +64,7 @@ class TrustTests(unittest.TestCase):
  def test_invalid_clock(self):
   for now in [float('nan'),float('inf'),-1,10**400]:
    with self.assertRaises(ValueError):issue(self.secret,'v','verifier','a',now=now,bindings=self.bindings)
- def test_forged_reference_rejected(self):
+ def test_missing_evidence_arguments_rejected(self):
   self.submitted();self.cmd('verify','--job','a','--worker','reviewer','--token','1','--result','verified:fake',ok=False)
  def test_valid_evidence_promotes(self):
   self.submitted();args,_=proof_fixture(self.d,self.secret);self.assertEqual(self.cmd('verify','--job','a','--worker','reviewer','--token','1',*args)['state'],'proven')

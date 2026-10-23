@@ -1150,7 +1150,10 @@ def verify_archive(archive, allow_unfinalized=False):
     receipt = archive / 'final.json'
     if receipt.exists():
         final = read_json(receipt)
-        if file_manifest(checkpoint / 'state.json') != final['state'] or file_manifest(archive / 'closeout-evidence') != final['evidence']:
+        expected_plan = final.get('plan', file_manifest(archive / 'snapshot/plan.md'))
+        if (file_manifest(checkpoint / 'state.json') != final['state']
+                or file_manifest(checkpoint / 'plan.md') != expected_plan
+                or file_manifest(archive / 'closeout-evidence') != final['evidence']):
             raise ValueError('Final checkpoint or closeout evidence changed.')
     elif working.get('complete') is True and not allow_unfinalized:
         raise ValueError('Finalization was interrupted; resume finalize-archive with the same evidence.')
@@ -1373,7 +1376,7 @@ def _finalize_archive(args, saved):
     write_json(checkpoint / 'state.json', state)
     final_state = file_manifest(checkpoint / 'state.json')
     _checked_writer(checkpoint)
-    write_json(archive / 'final.json', {'state': final_state, 'evidence': expected})
+    write_json(archive / 'final.json', {'state': final_state, 'plan': file_manifest(checkpoint / 'plan.md'), 'evidence': expected})
     verify_archive(archive)
     return 0
 

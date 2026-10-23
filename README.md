@@ -6,7 +6,7 @@ This repository is being prepared as the public home of the new Codex skill. The
 
 ## Current package
 
-This repository contains the v0.6.1 Codex skill snapshot, synchronized from the verified local installation. It includes the current checkpoint, outcome-contract, local coordination, proof and fixture helpers. The separate Deep Loop Controller app is not bundled or installed by this skill.
+This repository contains the v0.6.2 Codex skill snapshot, synchronized from the verified local installation. It includes the current checkpoint, outcome-contract, local coordination, proof and fixture helpers. The separate Deep Loop Controller app is not bundled or installed by this skill.
 
 The current-skill location is [`skills/deep-loop/`](skills/deep-loop/SKILL.md), containing `SKILL.md`, references, schemas, helper scripts and behavioral tests. The package version and SHA-256 file manifest are recorded in [`release-manifest.json`](release-manifest.json). This manifest identifies bytes; it does not establish unattended runtime acceptance.
 

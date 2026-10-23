@@ -31,9 +31,14 @@ def issue(secret, worker, role, job, ttl=300, now=None, *, generation=1, binding
     fields(secret,worker,role,job,generation,bindings)
     if type(ttl) not in (int,float) or not 0 < ttl <= 3600 or not math.isfinite(ttl):
         raise ValueError("invalid ttl")
-    payload={"worker":worker,"role":role,"job":job,"generation":generation,"bindings":bindings,"exp":clock(now)+ttl}
+    issued=clock(now)
+    expiry=clock(issued+ttl)
+    if expiry<=issued:raise ValueError("ttl is below clock precision")
+    payload={"worker":worker,"role":role,"job":job,"generation":generation,"bindings":bindings,"exp":expiry}
     raw=json.dumps(payload,sort_keys=True,separators=(",",":"),allow_nan=False).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")+"."+hmac.new(secret,raw,hashlib.sha256).hexdigest()
+    token=base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")+"."+hmac.new(secret,raw,hashlib.sha256).hexdigest()
+    if len(token)>8192:raise ValueError("capability exceeds token size limit")
+    return token
 
 
 def validate(secret, token, job, role, now=None, *, generation=1, bindings=None):

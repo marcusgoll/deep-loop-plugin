@@ -2,7 +2,7 @@
 name: deep-loop
 description: Use when intent needs clarification, decisions span sessions, or development needs resumable delivery or coordinated parent acceptance.
 metadata:
-  skill_version: "0.6.1"
+  skill_version: "0.6.2"
 ---
 
 

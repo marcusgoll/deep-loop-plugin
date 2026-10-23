@@ -75,6 +75,9 @@ def main():
         db=connect(a.database,initialize=a.action=='init',readonly=readonly,application_id=APPLICATION_ID,schema=DDL)
         def log(job,kind,data):db.execute('INSERT INTO events(job,kind,data) VALUES(?,?,?)',(job,kind,json.dumps(data,sort_keys=True)))
         db.execute('BEGIN' if readonly else 'BEGIN IMMEDIATE')
+        if a.now is None:now=time.time()
+        if not math.isfinite(now) or now < 0:raise ValueError('now must be finite and nonnegative')
+        if a.action=='lease' and not math.isfinite(now+a.ttl):raise ValueError('invalid deadline')
         if a.action=='init':
             if db.execute('SELECT COUNT(*) FROM jobs').fetchone()[0]:raise ValueError('graph already initialized')
             for j in jobs:
